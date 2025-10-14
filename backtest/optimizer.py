@@ -16,29 +16,89 @@ import random
 from copy import deepcopy
 
 from strategy.seller_exhaustion import SellerParams
-from core.models import BacktestParams, Timeframe
+from core.models import BacktestParams, Timeframe, minutes_to_bars
 from backtest.engine import run_backtest
 from strategy.seller_exhaustion import build_features
 
 
-# Parameter bounds for optimization
-PARAM_BOUNDS = {
-    # SellerParams
-    'ema_fast': (48, 192),           # 12h - 48h on 15m
-    'ema_slow': (336, 1344),         # 3.5d - 14d on 15m
-    'z_window': (336, 1344),         # Same range
-    'vol_z': (1.0, 3.5),             # Volume z-score threshold
-    'tr_z': (0.8, 2.0),              # True range z-score threshold
-    'cloc_min': (0.4, 0.8),          # Close location in candle
-    'atr_window': (48, 192),         # ATR lookback
+# Time-based bounds (in minutes) - universal across timeframes
+TIME_BOUNDS = {
+    'ema_fast_minutes': (720, 2880),      # 12h - 48h
+    'ema_slow_minutes': (5040, 20160),    # 3.5d - 14d
+    'z_window_minutes': (5040, 20160),    # 3.5d - 14d
+    'atr_window_minutes': (720, 2880),    # 12h - 48h
+    'max_hold_minutes': (720, 2880),      # 12h - 48h
     
-    # BacktestParams
-    'atr_stop_mult': (0.3, 1.5),     # Stop loss multiplier
-    'reward_r': (1.5, 4.0),          # Risk:Reward ratio
-    'max_hold': (48, 192),           # Max bars to hold (12h - 48h)
-    'fee_bp': (2.0, 10.0),           # Trading fees in basis points
-    'slippage_bp': (2.0, 10.0),      # Slippage in basis points
+    # Universal thresholds (not time-dependent)
+    'vol_z': (1.0, 3.5),
+    'tr_z': (0.8, 2.0),
+    'cloc_min': (0.4, 0.8),
+    'atr_stop_mult': (0.3, 1.5),
+    'reward_r': (1.5, 4.0),
+    'fee_bp': (2.0, 10.0),
+    'slippage_bp': (2.0, 10.0),
 }
+
+
+def get_param_bounds_for_timeframe(tf: Timeframe) -> Dict[str, Tuple[float, float]]:
+    """
+    Get optimization bounds appropriate for a specific timeframe.
+    
+    Converts time-based bounds to bar-based bounds for the given timeframe.
+    This ensures the optimizer explores the same TIME RANGES regardless of timeframe.
+    
+    Args:
+        tf: Timeframe to optimize for
+    
+    Returns:
+        Dict mapping parameter name to (min, max) bounds in bars
+    
+    Example:
+        For 15m timeframe:
+            ema_fast: (720min, 2880min) → (48 bars, 192 bars)
+        For 1m timeframe:
+            ema_fast: (720min, 2880min) → (720 bars, 2880 bars)
+        
+        Same time range, different bar counts!
+    """
+    bounds = {}
+    
+    # Convert time-based bounds to bars
+    bounds['ema_fast'] = (
+        minutes_to_bars(TIME_BOUNDS['ema_fast_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['ema_fast_minutes'][1], tf)
+    )
+    bounds['ema_slow'] = (
+        minutes_to_bars(TIME_BOUNDS['ema_slow_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['ema_slow_minutes'][1], tf)
+    )
+    bounds['z_window'] = (
+        minutes_to_bars(TIME_BOUNDS['z_window_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['z_window_minutes'][1], tf)
+    )
+    bounds['atr_window'] = (
+        minutes_to_bars(TIME_BOUNDS['atr_window_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['atr_window_minutes'][1], tf)
+    )
+    bounds['max_hold'] = (
+        minutes_to_bars(TIME_BOUNDS['max_hold_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['max_hold_minutes'][1], tf)
+    )
+    
+    # Copy universal thresholds as-is
+    bounds['vol_z'] = TIME_BOUNDS['vol_z']
+    bounds['tr_z'] = TIME_BOUNDS['tr_z']
+    bounds['cloc_min'] = TIME_BOUNDS['cloc_min']
+    bounds['atr_stop_mult'] = TIME_BOUNDS['atr_stop_mult']
+    bounds['reward_r'] = TIME_BOUNDS['reward_r']
+    bounds['fee_bp'] = TIME_BOUNDS['fee_bp']
+    bounds['slippage_bp'] = TIME_BOUNDS['slippage_bp']
+    
+    return bounds
+
+
+# Default bounds for backward compatibility (15m timeframe)
+PARAM_BOUNDS = get_param_bounds_for_timeframe(Timeframe.m15)
 
 
 @dataclass
@@ -57,19 +117,24 @@ class Individual:
 class Population:
     """Manages a population of individuals for evolutionary optimization."""
     
-    def __init__(self, size: int = 24, seed_individual: Individual = None):
+    def __init__(self, size: int = 24, seed_individual: Individual = None, timeframe: Timeframe = Timeframe.m15):
         """
         Initialize population.
         
         Args:
             size: Population size
             seed_individual: Optional starting point (e.g., current params)
+            timeframe: Timeframe to optimize for (affects parameter bounds)
         """
         self.size = size
         self.individuals: List[Individual] = []
         self.generation = 0
         self.best_ever: Individual = None
         self.history: List[Dict[str, Any]] = []
+        self.timeframe = timeframe
+        
+        # Get timeframe-specific bounds
+        self.bounds = get_param_bounds_for_timeframe(timeframe)
         
         # Initialize population
         if seed_individual:
@@ -84,25 +149,25 @@ class Population:
                 self.individuals.append(self._create_random_individual())
     
     def _create_random_individual(self) -> Individual:
-        """Create an individual with random parameters within bounds."""
+        """Create an individual with random parameters within timeframe-appropriate bounds."""
         # Random SellerParams
         seller_params = SellerParams(
-            ema_fast=random.randint(*PARAM_BOUNDS['ema_fast']),
-            ema_slow=random.randint(*PARAM_BOUNDS['ema_slow']),
-            z_window=random.randint(*PARAM_BOUNDS['z_window']),
-            vol_z=random.uniform(*PARAM_BOUNDS['vol_z']),
-            tr_z=random.uniform(*PARAM_BOUNDS['tr_z']),
-            cloc_min=random.uniform(*PARAM_BOUNDS['cloc_min']),
-            atr_window=random.randint(*PARAM_BOUNDS['atr_window']),
+            ema_fast=random.randint(*self.bounds['ema_fast']),
+            ema_slow=random.randint(*self.bounds['ema_slow']),
+            z_window=random.randint(*self.bounds['z_window']),
+            vol_z=random.uniform(*self.bounds['vol_z']),
+            tr_z=random.uniform(*self.bounds['tr_z']),
+            cloc_min=random.uniform(*self.bounds['cloc_min']),
+            atr_window=random.randint(*self.bounds['atr_window']),
         )
         
         # Random BacktestParams
         backtest_params = BacktestParams(
-            atr_stop_mult=random.uniform(*PARAM_BOUNDS['atr_stop_mult']),
-            reward_r=random.uniform(*PARAM_BOUNDS['reward_r']),
-            max_hold=random.randint(*PARAM_BOUNDS['max_hold']),
-            fee_bp=random.uniform(*PARAM_BOUNDS['fee_bp']),
-            slippage_bp=random.uniform(*PARAM_BOUNDS['slippage_bp']),
+            atr_stop_mult=random.uniform(*self.bounds['atr_stop_mult']),
+            reward_r=random.uniform(*self.bounds['reward_r']),
+            max_hold=random.randint(*self.bounds['max_hold']),
+            fee_bp=random.uniform(*self.bounds['fee_bp']),
+            slippage_bp=random.uniform(*self.bounds['slippage_bp']),
         )
         
         return Individual(

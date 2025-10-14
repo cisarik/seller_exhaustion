@@ -7,6 +7,7 @@ import pandas as pd
 
 from data.cleaning import clean_ohlcv
 from data.polygon_client import AggregationProgress, PolygonClient
+from data.cache import DataCache
 from core.models import Timeframe
 
 
@@ -19,8 +20,9 @@ class DownloadEstimate:
 
 
 class DataProvider:
-    def __init__(self):
+    def __init__(self, use_cache: bool = True):
         self.poly = PolygonClient()
+        self.cache = DataCache() if use_cache else None
 
     async def fetch_bars(
         self,
@@ -32,9 +34,12 @@ class DataProvider:
         *,
         progress_callback: Optional[Callable[[AggregationProgress], Awaitable[None] | None]] = None,
         estimate: Optional[DownloadEstimate] = None,
+        force_download: bool = False,
     ) -> pd.DataFrame:
         """
         Fetch bars with specified timeframe and return as pandas DataFrame.
+        
+        Automatically uses cached data if available, unless force_download=True.
         
         Args:
             ticker: Ticker symbol (e.g., X:ADAUSD)
@@ -42,10 +47,18 @@ class DataProvider:
             to: End date (YYYY-MM-DD)
             multiplier: Timeframe multiplier (e.g., 15, 30, 60)
             timespan: Timeframe unit (minute, hour, day)
+            force_download: If True, skip cache and download fresh data
         
         Returns:
             DataFrame with OHLCV data and UTC DatetimeIndex
         """
+        # Try cache first (if enabled and not forcing download)
+        if self.cache and not force_download:
+            cached_df = self.cache.get_cached_data(ticker, from_, to, multiplier, timespan)
+            if cached_df is not None:
+                return cached_df
+        
+        # Download from API
         bars = await self.poly.aggregates(
             ticker,
             from_,
@@ -67,6 +80,11 @@ class DataProvider:
         # Preserve the cleaning summary on the returned frame so consumers can inspect it.
         cleaned = df[["open", "high", "low", "close", "volume"]]
         cleaned.attrs["cleaning_summary"] = summary
+        
+        # Cache the cleaned data
+        if self.cache:
+            self.cache.save_cached_data(cleaned, ticker, from_, to, multiplier, timespan)
+        
         return cleaned
 
     async def fetch_15m(self, ticker: str, from_: str, to: str) -> pd.DataFrame:

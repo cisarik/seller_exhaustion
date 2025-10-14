@@ -97,11 +97,27 @@ class SettingsDialog(QDialog):
         for key, (mult, unit, label) in TIMEFRAMES.items():
             self.timeframe_combo.addItem(f"{label} ({key})", key)
         self.timeframe_combo.setCurrentText("15 minutes (15m)")
+        
+        # Connect timeframe change to auto-adjust parameters
+        self.timeframe_combo.currentIndexChanged.connect(self.on_timeframe_changed)
+        
         tf_layout.addRow("Timeframe:", self.timeframe_combo)
+        
+        # Auto-adjust checkbox
+        self.auto_adjust_params = QCheckBox("Auto-adjust strategy parameters for timeframe")
+        self.auto_adjust_params.setChecked(True)
+        self.auto_adjust_params.setToolTip(
+            "When enabled, automatically adjusts EMA, Z-Score, and ATR windows\n"
+            "to maintain consistent time periods across different timeframes.\n"
+            "Example: 24h lookback = 96 bars on 15m, but 1440 bars on 1m."
+        )
+        tf_layout.addRow("", self.auto_adjust_params)
         
         info_label = QLabel(
             "💡 Tip: Shorter timeframes (1m-5m) generate more signals but may be noisier.\n"
-            "Recommended: Start with 15m or 1h for balanced signal quality."
+            "Recommended: Start with 15m or 1h for balanced signal quality.\n\n"
+            "⚠️ IMPORTANT: Strategy parameters MUST scale with timeframe!\n"
+            "Use auto-adjust or manually configure time-based parameters."
         )
         info_label.setWordWrap(True)
         info_label.setProperty("variant", "secondary")
@@ -313,6 +329,17 @@ class SettingsDialog(QDialog):
         self.show_exits.setChecked(True)
         indicators_layout.addWidget(self.show_exits)
         
+        self.show_fib_ladders = QCheckBox("📊 Fibonacci Exit Ladders (Rainbow)")
+        self.show_fib_ladders.setChecked(True)
+        self.show_fib_ladders.setToolTip(
+            "Show beautiful Fibonacci retracement levels for each trade:\n"
+            "- Swing high marker (⭐ star)\n"
+            "- Rainbow-colored levels (38.2% blue → 100% red)\n"
+            "- Golden Ratio (61.8%) highlighted\n"
+            "- Actual exit marked with bold line"
+        )
+        indicators_layout.addWidget(self.show_fib_ladders)
+        
         group.setLayout(indicators_layout)
         layout.addWidget(group)
         
@@ -453,6 +480,8 @@ class SettingsDialog(QDialog):
     
     def load_from_settings(self):
         """Load UI values from saved settings."""
+        self._loading_settings = True  # Prevent auto-adjust during load
+        
         # Timeframe
         tf_key = f"{settings.timeframe}{settings.timeframe_unit[0]}"  # e.g., "15m"
         for i in range(self.timeframe_combo.count()):
@@ -507,6 +536,88 @@ class SettingsDialog(QDialog):
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
         self.show_exits.setChecked(settings.chart_exits)
+        
+        self._loading_settings = False  # Re-enable auto-adjust
+    
+    def on_timeframe_changed(self, index):
+        """Handle timeframe change and optionally auto-adjust parameters."""
+        if self._loading_settings:
+            return  # Skip during initial load
+        
+        if not self.auto_adjust_params.isChecked():
+            return  # User disabled auto-adjust
+        
+        # Get selected timeframe
+        tf_key = self.timeframe_combo.currentData()
+        mult, unit, label = TIMEFRAMES[tf_key]
+        
+        # Map to Timeframe enum
+        tf_map = {"1m": Timeframe.m1, "3m": Timeframe.m3, "5m": Timeframe.m5, 
+                  "10m": Timeframe.m10, "15m": Timeframe.m15}
+        tf = tf_map.get(tf_key, Timeframe.m15)
+        
+        # Get defaults for this timeframe
+        try:
+            config = get_defaults_for_timeframe(tf)
+            bar_counts = config.get_bar_counts()
+            
+            # Ask user for confirmation
+            reply = QMessageBox.question(
+                self,
+                "Auto-Adjust Parameters",
+                f"<h3>Adjust parameters for {label} timeframe?</h3>"
+                f"<p>Current timeframe requires different parameter values to maintain "
+                f"consistent time periods (e.g., 24 hours for EMA Fast).</p>"
+                f"<h4>Proposed adjustments:</h4>"
+                f"<table>"
+                f"<tr><td><b>EMA Fast:</b></td><td>{self.ema_fast.value()} bars → {bar_counts['ema_fast_bars']} bars</td><td>(24 hours)</td></tr>"
+                f"<tr><td><b>EMA Slow:</b></td><td>{self.ema_slow.value()} bars → {bar_counts['ema_slow_bars']} bars</td><td>(7 days)</td></tr>"
+                f"<tr><td><b>Z-Window:</b></td><td>{self.z_window.value()} bars → {bar_counts['z_window_bars']} bars</td><td>(7 days)</td></tr>"
+                f"<tr><td><b>ATR Window:</b></td><td>{self.atr_window.value()} bars → {bar_counts['atr_window_bars']} bars</td><td>(24 hours)</td></tr>"
+                f"<tr><td><b>Max Hold:</b></td><td>{self.max_hold.value()} bars → {bar_counts['max_hold_bars']} bars</td><td>({config.max_hold_minutes//60} hours)</td></tr>"
+                f"</table>"
+                f"<p><b>Click Yes</b> to apply these adjustments.<br>"
+                f"<b>Click No</b> to keep current values (not recommended).</p>",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Apply adjustments
+                self.ema_fast.setValue(bar_counts['ema_fast_bars'])
+                self.ema_slow.setValue(bar_counts['ema_slow_bars'])
+                self.z_window.setValue(bar_counts['z_window_bars'])
+                self.atr_window.setValue(bar_counts['atr_window_bars'])
+                self.max_hold.setValue(bar_counts['max_hold_bars'])
+                
+                # Also adjust costs if significantly different
+                if config.fee_bp != self.fee_bp.value() or config.slippage_bp != self.slippage_bp.value():
+                    self.fee_bp.setValue(config.fee_bp)
+                    self.slippage_bp.setValue(config.slippage_bp)
+                
+                QMessageBox.information(
+                    self,
+                    "Parameters Adjusted",
+                    f"✓ Parameters have been adjusted for {label} timeframe.\n\n"
+                    f"All time periods remain consistent (24h short-term, 7d long-term).\n"
+                    f"Remember to save settings before closing!"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Parameters Not Adjusted",
+                    "⚠️ Using inappropriate parameters for this timeframe may lead to:\n"
+                    "- Poor signal quality\n"
+                    "- Inconsistent backtest results\n"
+                    "- Failed optimizations\n\n"
+                    "Consider using time-based parameters or enabling auto-adjust.\n"
+                    "See TIMEFRAME_SCALING_GUIDE.md for details."
+                )
+        
+        except Exception as e:
+            print(f"Error auto-adjusting parameters: {e}")
+            import traceback
+            traceback.print_exc()
     
     def save_settings(self):
         """Save all settings to .env file."""
@@ -651,7 +762,7 @@ class SettingsDialog(QDialog):
                     f"| Bars fetched: {bars_text} | {remaining_text}"
                 )
             
-            # Fetch data
+            # Fetch data (force download to get fresh data when user explicitly clicks download)
             df = await self.dp.fetch_bars(
                 "X:ADAUSD",
                 from_date,
@@ -660,6 +771,7 @@ class SettingsDialog(QDialog):
                 unit,
                 progress_callback=on_progress,
                 estimate=estimate,
+                force_download=True,
             )
             self.progress_bar.setValue(self.progress_bar.maximum())
             
@@ -795,7 +907,8 @@ class SettingsDialog(QDialog):
             'volume': self.show_volume.isChecked(),
             'signals': self.show_signals.isChecked(),
             'entries': self.show_entries.isChecked(),
-            'exits': self.show_exits.isChecked()
+            'exits': self.show_exits.isChecked(),
+            'fib_ladders': self.show_fib_ladders.isChecked(),
         }
     
     async def cleanup(self):

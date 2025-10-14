@@ -18,9 +18,13 @@ from app.widgets.candle_view import CandleChartWidget
 from app.widgets.settings_dialog import SettingsDialog
 from app.widgets.stats_panel import StatsPanel
 from app.widgets.strategy_editor import StrategyEditor
-from strategy.seller_exhaustion import build_features
+from strategy.seller_exhaustion import build_features, SellerParams
+from backtest.engine import BacktestParams
 from core.models import Timeframe
 from backtest.engine import run_backtest
+from data.provider import DataProvider
+from data.cache import DataCache
+from config.settings import settings
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +40,8 @@ class MainWindow(QMainWindow):
         self.current_tf = Timeframe.m15
         self.settings_dialog = None
         self.strategy_editor = None
+        self.data_provider = DataProvider(use_cache=True)
+        self.cache = DataCache()
         
         self.init_ui()
     
@@ -68,7 +74,7 @@ class MainWindow(QMainWindow):
         self.progress.setMaximumWidth(300)
         self.progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("Ready - Click Settings to download data")
+        self.statusBar().showMessage("Initializing...")
     
     def create_toolbar(self):
         """Create main toolbar with actions."""
@@ -437,6 +443,105 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Warning: Could not restore window state: {e}")
     
+    async def try_load_cached_data(self):
+        """Try to load cached data from last session."""
+        try:
+            # Get last download parameters from settings
+            ticker = settings.last_ticker
+            from_ = settings.last_date_from
+            to = settings.last_date_to
+            tf_mult = int(settings.timeframe)
+            tf_unit = settings.timeframe_unit
+            
+            # Check if cache exists
+            has_cache = self.cache.has_cached_data(ticker, from_, to, 1, "minute")
+            
+            if not has_cache:
+                self.statusBar().showMessage(
+                    "No cached data found - Click Settings to download data"
+                )
+                return
+            
+            # Load from cache
+            self.statusBar().showMessage("Loading cached data...")
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            
+            # Fetch data (will use cache automatically)
+            df = await self.data_provider.fetch(ticker, self.current_tf, from_, to)
+            
+            if df is None or len(df) == 0:
+                self.statusBar().showMessage(
+                    "Cache empty - Click Settings to download data"
+                )
+                self.progress.setVisible(False)
+                return
+            
+            # Load strategy params from settings
+            seller_params = SellerParams(
+                ema_fast=settings.strategy_ema_fast,
+                ema_slow=settings.strategy_ema_slow,
+                z_window=settings.strategy_z_window,
+                vol_z=settings.strategy_vol_z,
+                tr_z=settings.strategy_tr_z,
+                cloc_min=settings.strategy_cloc_min,
+                atr_window=settings.strategy_atr_window,
+            )
+            
+            # Build features
+            feats = build_features(df, seller_params, self.current_tf)
+            
+            # Update chart
+            self.chart_view.feats = feats
+            self.chart_view.params = seller_params
+            self.chart_view.render_candles(feats)
+            
+            # Store data
+            self.current_data = feats
+            
+            # Load backtest params and pass to stats panel
+            bt_params = BacktestParams(
+                atr_stop_mult=settings.backtest_atr_stop_mult,
+                reward_r=settings.backtest_reward_r,
+                max_hold=settings.backtest_max_hold,
+                fee_bp=settings.backtest_fee_bp,
+                slippage_bp=settings.backtest_slippage_bp,
+            )
+            
+            self.stats_panel.load_params_from_settings(seller_params, bt_params)
+            self.stats_panel.set_current_data(feats, self.current_tf)
+            
+            # Enable backtest button
+            self.backtest_action.setEnabled(True)
+            
+            # Update status
+            signals = feats['exhaustion'].sum()
+            date_range = f"{feats.index[0].date()} to {feats.index[-1].date()}"
+            self.statusBar().showMessage(
+                f"✓ Loaded {len(feats)} bars from cache ({date_range}) | "
+                f"{signals} signals | Ready to backtest"
+            )
+            
+            # Update chart info
+            self.chart_view.info_label.setText(
+                f"📊 {ticker} {self.current_tf.value} | "
+                f"Date range: {date_range}\n"
+                f"Signals detected: {signals} | Data loaded from cache"
+            )
+            
+            print(f"✓ Auto-loaded cached data: {len(feats)} bars, {signals} signals")
+            
+        except Exception as e:
+            print(f"⚠ Could not auto-load cached data: {e}")
+            import traceback
+            traceback.print_exc()
+            self.statusBar().showMessage(
+                "Could not load cached data - Click Settings to download fresh data"
+            )
+        
+        finally:
+            self.progress.setVisible(False)
+    
     def closeEvent(self, event):
         """Save state when window is closed."""
         self.save_window_state()
@@ -447,8 +552,25 @@ class MainWindow(QMainWindow):
         # Restore window state
         self.restore_window_state()
         
-        # Note: Data auto-load removed - user must explicitly download
-        # This prevents unwanted API calls on every startup
+        # Sync timeframe dropdown with settings
+        try:
+            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15}
+            tf_mult = int(settings.timeframe)
+            
+            # If configured timeframe is not in dropdown, default to 15m
+            if tf_mult not in tf_map:
+                print(f"⚠ Configured timeframe {tf_mult}m not supported in chart dropdown, defaulting to 15m")
+                tf_mult = 15
+            
+            self.current_tf = tf_map[tf_mult]
+            self.chart_view.tf = self.current_tf
+            self.chart_view.tf_combo.setCurrentText(self.current_tf.value)
+        except Exception as e:
+            print(f"Warning: Could not sync timeframe from settings: {e}")
+            self.current_tf = Timeframe.m15
+        
+        # Try to auto-load cached data
+        await self.try_load_cached_data()
 
 
 def main():

@@ -32,38 +32,62 @@ All four conditions must be true:
 
 ## ✨ Key Features
 
-### 🎨 Strategy Editor (**NEW**)
+### 💾 Data Caching System (**NEW**)
+- **Automatic caching** of downloaded data to `.data/` directory
+- **Parquet format** for efficient storage
+- **Auto-load on startup** - no more re-downloading
+- Force refresh option when needed
+- Cache management utilities
+
+### 📏 Timeframe Scaling (**NEW**, **CRITICAL**)
+- **Time-based parameters** (24h, 7d) that auto-convert to bars
+- **Smart auto-adjustment** when changing timeframes
+- Confirmation dialog showing parameter changes
+- Prevents common mistake of using 15m parameters on 1m
+- **Example**: EMA Fast = 96 bars on 15m = 1440 bars on 1m (both = 24 hours)
+
+### 🌈 Fibonacci Ladder Visualization (**NEW**)
+- **Beautiful rainbow ladder** on chart showing exit strategy
+- Swing high marker (⭐ gold star)
+- Color-coded levels: 38.2% blue → 50% cyan → **61.8% GOLD** → 78.6% orange → 100% red
+- **Golden Ratio prominently highlighted**
+- Exit line showing actual outcome
+- Toggle in Settings → Chart Indicators
+
+### 🎨 Strategy Editor
 - Comprehensive parameter management with detailed explanations
 - **⭐ Golden Button**: One-click setup for optimal 61.8% Fibonacci target
 - Exit toggles for stop-loss, time, and TP exits
 - Save/load evolved parameters from genetic algorithm
 - Export to YAML for documentation
 
-### 📊 Fibonacci Exit System (**NEW**)
+### 📊 Fibonacci Exit System
 - Market-driven exits at natural resistance levels
 - Automatic swing high detection
 - Configurable lookback/lookahead periods
 - Exit at 38.2%, 50%, 61.8%, 78.6%, or 100% retracement
 
-### 💾 Parameter Persistence (**NEW**)
+### 💾 Parameter Persistence
 - Save configurations with metadata (generation, fitness, date)
 - Load parameter sets with one click
 - Browse saved configurations
 - Export to JSON/YAML
 
-### ⚡ GPU Acceleration (**NEW**, Optional)
+### ⚡ GPU Acceleration (Optional)
 - PyTorch/CUDA support for genetic algorithm
 - 10-100x speedup for optimization
 - Automatic CPU fallback if CUDA unavailable
 - Memory management utilities
 
-### 📈 Multi-Timeframe Support (**NEW**)
+### 📈 Multi-Timeframe Support
 - 1m, 3m, 5m, 10m, 15m timeframes
-- Bar-based and time-based parameter conversion
-- Consistent strategy across timeframes
+- **Time-based and bar-based parameter conversion**
+- **Consistent strategy behavior across all timeframes**
+- Automatic parameter scaling with user confirmation
 
 ### 🎛️ Genetic Algorithm Optimizer
 - Population-based parameter search
+- **Timeframe-aware optimization bounds**
 - Configurable mutation rate, sigma, elitism
 - Fitness evolution tracking
 - Apply best parameters to UI
@@ -122,32 +146,123 @@ poetry run python cli.py ui
 ```
 seller_exhaustion-1/
 ├── app/
-│   ├── main.py                    # Main window
+│   ├── main.py                    # Main window with auto-load
 │   ├── theme.py                   # Dark Forest theme
 │   └── widgets/
-│       ├── candle_view.py         # Candlestick chart
-│       ├── settings_dialog.py     # Settings & data download
+│       ├── candle_view.py         # Chart with Fib ladder viz 🌈
+│       ├── settings_dialog.py     # Settings with TF auto-adjust
 │       ├── stats_panel.py         # Optimization dashboard
-│       └── strategy_editor.py     # ⭐ Parameter editor (NEW)
+│       └── strategy_editor.py     # Parameter editor ⭐
 ├── backtest/
 │   ├── engine.py                  # CPU backtest with exit toggles
-│   ├── engine_gpu.py              # GPU batch accelerator (NEW)
+│   ├── engine_gpu.py              # GPU batch accelerator
 │   ├── metrics.py                 # Performance calculations
-│   ├── optimizer.py               # Genetic algorithm CPU (NEW)
-│   └── optimizer_gpu.py           # GPU optimizer (NEW)
+│   ├── optimizer.py               # GA with TF-aware bounds
+│   └── optimizer_gpu.py           # GPU optimizer
 ├── indicators/
 │   ├── local.py                   # Pandas indicators
-│   ├── gpu.py                     # PyTorch indicators (NEW)
-│   └── fibonacci.py               # Fib calculations (NEW)
+│   ├── gpu.py                     # PyTorch indicators
+│   └── fibonacci.py               # Fib retracement calculations
 ├── strategy/
 │   ├── seller_exhaustion.py      # Strategy with Fib support
-│   └── params_store.py            # Parameter persistence (NEW)
-├── data/                          # Polygon.io data fetching
+│   ├── params_store.py            # Parameter persistence
+│   └── timeframe_defaults.py     # ⭐ Timeframe scaling (NEW)
+├── data/
+│   ├── polygon_client.py          # Polygon.io API client
+│   ├── provider.py                # Data provider with cache
+│   ├── cache.py                   # ⭐ Parquet caching (NEW)
+│   └── cleaning.py                # Data cleaning utilities
 ├── core/                          # Models and utilities
 ├── config/                        # Settings management
 ├── tests/                         # 19 tests, all passing ✅
 └── cli.py                         # CLI commands
 ```
+
+---
+
+## 🔥 New Feature Highlights
+
+### 1. Data Caching - Never Re-Download Again!
+
+**Problem Solved**: Data was lost after closing the app, requiring re-download every time.
+
+**How It Works**:
+- Downloaded data automatically saved to `.data/` directory in Parquet format
+- On app startup, cached data loads automatically
+- No API calls unless you explicitly download fresh data
+
+```python
+# Automatic behind the scenes:
+# 1. Download data → Saved to .data/X_ADAUSD_2024-01-01_2024-12-31_1minute.parquet
+# 2. Close app
+# 3. Reopen app → Data loads instantly from cache!
+```
+
+### 2. Timeframe Scaling - Critical Architecture Fix! ⚠️
+
+**Problem Solved**: Parameters hardcoded for 15m didn't work on other timeframes.
+
+**Example of the Problem**:
+```
+Using 15m defaults on 1m:
+- EMA Fast = 96 bars
+  ✅ On 15m: 96 × 15min = 1440min = 24 hours (correct!)
+  ❌ On 1m:  96 × 1min = 96min = 1.6 hours (WAY TOO SHORT!)
+```
+
+**How It Works**:
+- When you change timeframe in Settings, a dialog appears:
+  ```
+  Adjust parameters for 1 minute timeframe?
+  
+  EMA Fast: 96 bars → 1440 bars (24 hours)
+  EMA Slow: 672 bars → 10080 bars (7 days)
+  
+  [Yes] [No]
+  ```
+- Click Yes → Parameters automatically scaled!
+- **All timeframes use same TIME PERIODS** (24h short-term, 7d long-term)
+- Optimization bounds also scale automatically
+
+**Timeframe Comparison**:
+| Timeframe | EMA Fast (24h) | EMA Slow (7d) | Max Hold | Style |
+|-----------|----------------|---------------|----------|-------|
+| 1m | 1440 bars | 10080 bars | 240 bars (4h) | Scalping |
+| 3m | 480 bars | 3360 bars | 160 bars (8h) | Scalping |
+| 5m | 288 bars | 2016 bars | 144 bars (12h) | Scalping |
+| 10m | 144 bars | 1008 bars | 144 bars (24h) | Intraday |
+| 15m | 96 bars | 672 bars | 96 bars (24h) | Intraday |
+
+### 3. Fibonacci Ladder Visualization - See Your Exit Strategy! 🌈
+
+**Problem Solved**: Users couldn't see WHY exits happened at specific prices.
+
+**How It Works**:
+- Beautiful rainbow-colored Fibonacci levels displayed on chart
+- Shows swing high (⭐ gold star) used for calculation
+- Color gradient: 38.2% (blue) → 50% (cyan) → **61.8% GOLD** → 78.6% (orange) → 100% (red)
+- Bold exit line shows actual outcome
+- Toggle in Settings → Chart Indicators → "📊 Fibonacci Exit Ladders"
+
+**Visual Example**:
+```
+⭐ Swing High (gold star showing Fib source)
+│
+├─ ─ ─ ─ ─ (dashed line to entry)
+│
+├────────────── 100% (RED) Full Retracement
+├────────────── 78.6% (ORANGE) Aggressive
+├══════════════ 61.8% (GOLD) ⭐ GOLDEN EXIT ← Actual exit
+├────────────── 50.0% (CYAN) Balanced
+├────────────── 38.2% (BLUE) Conservative
+│
+▲ ENTRY (green arrow)
+```
+
+**Benefits**:
+- **Transparency**: See exactly where exits come from
+- **Education**: Learn how Fibonacci retracements work
+- **Trust**: Understanding builds confidence in the system
 
 ---
 

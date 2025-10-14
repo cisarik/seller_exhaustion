@@ -10,9 +10,20 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
+from pyqtgraph import InfiniteLine, TextItem
 from strategy.seller_exhaustion import SellerParams, build_features
 from indicators.local import sma, rsi, macd
 from core.models import Timeframe
+
+
+# Fibonacci level colors (rainbow gradient)
+FIB_COLORS = {
+    0.382: '#2196F3',  # Blue - first level
+    0.500: '#00BCD4',  # Cyan - mid level
+    0.618: '#FFD700',  # GOLD - Golden Ratio (prominent!)
+    0.786: '#FF9800',  # Orange - aggressive
+    1.000: '#F44336',  # Red - full retracement
+}
 
 
 class CandlestickItem(pg.GraphicsObject):
@@ -94,7 +105,8 @@ class CandleChartWidget(QWidget):
             'volume': False,
             'signals': True,
             'entries': True,
-            'exits': True
+            'exits': True,
+            'fib_ladders': True,  # Show Fibonacci exit ladders
         }
         
         self.initUI()
@@ -163,11 +175,15 @@ class CandleChartWidget(QWidget):
     def refresh_view(self):
         """Re-render current features without any downloads."""
         if self.feats is None:
-            self.status_label.setText("No data loaded. Use Settings to download data.")
+            self.status_label.setText("Click Settings to configure and download data")
             return
         self.status_label.setText("Rendering chart...")
         self.render_candles(self.feats, self.backtest_result)
-        self.status_label.setText(f"Loaded {len(self.feats)} bars")
+        signals = self.feats['exhaustion'].sum() if 'exhaustion' in self.feats.columns else 0
+        date_range = f"{self.feats.index[0].date()} to {self.feats.index[-1].date()}"
+        self.status_label.setText(
+            f"📊 {len(self.feats)} bars | {date_range} | {signals} signals"
+        )
 
     def on_tf_changed(self, value: str):
         # Update timeframe and refresh
@@ -259,9 +275,13 @@ class CandleChartWidget(QWidget):
                 )
                 self.plot_widget.addItem(scatter)
         
-        # Mark trade entries and exits
+        # Mark trade entries, exits, and Fibonacci ladders
         if backtest_result and len(backtest_result['trades']) > 0:
             trades = backtest_result['trades']
+            
+            # Draw Fibonacci ladders FIRST (so they're behind markers)
+            if self.indicator_config.get('fib_ladders', True):
+                self.render_fibonacci_ladders(df, trades)
             
             # Buy markers (green arrows up)
             if self.indicator_config.get('entries', True):
@@ -316,6 +336,166 @@ class CandleChartWidget(QWidget):
         
         # Add legend
         self.plot_widget.addLegend()
+    
+    def render_fibonacci_ladders(self, df: pd.DataFrame, trades: pd.DataFrame):
+        """
+        Render beautiful Fibonacci exit ladders for each trade.
+        
+        Visualization:
+        - Swing high marker (star)
+        - Range line from entry (swing low) to swing high
+        - Horizontal Fibonacci levels (rainbow colors)
+        - Golden Ratio (61.8%) highlighted
+        - Actual exit marked with bold line
+        """
+        # Limit to recent trades for performance and clarity
+        recent_trades = trades.tail(20) if len(trades) > 20 else trades
+        
+        # Get signal bars with Fib data from features
+        if self.feats is None or 'fib_swing_high' not in self.feats.columns:
+            return  # No Fib data available
+        
+        for idx, trade in recent_trades.iterrows():
+            try:
+                entry_ts = pd.Timestamp(trade['entry_ts'])
+                exit_ts = pd.Timestamp(trade['exit_ts'])
+                
+                # Find the signal bar (bar before entry)
+                signal_ts = entry_ts - pd.Timedelta(minutes=15)  # Assuming 15m TF for now
+                
+                # Get Fib data from the signal bar
+                if signal_ts not in self.feats.index:
+                    continue
+                
+                signal_bar = self.feats.loc[signal_ts]
+                
+                # Check if this signal has Fib levels
+                if pd.isna(signal_bar.get('fib_swing_high')):
+                    continue  # No Fib data for this trade
+                
+                swing_high = signal_bar['fib_swing_high']
+                swing_low = signal_bar['low']  # Entry near this low
+                entry_price = trade['entry']
+                exit_price = trade['exit']
+                
+                # Convert timestamps to epoch seconds
+                entry_x = int(entry_ts.value // 1_000_000_000)
+                exit_x = int(exit_ts.value // 1_000_000_000)
+                
+                # Find swing high timestamp (look back for the actual high)
+                # For now, approximate as signal_ts - some bars
+                swing_high_x = entry_x - (3600 * 2)  # Approx 2 hours before
+                
+                # === 1. Mark Swing High (Star marker) ===
+                swing_high_scatter = pg.ScatterPlotItem(
+                    x=[swing_high_x], y=[swing_high],
+                    pen=pg.mkPen('#FFFFFF', width=2),
+                    brush=pg.mkBrush('#FFD700'),
+                    size=20, symbol='star'
+                )
+                self.plot_widget.addItem(swing_high_scatter)
+                
+                # === 2. Draw Range Line (Entry to Swing High) ===
+                # Vertical dashed line showing the retracement range
+                range_line = pg.PlotDataItem(
+                    x=[entry_x, swing_high_x],
+                    y=[entry_price, swing_high],
+                    pen=pg.mkPen('#FFD700', width=1, style=Qt.DashLine)
+                )
+                self.plot_widget.addItem(range_line)
+                
+                # === 3. Draw Fibonacci Levels ===
+                fib_levels = {
+                    0.382: signal_bar.get('fib_0382'),
+                    0.500: signal_bar.get('fib_0500'),
+                    0.618: signal_bar.get('fib_0618'),
+                    0.786: signal_bar.get('fib_0786'),
+                    1.000: signal_bar.get('fib_1000'),
+                }
+                
+                for fib_ratio, fib_price in fib_levels.items():
+                    if pd.isna(fib_price):
+                        continue
+                    
+                    color = FIB_COLORS[fib_ratio]
+                    
+                    # Golden Ratio gets special treatment
+                    if fib_ratio == 0.618:
+                        width = 3
+                        alpha = 200
+                    else:
+                        width = 1
+                        alpha = 120
+                    
+                    # Horizontal line spanning the trade duration
+                    fib_line = InfiniteLine(
+                        pos=fib_price,
+                        angle=0,  # Horizontal
+                        pen=pg.mkPen(color, width=width, alpha=alpha),
+                        movable=False
+                    )
+                    # Limit line to trade duration
+                    fib_line.setBounds([entry_x, exit_x])
+                    self.plot_widget.addItem(fib_line)
+                    
+                    # Add label showing percentage
+                    label_text = f"{fib_ratio*100:.1f}%"
+                    if fib_ratio == 0.618:
+                        label_text = f"⭐ {label_text} GOLDEN"
+                    
+                    label = TextItem(
+                        text=label_text,
+                        color=color,
+                        anchor=(0, 0.5)  # Left-aligned
+                    )
+                    label.setPos(exit_x + 300, fib_price)  # Position near exit
+                    self.plot_widget.addItem(label)
+                
+                # === 4. Mark Actual Exit Level ===
+                # Bold horizontal line at exit price
+                exit_line = InfiniteLine(
+                    pos=exit_price,
+                    angle=0,
+                    pen=pg.mkPen('#FFFFFF', width=2, style=Qt.SolidLine),
+                    movable=False
+                )
+                exit_line.setBounds([entry_x, exit_x])
+                self.plot_widget.addItem(exit_line)
+                
+                # Determine which Fib level was hit (if any)
+                exit_reason = trade.get('reason', '')
+                if 'fib' in exit_reason:
+                    # Extract fib level from reason (e.g., "fib_61.8")
+                    try:
+                        fib_pct = float(exit_reason.split('_')[1])
+                        exit_label_text = f"EXIT: {fib_pct}%"
+                    except:
+                        exit_label_text = f"EXIT: {exit_reason}"
+                else:
+                    exit_label_text = f"EXIT: {exit_reason.upper()}"
+                
+                exit_label = TextItem(
+                    text=exit_label_text,
+                    color='#FFFFFF',
+                    anchor=(1, 0.5)  # Right-aligned
+                )
+                exit_label.setPos(exit_x - 300, exit_price)
+                self.plot_widget.addItem(exit_label)
+                
+                # === 5. Add Entry Label ===
+                entry_label = TextItem(
+                    text=f"ENTRY: ${entry_price:.4f}",
+                    color='#4CAF50',
+                    anchor=(0, 1)  # Bottom-left
+                )
+                entry_label.setPos(entry_x + 100, entry_price)
+                self.plot_widget.addItem(entry_label)
+                
+            except Exception as e:
+                print(f"Error rendering Fibonacci ladder for trade: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
     
     def create_trades_section(self):
         """Create trade list table."""

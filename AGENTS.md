@@ -313,9 +313,91 @@ async def fetch_15m(ticker: str, from_: str, to: str) -> pd.DataFrame:
 **Returns**: DataFrame with DatetimeIndex (UTC), sorted ascending.
 
 **When to Extend**:
-- Add caching: Implement disk/SQLite cache here
 - Add fallback: Integrate yfinance as secondary source
 - Add multiple tickers: Modify to return dict of DataFrames
+
+---
+
+### 5a. `data/cache.py` (**NEW** v2.0.1)
+
+**Purpose**: Parquet-based caching system for downloaded market data.
+
+**Why Caching**:
+1. **UX**: No re-downloading data after app restart
+2. **API quota**: Reduces Polygon.io API calls
+3. **Speed**: Instant data loading from disk
+4. **Efficiency**: Parquet format is compact and fast
+
+**Key Class**:
+```python
+class DataCache:
+    def __init__(self, cache_dir: str = ".data"):
+        # Creates .data/ directory for cache files
+    
+    def get_cached_data(ticker, from_, to, multiplier, timespan) -> Optional[pd.DataFrame]:
+        # Returns cached DataFrame if exists, else None
+        # Cache key format: X_ADAUSD_2024-01-01_2024-12-31_15minute.parquet
+    
+    def save_cached_data(df, ticker, from_, to, multiplier, timespan):
+        # Saves DataFrame to parquet file
+        # Preserves UTC timezone on DatetimeIndex
+    
+    def has_cached_data(...) -> bool:
+        # Check if cache exists without loading
+    
+    def clear_cache():
+        # Delete all cached files
+    
+    def get_cache_info() -> list[Dict]:
+        # List all cached files with metadata
+```
+
+**Cache File Format**:
+```
+.data/X_ADAUSD_2024-01-01_2024-12-31_1minute.parquet
+      ↓        ↓          ↓            ↓
+    ticker  from_date  to_date    multiplier+timespan
+```
+
+**Integration with DataProvider**:
+```python
+class DataProvider:
+    def __init__(self, use_cache: bool = True):
+        self.cache = DataCache() if use_cache else None
+    
+    async def fetch_bars(..., force_download: bool = False):
+        # 1. Try cache first (if enabled and not forcing)
+        if self.cache and not force_download:
+            cached = self.cache.get_cached_data(...)
+            if cached is not None:
+                return cached
+        
+        # 2. Download from API
+        df = await self.poly.aggregates(...)
+        
+        # 3. Cache the result
+        if self.cache:
+            self.cache.save_cached_data(df, ...)
+        
+        return df
+```
+
+**Auto-Load on Startup**:
+- `app/main.py` calls `try_load_cached_data()` on initialization
+- Checks for cache matching last download parameters in `.env`
+- Loads data automatically if available
+- Status bar shows "Loaded X bars from cache"
+
+**When to Use**:
+- ✅ Normal operation: Cache enabled by default
+- ✅ User downloads data: Auto-saved to cache
+- ✅ App restart: Auto-loaded from cache
+- ✅ Settings download: `force_download=True` for fresh data
+
+**Gotchas**:
+- Cache is keyed by exact date range - partial overlaps won't match
+- Different timeframes have separate cache files (as expected)
+- No automatic expiration - user must clear cache manually if needed
 
 ---
 
@@ -460,6 +542,138 @@ def build_features(df: pd.DataFrame, p: SellerParams) -> pd.DataFrame:
 - Adjust thresholds via SellerParams
 - Add more filters (time of day, RSI < 30, etc.)
 - Combine with other signals (MACD cross, etc.)
+
+---
+
+### 8a. `strategy/timeframe_defaults.py` (**NEW** v2.0.1, **CRITICAL**)
+
+**Purpose**: Timeframe-aware parameter defaults and automatic scaling system.
+
+**Why This is Critical**:
+Parameters hardcoded for 15m will FAIL on other timeframes:
+```
+Problem: EMA Fast = 96 bars
+- On 15m: 96 × 15min = 1440min = 24h ✅ Correct!
+- On 1m:  96 × 1min  = 96min  = 1.6h ❌ Way too short!
+```
+
+**Solution**: Define parameters in TIME PERIODS, convert to bars based on timeframe.
+
+**Key Class**:
+```python
+@dataclass
+class TimeframeConfig:
+    timeframe: Timeframe
+    
+    # Time-based parameters (consistent across all TFs)
+    ema_fast_minutes: int = 1440      # 24 hours
+    ema_slow_minutes: int = 10080     # 7 days
+    z_window_minutes: int = 10080     # 7 days
+    atr_window_minutes: int = 1440    # 24 hours
+    max_hold_minutes: int             # Varies: 4h (1m) to 24h (15m)
+    
+    # Universal thresholds (statistical, not time-dependent)
+    vol_z: float = 2.0
+    tr_z: float = 1.2
+    cloc_min: float = 0.6
+    
+    def to_seller_params() -> SellerParams:
+        # Converts time-based to SellerParams
+    
+    def to_backtest_params() -> BacktestParams:
+        # Converts with timeframe-adjusted max_hold
+    
+    def get_bar_counts() -> dict:
+        # Returns actual bar counts for display/debug
+```
+
+**Preset Configurations**:
+```python
+TIMEFRAME_CONFIGS = {
+    Timeframe.m1:  TimeframeConfig(
+        ema_fast_minutes=1440,    # 24h = 1440 bars on 1m
+        ema_slow_minutes=10080,   # 7d = 10080 bars
+        max_hold_minutes=240,     # Max 4h (scalping)
+        slippage_bp=8.0,          # Higher slippage on fast TF
+    ),
+    Timeframe.m15: TimeframeConfig(
+        ema_fast_minutes=1440,    # 24h = 96 bars on 15m
+        ema_slow_minutes=10080,   # 7d = 672 bars
+        max_hold_minutes=1440,    # Max 24h (intraday)
+        slippage_bp=5.0,
+    ),
+    # ... m3, m5, m10 configs
+}
+```
+
+**Key Functions**:
+```python
+def get_defaults_for_timeframe(tf: Timeframe) -> TimeframeConfig:
+    # Returns preset config for given timeframe
+
+def get_param_bounds_for_timeframe(tf: Timeframe) -> Dict[str, Tuple]:
+    # Returns optimization bounds scaled for timeframe
+    # Example: ema_fast on 15m = (48, 192), on 1m = (720, 2880)
+    # Same time range (12h-48h), different bar counts!
+
+def validate_parameters_for_timeframe(
+    seller_params: SellerParams,
+    tf: Timeframe,
+    tolerance: float = 0.5
+) -> tuple[bool, list[str]]:
+    # Warns if bar-based params inappropriate for timeframe
+```
+
+**Integration with UI**:
+- `settings_dialog.py` connects timeframe combo to `on_timeframe_changed()`
+- On change, shows dialog with proposed adjustments
+- User clicks Yes → parameters automatically scaled
+- Example dialog:
+  ```
+  Adjust parameters for 1 minute timeframe?
+  
+  EMA Fast: 96 bars → 1440 bars (24 hours)
+  EMA Slow: 672 bars → 10080 bars (7 days)
+  
+  [Yes] [No]
+  ```
+
+**Optimization Integration**:
+```python
+class Population:
+    def __init__(self, size, seed, timeframe=Timeframe.m15):
+        # Get timeframe-specific bounds
+        self.bounds = get_param_bounds_for_timeframe(timeframe)
+        # All random individuals use these bounds
+```
+
+**Bar Count Comparison Table**:
+| TF | EMA Fast (24h) | EMA Slow (7d) | Z-Window | Max Hold | Style |
+|----|----------------|---------------|----------|----------|-------|
+| 1m | 1440 bars | 10080 bars | 10080 | 240 (4h) | Scalping |
+| 3m | 480 bars | 3360 bars | 3360 | 160 (8h) | Scalping |
+| 5m | 288 bars | 2016 bars | 2016 | 144 (12h) | Scalping |
+| 10m | 144 bars | 1008 bars | 1008 | 144 (24h) | Intraday |
+| 15m | 96 bars | 672 bars | 672 | 96 (24h) | Intraday |
+
+**Testing**:
+```bash
+# Run comparison table
+poetry run python strategy/timeframe_defaults.py
+
+# Test bounds scaling
+poetry run python -c "
+from backtest.optimizer import get_param_bounds_for_timeframe
+from core.models import Timeframe
+b1 = get_param_bounds_for_timeframe(Timeframe.m1)
+b15 = get_param_bounds_for_timeframe(Timeframe.m15)
+print('1m EMA Fast:', b1['ema_fast'])   # (720, 2880)
+print('15m EMA Fast:', b15['ema_fast'])  # (48, 192)
+"
+```
+
+**Critical Success Factor**:
+This module ensures **temporal consistency** across timeframes. Without it, multi-timeframe support is unusable because parameters don't scale properly.
 
 ---
 
@@ -673,7 +887,7 @@ def main():
 
 ### 15. `app/widgets/candle_view.py`
 
-**Purpose**: PyQtGraph-based candlestick chart with overlays.
+**Purpose**: PyQtGraph-based candlestick chart with overlays and Fibonacci ladder visualization.
 
 **Key Components**:
 
@@ -694,24 +908,67 @@ class CandleChartWidget(QWidget):
         # 3. Render
         self.render_candles(feats)
     
-    def render_candles(self, df: pd.DataFrame):
+    def render_candles(self, df: pd.DataFrame, backtest_result=None):
         # 1. Sample if > 5000 candles (performance)
         # 2. Create CandlestickItem
         # 3. Add EMA overlays
         # 4. Mark signal points
-        # 5. Add legend
+        # 5. Draw Fibonacci ladders (NEW)
+        # 6. Add entry/exit markers
+        # 7. Add legend
+    
+    def render_fibonacci_ladders(self, df, trades):  # NEW v2.0.1
+        """
+        Render beautiful rainbow Fibonacci exit ladders.
+        
+        For each trade (last 20):
+        1. Mark swing high with gold star ⭐
+        2. Draw range line (dashed gold) from entry to swing high
+        3. Draw horizontal Fib levels in rainbow colors:
+           - 38.2% Blue
+           - 50.0% Cyan
+           - 61.8% GOLD (3px width) ⭐
+           - 78.6% Orange
+           - 100% Red
+        4. Mark actual exit with bold white line
+        5. Add labels for entry, exit, and Fib levels
+        """
+```
+
+**Fibonacci Colors** (NEW):
+```python
+FIB_COLORS = {
+    0.382: '#2196F3',  # Blue - Conservative
+    0.500: '#00BCD4',  # Cyan - Balanced
+    0.618: '#FFD700',  # GOLD - Golden Ratio ⭐
+    0.786: '#FF9800',  # Orange - Aggressive
+    1.000: '#F44336',  # Red - Full retracement
+}
 ```
 
 **Performance Optimizations**:
 - Sample to last 5000 candles if dataset is large
+- Limit Fibonacci ladders to last 20 trades (performance + clarity)
 - Use PyQtGraph's fast rendering (OpenGL backend)
 - Update incrementally (don't redraw all on refresh)
+- Bounded InfiniteLine (span only trade duration)
 
 **Visual Elements**:
 - Candlesticks: Green/red based on direction
 - EMA Fast (96): Cyan line
 - EMA Slow (672): Orange line
 - Signals: Yellow triangles at exhaustion bars
+- **NEW**: Entry arrows (green triangles up)
+- **NEW**: Exit arrows (green/red triangles down)
+- **NEW**: Swing high stars (⭐ gold)
+- **NEW**: Fibonacci rainbow ladders
+- **NEW**: Exit lines (bold white)
+- **NEW**: Labels (entry, exit, Fib levels)
+
+**Toggle Controls**:
+- Settings → Chart Indicators → "📊 Fibonacci Exit Ladders (Rainbow)"
+- Enabled by default
+- Useful to disable when chart is cluttered
 
 ---
 

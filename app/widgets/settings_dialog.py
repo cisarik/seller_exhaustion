@@ -10,6 +10,10 @@ from datetime import datetime
 
 from config.settings import settings, SettingsManager
 from data.provider import DataProvider
+from core.models import Timeframe
+from strategy.timeframe_defaults import get_defaults_for_timeframe
+from strategy.seller_exhaustion import SellerParams
+from backtest.engine import BacktestParams
 
 
 # Timeframe mapping (multiplier, unit, label)
@@ -20,7 +24,7 @@ TIMEFRAMES = {
     "10m": (10, "minute", "10 minutes"),
     "15m": (15, "minute", "15 minutes"),
     "30m": (30, "minute", "30 minutes"),
-    "1h": (60, "minute", "1 hour"),
+    "60m": (60, "minute", "1 hour"),
     "4h": (240, "minute", "4 hours"),
     "12h": (720, "minute", "12 hours"),
     "1d": (1, "day", "1 day"),
@@ -552,8 +556,15 @@ class SettingsDialog(QDialog):
         mult, unit, label = TIMEFRAMES[tf_key]
         
         # Map to Timeframe enum
-        tf_map = {"1m": Timeframe.m1, "3m": Timeframe.m3, "5m": Timeframe.m5, 
-                  "10m": Timeframe.m10, "15m": Timeframe.m15}
+        tf_map = {
+            "1m": Timeframe.m1,
+            "3m": Timeframe.m3,
+            "5m": Timeframe.m5,
+            "10m": Timeframe.m10,
+            "15m": Timeframe.m15,
+            "60m": Timeframe.m60,
+            "1h": Timeframe.m60,
+        }
         tf = tf_map.get(tf_key, Timeframe.m15)
         
         # Get defaults for this timeframe
@@ -856,6 +867,24 @@ class SettingsDialog(QDialog):
         self.max_hold.setValue(96)
         self.fee_bp.setValue(5.0)
         self.slippage_bp.setValue(5.0)
+    
+    def set_strategy_params(self, params: SellerParams):
+        """Update strategy tab controls from SellerParams."""
+        self.ema_fast.setValue(int(params.ema_fast))
+        self.ema_slow.setValue(int(params.ema_slow))
+        self.z_window.setValue(int(params.z_window))
+        self.vol_z.setValue(float(params.vol_z))
+        self.tr_z.setValue(float(params.tr_z))
+        self.cloc_min.setValue(float(params.cloc_min))
+        self.atr_window.setValue(int(params.atr_window))
+    
+    def set_backtest_params(self, params: BacktestParams):
+        """Update backtest tab controls from BacktestParams."""
+        self.atr_stop_mult.setValue(float(params.atr_stop_mult))
+        self.reward_r.setValue(float(params.reward_r))
+        self.max_hold.setValue(int(params.max_hold))
+        self.fee_bp.setValue(float(params.fee_bp))
+        self.slippage_bp.setValue(float(params.slippage_bp))
 
     def reset_ga_params(self):
         """Reset genetic algorithm parameters to defaults."""
@@ -874,7 +903,6 @@ class SettingsDialog(QDialog):
     
     def get_strategy_params(self):
         """Get strategy parameters from UI."""
-        from strategy.seller_exhaustion import SellerParams
         return SellerParams(
             ema_fast=self.ema_fast.value(),
             ema_slow=self.ema_slow.value(),
@@ -887,7 +915,6 @@ class SettingsDialog(QDialog):
     
     def get_backtest_params(self):
         """Get backtest parameters from UI."""
-        from backtest.engine import BacktestParams
         return BacktestParams(
             atr_stop_mult=self.atr_stop_mult.value(),
             reward_r=self.reward_r.value(),

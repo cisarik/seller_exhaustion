@@ -71,6 +71,7 @@ class Timeframe(str, Enum):
     m5 = "5m"
     m10 = "10m"
     m15 = "15m"
+    m60 = "60m"
 
 
 def minutes_to_bars(minutes: int, tf: Timeframe) -> int:
@@ -85,6 +86,7 @@ def minutes_to_bars(minutes: int, tf: Timeframe) -> int:
         Timeframe.m5: 5,
         Timeframe.m10: 10,
         Timeframe.m15: 15,
+        Timeframe.m60: 60,
     }
     bar_minutes = tf_map.get(tf, 15)
     bars = max(1, int(round(minutes / bar_minutes)))

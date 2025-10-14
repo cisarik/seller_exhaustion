@@ -24,7 +24,7 @@ from core.models import Timeframe
 from backtest.engine import run_backtest
 from data.provider import DataProvider
 from data.cache import DataCache
-from config.settings import settings
+from config.settings import settings, SettingsManager
 
 
 class MainWindow(QMainWindow):
@@ -61,8 +61,9 @@ class MainWindow(QMainWindow):
         self.stats_panel = StatsPanel()
         splitter.addWidget(self.stats_panel)
         
-        # Connect optimization signal
+        # Connect optimization signals
         self.stats_panel.optimization_step_complete.connect(self.on_optimization_step_complete)
+        self.stats_panel.progress_updated.connect(self.update_progress)
         
         # Set initial sizes (chart gets 70%, stats gets 30%)
         splitter.setSizes([1120, 480])
@@ -146,6 +147,7 @@ class MainWindow(QMainWindow):
             # Connect signals
             editor.params_changed.connect(self.on_strategy_params_changed)
             editor.params_loaded.connect(self.on_strategy_params_loaded)
+            editor.params_saved.connect(self.on_strategy_params_saved)
             
             layout.addWidget(editor)
             
@@ -168,8 +170,16 @@ class MainWindow(QMainWindow):
             
             # Determine timeframe from settings
             tf_mult, tf_unit = self.settings_dialog.get_timeframe()
-            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15}
+            tf_map = {
+                1: Timeframe.m1,
+                3: Timeframe.m3,
+                5: Timeframe.m5,
+                10: Timeframe.m10,
+                15: Timeframe.m15,
+                60: Timeframe.m60,
+            }
             tf = tf_map.get(int(tf_mult), Timeframe.m15)
+            self.chart_view.set_timeframe(tf)
             
             # Build features
             feats = build_features(df, params, tf)
@@ -231,11 +241,13 @@ class MainWindow(QMainWindow):
             )
             return
         
+        success = False
         try:
             self.statusBar().showMessage("Running backtest...")
             self.progress.setVisible(True)
             self.progress.setRange(0, 0)
             self.backtest_action.setEnabled(False)
+            self.chart_view.show_action_progress("Running backtest…")
             
             # Get current params from stats panel (user may have edited them)
             seller_params, bt_params = self.stats_panel.get_current_params()
@@ -243,6 +255,9 @@ class MainWindow(QMainWindow):
             # Rebuild features with current params
             feats = build_features(self.current_data[['open', 'high', 'low', 'close', 'volume']], 
                                    seller_params, self.current_tf)
+            self.current_data = feats
+            self.chart_view.feats = feats
+            self.chart_view.params = seller_params
             
             # Run backtest (in executor to avoid blocking)
             result = await asyncio.get_event_loop().run_in_executor(
@@ -278,6 +293,7 @@ class MainWindow(QMainWindow):
                 f"Total PnL: ${metrics['total_pnl']:.4f}\n\n"
                 f"See the Stats panel for detailed results."
             )
+            success = True
             
         except Exception as e:
             QMessageBox.critical(
@@ -288,10 +304,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Error: {str(e)}")
             import traceback
             traceback.print_exc()
-        
+
         finally:
             self.progress.setVisible(False)
             self.backtest_action.setEnabled(True)
+            final_msg = "Ready" if success else "Backtest failed"
+            self.chart_view.hide_action_progress(final_msg)
     
     def clear_results(self):
         """Clear backtest results."""
@@ -301,6 +319,29 @@ class MainWindow(QMainWindow):
         if self.current_data is not None:
             self.chart_view.render_candles(self.current_data)
         self.statusBar().showMessage("Results cleared")
+    
+    def update_progress(self, current: int, total: int, message: str):
+        """
+        Update progress bar with optimization progress.
+        
+        Args:
+            current: Current generation number
+            total: Total number of generations
+            message: Status message
+        """
+        if total > 0:
+            self.progress.setVisible(True)
+            self.progress.setMaximum(total)
+            self.progress.setValue(current)
+            percentage = (current / total * 100) if total > 0 else 0
+            self.statusBar().showMessage(f"{message} ({percentage:.0f}%)")
+        else:
+            self.progress.setVisible(False)
+            self.statusBar().showMessage(message)
+        
+        # Hide progress bar after completion
+        if current >= total and total > 0:
+            QTimer.singleShot(3000, lambda: self.progress.setVisible(False))
     
     def on_optimization_step_complete(self, best_individual, backtest_result):
         """Handle optimization step completion and update chart."""
@@ -360,6 +401,50 @@ class MainWindow(QMainWindow):
         # Re-run backtest if data is loaded
         if self.current_data is not None:
             asyncio.create_task(self.run_backtest())
+
+    def on_strategy_params_saved(self, seller_params, backtest_params):
+        """Persist saved parameters and re-run strategy automatically."""
+        if self.settings_dialog:
+            self.settings_dialog.set_strategy_params(seller_params)
+            self.settings_dialog.set_backtest_params(backtest_params)
+        if hasattr(self, 'stats_panel'):
+            self.stats_panel.load_params_from_settings(seller_params, backtest_params)
+        asyncio.create_task(self._persist_params_and_run(seller_params, backtest_params))
+
+    async def _persist_params_and_run(self, seller_params, backtest_params):
+        """Persist parameters to settings and rerun strategy asynchronously."""
+        try:
+            self.chart_view.show_action_progress("Saving parameters…")
+            settings_dict = {
+                'strategy_ema_fast': seller_params.ema_fast,
+                'strategy_ema_slow': seller_params.ema_slow,
+                'strategy_z_window': seller_params.z_window,
+                'strategy_vol_z': seller_params.vol_z,
+                'strategy_tr_z': seller_params.tr_z,
+                'strategy_cloc_min': seller_params.cloc_min,
+                'strategy_atr_window': seller_params.atr_window,
+                'backtest_atr_stop_mult': backtest_params.atr_stop_mult,
+                'backtest_reward_r': backtest_params.reward_r,
+                'backtest_max_hold': backtest_params.max_hold,
+                'backtest_fee_bp': backtest_params.fee_bp,
+                'backtest_slippage_bp': backtest_params.slippage_bp,
+            }
+            SettingsManager.save_to_env(settings_dict)
+            SettingsManager.reload_settings()
+            self.statusBar().showMessage("Parameters saved. Running strategy…")
+
+            if self.current_data is not None:
+                self.chart_view.show_action_progress("Running strategy with saved parameters…")
+                await self.run_backtest()
+            else:
+                self.chart_view.hide_action_progress("Parameters saved. Download data to run strategy.")
+        except Exception as e:
+            self.chart_view.hide_action_progress("Parameter save failed")
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                f"Failed to persist parameters:\n{str(e)}"
+            )
     
     def show_help(self):
         """Show quick help dialog."""
@@ -552,22 +637,29 @@ class MainWindow(QMainWindow):
         # Restore window state
         self.restore_window_state()
         
-        # Sync timeframe dropdown with settings
+        # Sync timeframe with saved settings
         try:
-            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15}
+            tf_map = {
+                1: Timeframe.m1,
+                3: Timeframe.m3,
+                5: Timeframe.m5,
+                10: Timeframe.m10,
+                15: Timeframe.m15,
+                60: Timeframe.m60,
+            }
             tf_mult = int(settings.timeframe)
             
-            # If configured timeframe is not in dropdown, default to 15m
+            # If configured timeframe not supported, default to 15m
             if tf_mult not in tf_map:
-                print(f"⚠ Configured timeframe {tf_mult}m not supported in chart dropdown, defaulting to 15m")
+                print(f"⚠ Configured timeframe {tf_mult}m not supported, defaulting to 15m")
                 tf_mult = 15
             
             self.current_tf = tf_map[tf_mult]
-            self.chart_view.tf = self.current_tf
-            self.chart_view.tf_combo.setCurrentText(self.current_tf.value)
+            self.chart_view.set_timeframe(self.current_tf)
         except Exception as e:
             print(f"Warning: Could not sync timeframe from settings: {e}")
             self.current_tf = Timeframe.m15
+            self.chart_view.set_timeframe(self.current_tf)
         
         # Try to auto-load cached data
         await self.try_load_cached_data()

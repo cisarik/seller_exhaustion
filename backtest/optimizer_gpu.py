@@ -14,6 +14,7 @@ from backtest.optimizer import (
     tournament_selection, crossover, mutate_individual
 )
 from backtest.engine_gpu import GPUBacktestAccelerator, has_gpu
+from backtest.engine_gpu_batch import BatchGPUBacktestEngine, BatchBacktestConfig
 from strategy.seller_exhaustion import SellerParams
 from core.models import BacktestParams, Timeframe
 
@@ -55,34 +56,64 @@ def evolution_step_gpu(
         accelerator = GPUBacktestAccelerator()
     
     # Step 1: Batch evaluate all unevaluated individuals on GPU
-    print(f"\n=== Generation {population.generation} (GPU Mode) ===")
+    print(f"\n=== Generation {population.generation} (GPU Mode - Batch Processing) ===")
     unevaluated = [ind for ind in population.individuals if ind.fitness == 0.0]
     
     if unevaluated:
-        print(f"Evaluating {len(unevaluated)} individuals on GPU...")
+        print(f"Evaluating {len(unevaluated)} individuals on GPU (batch)...")
         
         # Prepare parameter lists for batch processing
         seller_params_list = [ind.seller_params for ind in unevaluated]
         backtest_params_list = [ind.backtest_params for ind in unevaluated]
         
-        # Batch evaluate on GPU
-        fitness_scores, metrics_list, results_list = accelerator.batch_evaluate(
-            data,
-            seller_params_list,
-            backtest_params_list,
-            tf
-        )
-        
-        # Update individuals with results
-        for ind, fitness, metrics in zip(unevaluated, fitness_scores, metrics_list):
-            ind.fitness = float(fitness)
-            ind.metrics = metrics
-            print(f"  Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")
-        
-        # Show GPU memory usage
-        mem_info = accelerator.get_memory_usage()
-        if mem_info['available']:
-            print(f"  GPU Memory: {mem_info['allocated_gb']:.2f}/{mem_info['total_gb']:.2f} GB used")
+        # Use NEW batch GPU engine for true parallel processing
+        try:
+            batch_engine = BatchGPUBacktestEngine(
+                data,
+                config=BatchBacktestConfig(verbose=False)
+            )
+            
+            # Batch evaluate on GPU (ALL AT ONCE!)
+            results_list = batch_engine.batch_backtest(
+                seller_params_list,
+                backtest_params_list,
+                tf
+            )
+            
+            # Calculate fitness from metrics
+            from backtest.engine_gpu import calculate_fitness_gpu_batch
+            metrics_list = [r['metrics'] for r in results_list]
+            fitness_tensor = calculate_fitness_gpu_batch(metrics_list)
+            fitness_scores = fitness_tensor.cpu().numpy()
+            
+            # Update individuals with results
+            for ind, fitness, metrics in zip(unevaluated, fitness_scores, metrics_list):
+                ind.fitness = float(fitness)
+                ind.metrics = metrics
+                if metrics.get('n', 0) > 0:
+                    print(f"  Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")
+            
+            # Show GPU memory usage
+            mem_info = batch_engine.get_memory_usage()
+            if mem_info['available']:
+                print(f"  GPU Memory: {mem_info['allocated_gb']:.2f}/{mem_info['total_gb']:.2f} GB ({mem_info['utilization']:.1%})")
+            
+            # Clear cache
+            batch_engine.clear_cache()
+            
+        except Exception as e:
+            print(f"⚠ Batch GPU engine failed, falling back to sequential: {e}")
+            # Fallback to old sequential method
+            fitness_scores, metrics_list, results_list = accelerator.batch_evaluate(
+                data,
+                seller_params_list,
+                backtest_params_list,
+                tf
+            )
+            
+            for ind, fitness, metrics in zip(unevaluated, fitness_scores, metrics_list):
+                ind.fitness = float(fitness)
+                ind.metrics = metrics
     
     # Update best ever
     current_best = population.get_best()

@@ -105,6 +105,7 @@ class DataProvider:
             Timeframe.m5: 5,
             Timeframe.m10: 10,
             Timeframe.m15: 15,
+            Timeframe.m60: 60,
         }
 
         multiplier = tf_to_multiplier.get(tf, 15)

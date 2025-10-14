@@ -1,42 +1,7 @@
-from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 from typing import Dict, Any
-
-
-@dataclass
-class BacktestParams:
-    """
-    Backtest execution parameters.
-    
-    Default strategy:
-    - BUY: Seller exhaustion signals only
-    - SELL: First Fibonacci level hit only
-    - Stop-loss and time exits are DISABLED by default (optional)
-    """
-    # Exit toggles
-    use_stop_loss: bool = False          # Stop-loss exit (disabled by default)
-    use_time_exit: bool = False          # Time-based exit (disabled by default)
-    use_fib_exits: bool = True           # Fibonacci exits (enabled by default)
-    use_traditional_tp: bool = False     # R-multiple TP (disabled by default)
-    
-    # Stop-loss parameters (used if use_stop_loss=True)
-    atr_stop_mult: float = 0.7
-    
-    # Traditional TP parameters (used if use_traditional_tp=True)
-    reward_r: float = 2.0
-    
-    # Time exit parameters (used if use_time_exit=True)
-    max_hold: int = 96
-    
-    # Fibonacci parameters (used if use_fib_exits=True)
-    fib_swing_lookback: int = 96
-    fib_swing_lookahead: int = 5
-    fib_target_level: float = 0.618
-    
-    # Transaction costs (always applied)
-    fee_bp: float = 5.0
-    slippage_bp: float = 5.0
+from core.models import BacktestParams
 
 
 def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:

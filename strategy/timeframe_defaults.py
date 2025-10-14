@@ -170,6 +170,18 @@ TIMEFRAME_CONFIGS = {
         fee_bp=5.0,
         slippage_bp=5.0,
     ),
+    
+    Timeframe.m60: TimeframeConfig(
+        timeframe=Timeframe.m60,
+        ema_fast_minutes=MINUTES_PER_DAY,        # 24h = 24 bars
+        ema_slow_minutes=MINUTES_PER_WEEK,       # 7d = 168 bars
+        z_window_minutes=MINUTES_PER_WEEK,       # 7d = 168 bars
+        atr_window_minutes=MINUTES_PER_DAY,      # 24h = 24 bars
+        max_hold_minutes=2 * MINUTES_PER_DAY,    # 48 hours = 48 bars
+        fib_lookback_minutes=MINUTES_PER_DAY,    # 24h swing lookback
+        fee_bp=5.0,
+        slippage_bp=4.0,
+    ),
 }
 
 
@@ -204,7 +216,7 @@ def print_timeframe_comparison():
     print(f"{'':12} {'(bars)':<15} {'(bars)':<15} {'(bars)':<15} {'(bars)':<15} {'(bars)':<15}")
     print("-"*100)
     
-    for tf in [Timeframe.m1, Timeframe.m3, Timeframe.m5, Timeframe.m10, Timeframe.m15]:
+    for tf in [Timeframe.m1, Timeframe.m3, Timeframe.m5, Timeframe.m10, Timeframe.m15, Timeframe.m60]:
         config = TIMEFRAME_CONFIGS[tf]
         bars = config.get_bar_counts()
         

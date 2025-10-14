@@ -29,7 +29,8 @@ class StrategyEditor(QWidget):
     
     params_changed = Signal()  # Emitted when parameters are modified
     params_loaded = Signal(object, object)  # Emitted when params loaded (seller, backtest)
-    
+    params_saved = Signal(object, object)  # Emitted after successful save
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_seller_params = SellerParams()
@@ -57,12 +58,14 @@ class StrategyEditor(QWidget):
         # Right: Saved parameters list + explanation
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_widget.setMinimumWidth(450)
         right_layout.addWidget(self.create_saved_params_group())
         right_layout.addWidget(self.create_explanation_panel())
         splitter.addWidget(right_widget)
         
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([900, 600])
         
         layout.addWidget(splitter)
     
@@ -368,7 +371,8 @@ class StrategyEditor(QWidget):
         
         self.explanation_text = QTextEdit()
         self.explanation_text.setReadOnly(True)
-        self.explanation_text.setMaximumHeight(400)
+        self.explanation_text.setMinimumHeight(520)
+        self.explanation_text.setMinimumWidth(420)
         self.explanation_text.setHtml(self.get_explanations_html())
         
         layout.addWidget(self.explanation_text)
@@ -555,6 +559,10 @@ class StrategyEditor(QWidget):
                 metadata,
                 name
             )
+            
+            self.current_seller_params = seller_params
+            self.current_backtest_params = backtest_params
+            self.params_saved.emit(seller_params, backtest_params)
             
             QMessageBox.information(
                 self,

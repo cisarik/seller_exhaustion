@@ -11,6 +11,18 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import pandas as pd
 
+try:  # Determine parquet engine availability once
+    import pyarrow  # type: ignore  # noqa: F401
+
+    PARQUET_ENGINE = "pyarrow"
+except ImportError:  # pragma: no cover - optional dependency
+    try:
+        import fastparquet  # type: ignore  # noqa: F401
+
+        PARQUET_ENGINE = "fastparquet"
+    except ImportError:
+        PARQUET_ENGINE = None
+
 
 class DataCache:
     """Manage local cache of downloaded market data."""
@@ -24,6 +36,8 @@ class DataCache:
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        self._parquet_engine = PARQUET_ENGINE
+        self._warned_no_parquet = False
     
     def _make_cache_key(
         self,
@@ -71,23 +85,40 @@ class DataCache:
         cache_file = self.cache_dir / self._make_cache_key(
             ticker, from_, to, multiplier, timespan
         )
+        pickle_file = cache_file.with_suffix(".pkl")
         
-        if not cache_file.exists():
-            return None
+        if cache_file.exists() and self._parquet_engine:
+            try:
+                df = pd.read_parquet(cache_file, engine=self._parquet_engine)
+                
+                if df.index.name == 'ts':
+                    df.index = pd.to_datetime(df.index, utc=True)
+                
+                print(f"✓ Loaded {len(df)} bars from cache: {cache_file.name}")
+                return df
+            except Exception as e:
+                print(f"⚠ Error reading parquet cache {cache_file}: {e}")
         
-        try:
-            df = pd.read_parquet(cache_file)
-            
-            # Restore UTC timezone on index
-            if df.index.name == 'ts':
-                df.index = pd.to_datetime(df.index, utc=True)
-            
-            print(f"✓ Loaded {len(df)} bars from cache: {cache_file.name}")
-            return df
-            
-        except Exception as e:
-            print(f"⚠ Error reading cache file {cache_file}: {e}")
-            return None
+        if pickle_file.exists():
+            try:
+                df = pd.read_pickle(pickle_file)
+                
+                if df.index.name == 'ts':
+                    df.index = pd.to_datetime(df.index, utc=True)
+                
+                print(f"✓ Loaded {len(df)} bars from cache: {pickle_file.name}")
+                return df
+            except Exception as e:
+                print(f"⚠ Error reading pickle cache {pickle_file}: {e}")
+        
+        if cache_file.exists() and not self._parquet_engine and not self._warned_no_parquet:
+            print(
+                "⚠ Parquet cache available but no parquet engine installed. "
+                "Install 'pyarrow' or 'fastparquet' for faster caching."
+            )
+            self._warned_no_parquet = True
+        
+        return None
     
     def save_cached_data(
         self,
@@ -116,14 +147,30 @@ class DataCache:
         cache_file = self.cache_dir / self._make_cache_key(
             ticker, from_, to, multiplier, timespan
         )
+        pickle_file = cache_file.with_suffix(".pkl")
         
         try:
-            # Save to parquet (efficient format for timeseries)
-            df.to_parquet(cache_file)
-            print(f"✓ Cached {len(df)} bars to: {cache_file.name}")
-            
+            if self._parquet_engine:
+                try:
+                    df.to_parquet(cache_file, engine=self._parquet_engine)
+                    print(f"✓ Cached {len(df)} bars to: {cache_file.name}")
+                    return
+                except Exception as parquet_err:
+                    print(
+                        f"⚠ Error saving parquet cache {cache_file}: {parquet_err}\n"
+                        "  ↳ Falling back to pickle cache."
+                    )
+            else:
+                if not self._warned_no_parquet:
+                    print(
+                        "ℹ️ Parquet engine not installed; falling back to pickle cache. "
+                        "Install 'pyarrow' or 'fastparquet' for parquet support."
+                    )
+                    self._warned_no_parquet = True
+            df.to_pickle(pickle_file)
+            print(f"✓ Cached {len(df)} bars to: {pickle_file.name}")
         except Exception as e:
-            print(f"⚠ Error saving cache file {cache_file}: {e}")
+            print(f"⚠ Error saving cache file {pickle_file}: {e}")
     
     def clear_cache(self):
         """Delete all cached files."""
@@ -131,12 +178,13 @@ class DataCache:
             return
         
         count = 0
-        for file in self.cache_dir.glob("*.parquet"):
-            try:
-                file.unlink()
-                count += 1
-            except Exception as e:
-                print(f"⚠ Error deleting {file}: {e}")
+        for pattern in ("*.parquet", "*.pkl"):
+            for file in self.cache_dir.glob(pattern):
+                try:
+                    file.unlink()
+                    count += 1
+                except Exception as e:
+                    print(f"⚠ Error deleting {file}: {e}")
         
         print(f"✓ Cleared {count} cached file(s)")
     
@@ -165,8 +213,24 @@ class DataCache:
                     "size_mb": stat.st_size / (1024 * 1024),
                     "modified": pd.Timestamp(stat.st_mtime, unit='s'),
                     "ticker": parts[0] if len(parts) > 0 else "unknown",
+                    "format": "parquet",
                 })
                 
+            except Exception as e:
+                print(f"⚠ Error reading cache file info {file}: {e}")
+        
+        for file in self.cache_dir.glob("*.pkl"):
+            try:
+                stat = file.stat()
+                name = file.stem
+                parts = name.split("_")
+                cache_files.append({
+                    "filename": file.name,
+                    "size_mb": stat.st_size / (1024 * 1024),
+                    "modified": pd.Timestamp(stat.st_mtime, unit='s'),
+                    "ticker": parts[0] if len(parts) > 0 else "unknown",
+                    "format": "pickle",
+                })
             except Exception as e:
                 print(f"⚠ Error reading cache file info {file}: {e}")
         
@@ -184,4 +248,6 @@ class DataCache:
         cache_file = self.cache_dir / self._make_cache_key(
             ticker, from_, to, multiplier, timespan
         )
-        return cache_file.exists()
+        if cache_file.exists():
+            return True
+        return cache_file.with_suffix(".pkl").exists()

@@ -20,7 +20,7 @@ def fetch(
     ticker: str = typer.Option("X:ADAUSD", help="Ticker symbol"),
     from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
     to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
-    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m"),
+    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
 ):
     """Fetch bar data from Polygon.io with selectable timeframe."""
     
@@ -52,7 +52,7 @@ def backtest(
     ticker: str = typer.Option("X:ADAUSD", help="Ticker symbol"),
     from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
     to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
-    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m"),
+    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
     ema_fast_min: int = typer.Option(96 * 15, help="Fast EMA window in minutes"),
     ema_slow_min: int = typer.Option(672 * 15, help="Slow EMA window in minutes"),
     z_window_min: int = typer.Option(672 * 15, help="Z-score lookback in minutes"),

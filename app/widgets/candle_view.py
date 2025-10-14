@@ -1,9 +1,10 @@
 import asyncio
+from typing import Optional
 import pandas as pd
 import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, 
-    QToolBar, QComboBox, QSplitter, QTableWidget, QTableWidgetItem, 
+    QSplitter, QTableWidget, QTableWidgetItem, 
     QHeaderView, QGroupBox, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
@@ -120,13 +121,11 @@ class CandleChartWidget(QWidget):
         self.status_label.setProperty("role", "statusbar")
         status_layout.addWidget(self.status_label)
         
-        # TF selector
-        self.tf_combo = QComboBox()
-        self.tf_combo.addItems([tf.value for tf in [Timeframe.m1, Timeframe.m3, Timeframe.m5, Timeframe.m10, Timeframe.m15]])
-        self.tf_combo.setCurrentText(self.tf.value)
-        self.tf_combo.currentTextChanged.connect(self.on_tf_changed)
-        status_layout.addWidget(QLabel("TF:"))
-        status_layout.addWidget(self.tf_combo)
+        # Progress bar replaces old timeframe selector area
+        self.action_progress = QProgressBar()
+        self.action_progress.setVisible(False)
+        self.action_progress.setMaximumWidth(220)
+        status_layout.addWidget(self.action_progress)
 
         self.refresh_btn = QPushButton("Refresh View")
         self.refresh_btn.setObjectName("primaryButton")
@@ -134,11 +133,6 @@ class CandleChartWidget(QWidget):
         status_layout.addWidget(self.refresh_btn)
         
         layout.addLayout(status_layout)
-        
-        # Progress bar
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
         
         # Vertical splitter for chart and trade history
         splitter = QSplitter(Qt.Vertical)
@@ -185,14 +179,23 @@ class CandleChartWidget(QWidget):
             f"📊 {len(self.feats)} bars | {date_range} | {signals} signals"
         )
 
-    def on_tf_changed(self, value: str):
-        # Update timeframe and refresh
-        try:
-            self.tf = Timeframe(value)
-        except Exception:
-            self.tf = Timeframe.m15
-        # Do not auto-download on TF change in main UI
-        self.status_label.setText("Timeframe changed. Open Settings to reprocess data.")
+    def set_timeframe(self, timeframe: Timeframe):
+        """Set active timeframe (read-only in main chart)."""
+        self.tf = timeframe
+        self.status_label.setText(f"{timeframe.value.upper()} timeframe ready")
+    
+    def show_action_progress(self, message: Optional[str] = None):
+        """Display inline progress while async work runs."""
+        if message:
+            self.status_label.setText(message)
+        self.action_progress.setVisible(True)
+        self.action_progress.setRange(0, 0)
+    
+    def hide_action_progress(self, message: Optional[str] = None):
+        """Hide inline progress indicator."""
+        self.action_progress.setVisible(False)
+        if message:
+            self.status_label.setText(message)
     
     def set_indicator_config(self, config):
         """Update indicator configuration and re-render."""

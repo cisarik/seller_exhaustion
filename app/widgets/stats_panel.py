@@ -31,6 +31,12 @@ class StatsPanel(QWidget):
     # Signal emitted when optimization step completes with backtest results
     optimization_step_complete = Signal(Individual, dict)  # (best_individual, backtest_result)
     
+    # Signal emitted during multi-step optimization for progress tracking
+    progress_updated = Signal(int, int, str)  # (current, total, message)
+    
+    # Signal emitted after generation completes (for thread-safe UI updates)
+    generation_complete = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.trades_df = None
@@ -38,6 +44,10 @@ class StatsPanel(QWidget):
         self.population = None
         self.current_data = None
         self.current_tf = None
+        
+        # Multi-step optimization state
+        self.is_optimizing = False
+        self.stop_requested = False
         
         # GPU optimizer (if available)
         self.gpu_optimizer = None
@@ -50,7 +60,13 @@ class StatsPanel(QWidget):
                 print(f"⚠ Could not initialize GPU optimizer: {e}")
                 self.use_gpu = False
         
+        # Temporary storage for thread results
+        self.temp_backtest_result = None
+        
         self.init_ui()
+        
+        # Connect generation_complete signal for thread-safe UI updates
+        self.generation_complete.connect(self._update_after_generation)
 
     def _get_ga_settings(self) -> dict:
         """Return the latest genetic algorithm settings."""
@@ -288,16 +304,38 @@ class StatsPanel(QWidget):
         self.init_pop_btn.clicked.connect(self.initialize_population)
         btn_layout.addWidget(self.init_pop_btn)
         
-        self.step_btn = QPushButton("Step")
+        self.step_btn = QPushButton("Step (1 Gen)")
         self.step_btn.setObjectName("primaryButton")
         self.step_btn.clicked.connect(self.run_optimization_step)
         self.step_btn.setEnabled(False)
         btn_layout.addWidget(self.step_btn)
         
-        self.optimize_btn = QPushButton("Optimize")
-        self.optimize_btn.setToolTip("Run multiple generations (coming soon)")
+        # Number of generations spinner
+        gen_layout = QHBoxLayout()
+        gen_layout.addWidget(QLabel("Generations:"))
+        self.n_generations_spin = QSpinBox()
+        self.n_generations_spin.setRange(10, 1000)
+        self.n_generations_spin.setValue(50)
+        self.n_generations_spin.setToolTip("Number of generations for multi-step optimization")
+        gen_layout.addWidget(self.n_generations_spin)
+        layout.addLayout(gen_layout)
+        
+        # Optimize and stop buttons
+        opt_btn_layout = QHBoxLayout()
+        self.optimize_btn = QPushButton("🚀 Optimize")
+        self.optimize_btn.setObjectName("primaryButton")
+        self.optimize_btn.setToolTip("Run multiple generations with GPU acceleration")
         self.optimize_btn.setEnabled(False)
-        btn_layout.addWidget(self.optimize_btn)
+        self.optimize_btn.clicked.connect(self.run_multi_step_optimize)
+        opt_btn_layout.addWidget(self.optimize_btn)
+        
+        self.stop_btn = QPushButton("⏹ Stop")
+        self.stop_btn.setToolTip("Stop ongoing optimization (keeps progress)")
+        self.stop_btn.setVisible(False)
+        self.stop_btn.clicked.connect(self.stop_optimization)
+        opt_btn_layout.addWidget(self.stop_btn)
+        
+        layout.addLayout(opt_btn_layout)
         
         layout.addLayout(btn_layout)
         
@@ -543,6 +581,7 @@ class StatsPanel(QWidget):
         self.gen_label.setText(str(self.population.generation))
         self.pop_label.setText(f"{pop_size} individuals (initialized)")
         self.step_btn.setEnabled(True)
+        self.optimize_btn.setEnabled(True)  # Enable multi-step optimize
         
         print(
             "✓ Population initialized with "
@@ -555,7 +594,7 @@ class StatsPanel(QWidget):
         )
     
     def run_optimization_step(self):
-        """Run one generation of evolution and visualize winning strategy."""
+        """Run one generation of evolution asynchronously."""
         if self.population is None:
             print("Error: Population not initialized")
             return
@@ -564,29 +603,49 @@ class StatsPanel(QWidget):
             print("Error: No data loaded")
             return
         
-        try:
-            ga_cfg = self._get_ga_settings()
-            if self.population.size != ga_cfg['population_size']:
-                print(
-                    "⚠ Population size differs from settings "
-                    f"({self.population.size} != {ga_cfg['population_size']}). "
-                    "Reinitialize the population to apply the new size."
-                )
+        # Disable buttons during execution
+        self.step_btn.setEnabled(False)
+        self.step_btn.setText("Running...")
+        self.optimize_btn.setEnabled(False)
+        
+        # Emit progress signal
+        self.progress_updated.emit(0, 1, "Running single evolution step...")
+        
+        # Run in thread to avoid UI freeze
+        from threading import Thread
+        
+        def _run_single_step():
+            try:
+                ga_cfg = self._get_ga_settings()
+                if self.population.size != ga_cfg['population_size']:
+                    print(
+                        "⚠ Population size differs from settings "
+                        f"({self.population.size} != {ga_cfg['population_size']}). "
+                        "Reinitialize the population to apply the new size."
+                    )
 
-            # Disable button during execution
-            self.step_btn.setEnabled(False)
-            self.step_btn.setText("Running...")
-            
-            # Run evolution step (GPU if available, else CPU)
-            print(f"\n{'='*60}")
-            print(f"Running Evolution Step {'[GPU]' if self.use_gpu else '[CPU]'}...")
-            print(f"{'='*60}")
-            
-            if self.use_gpu and self.gpu_optimizer:
-                # GPU-accelerated evolution
-                self.population = self.gpu_optimizer.evolution_step(
-                    self.population,
-                    self.current_data,
+                # Run evolution step (GPU if available, else CPU)
+                print(f"\n{'='*60}")
+                print(f"Running Evolution Step {'[GPU]' if self.use_gpu else '[CPU]'}...")
+                print(f"{'='*60}")
+                
+                if self.use_gpu and self.gpu_optimizer:
+                    # GPU-accelerated evolution
+                    self.population = self.gpu_optimizer.evolution_step(
+                        self.population,
+                        self.current_data,
+                        self.current_tf,
+                        mutation_rate=ga_cfg['mutation_rate'],
+                        sigma=ga_cfg['sigma'],
+                        elite_fraction=ga_cfg['elite_fraction'],
+                        tournament_size=ga_cfg['tournament_size'],
+                        mutation_probability=ga_cfg['mutation_probability']
+                    )
+                else:
+                    # CPU fallback
+                    self.population = evolution_step(
+                        self.population,
+                        self.current_data,
                     self.current_tf,
                     mutation_rate=ga_cfg['mutation_rate'],
                     sigma=ga_cfg['sigma'],
@@ -594,54 +653,86 @@ class StatsPanel(QWidget):
                     tournament_size=ga_cfg['tournament_size'],
                     mutation_probability=ga_cfg['mutation_probability']
                 )
-            else:
-                # CPU fallback
-                self.population = evolution_step(
-                    self.population,
-                    self.current_data,
-                    self.current_tf,
-                    mutation_rate=ga_cfg['mutation_rate'],
-                    sigma=ga_cfg['sigma'],
-                    elite_fraction=ga_cfg['elite_fraction'],
-                    tournament_size=ga_cfg['tournament_size'],
-                    mutation_probability=ga_cfg['mutation_probability']
-                )
+                
+                # Store backtest result for main thread
+                backtest_result = None
+                
+                if self.population.best_ever:
+                    best = self.population.best_ever
+                    
+                    # Show best metrics
+                    if best.metrics:
+                        print(f"\n🏆 Best Individual Metrics:")
+                        print(f"   Fitness: {best.fitness:.4f}")
+                        print(f"   Trades: {best.metrics.get('n', 0)}")
+                        print(f"   Win Rate: {best.metrics.get('win_rate', 0):.2%}")
+                        print(f"   Avg R: {best.metrics.get('avg_R', 0):.2f}")
+                        print(f"   Total PnL: ${best.metrics.get('total_pnl', 0):.4f}")
+                    
+                    # Run backtest with best individual to visualize strategy
+                    print(f"\n📊 Running backtest with best parameters...")
+                    try:
+                        # Build features with best individual's params
+                        raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
+                        feats = build_features(raw_data, best.seller_params, self.current_tf)
+                        
+                        # Run backtest
+                        backtest_result = run_backtest(feats, best.backtest_params)
+                        
+                        print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
+                        
+                    except Exception as e:
+                        print(f"Error running backtest for visualization: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Store results for main thread to process
+                self.temp_backtest_result = backtest_result
+                
+                # Emit signal to update UI in main thread
+                self.generation_complete.emit()
+                
+                # Emit progress completion
+                self.progress_updated.emit(1, 1, "✓ Evolution step complete")
+                
+            except Exception as e:
+                print(f"Error during evolution step: {e}")
+                import traceback
+                traceback.print_exc()
+                self.progress_updated.emit(0, 1, f"❌ Error: {str(e)}")
+            finally:
+                # Re-enable buttons using thread-safe method
+                from PySide6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self.step_btn, "setEnabled", Qt.QueuedConnection, True)
+                QMetaObject.invokeMethod(self.step_btn, "setText", Qt.QueuedConnection, "Step (1 Gen)")
+                QMetaObject.invokeMethod(self.optimize_btn, "setEnabled", Qt.QueuedConnection, True)
+        
+        # Start thread
+        thread = Thread(target=_run_single_step, daemon=True)
+        thread.start()
+    
+    def _update_after_generation(self):
+        """Update UI after generation completes (runs in main thread)."""
+        try:
+            if self.population is None:
+                return
             
-            # Update UI
+            # Update generation label
             self.gen_label.setText(str(self.population.generation))
             
             # Update fitness evolution plot
             self.update_fitness_plot()
             
-            backtest_result = None
-            
+            # Update best individual display
             if self.population.best_ever:
                 best = self.population.best_ever
                 self.best_fitness_label.setText(f"{best.fitness:.4f}")
                 self.apply_best_btn.setEnabled(True)
                 
-                # Show best metrics
-                if best.metrics:
-                    print(f"\n🏆 Best Individual Metrics:")
-                    print(f"   Fitness: {best.fitness:.4f}")
-                    print(f"   Trades: {best.metrics.get('n', 0)}")
-                    print(f"   Win Rate: {best.metrics.get('win_rate', 0):.2%}")
-                    print(f"   Avg R: {best.metrics.get('avg_R', 0):.2f}")
-                    print(f"   Total PnL: ${best.metrics.get('total_pnl', 0):.4f}")
-                
-                # Run backtest with best individual to visualize strategy
-                print(f"\n📊 Running backtest with best parameters...")
-                try:
-                    # Build features with best individual's params
-                    raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
-                    feats = build_features(raw_data, best.seller_params, self.current_tf)
-                    
-                    # Run backtest
-                    backtest_result = run_backtest(feats, best.backtest_params)
-                    
-                    # Update stats display with best individual's results
-                    self.trades_df = backtest_result['trades']
-                    self.metrics = backtest_result['metrics']
+                # Update stats display with backtest results if available
+                if self.temp_backtest_result:
+                    self.trades_df = self.temp_backtest_result['trades']
+                    self.metrics = self.temp_backtest_result['metrics']
                     
                     # Update metrics display
                     self.update_metrics()
@@ -649,13 +740,10 @@ class StatsPanel(QWidget):
                     # Update equity curve
                     self.update_equity_curve()
                     
-                    print(f"✓ Backtest complete: {self.metrics['n']} trades visualized")
-                    
-                except Exception as e:
-                    print(f"Error running backtest for visualization: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    # Emit signal with backtest results for chart update
+                    self.optimization_step_complete.emit(best, self.temp_backtest_result)
             
+            # Update population stats
             stats = self.population.get_stats()
             self.pop_label.setText(
                 f"Gen {self.population.generation} | "
@@ -664,19 +752,10 @@ class StatsPanel(QWidget):
                 f"Best: {stats['max_fitness']:.2f}"
             )
             
-            # Emit signal with backtest results for chart update
-            if self.population.best_ever:
-                self.optimization_step_complete.emit(self.population.best_ever, backtest_result)
-            
         except Exception as e:
-            print(f"Error during optimization: {e}")
+            print(f"Error updating UI after generation: {e}")
             import traceback
             traceback.print_exc()
-        
-        finally:
-            # Re-enable button
-            self.step_btn.setEnabled(True)
-            self.step_btn.setText("Step")
     
     def apply_best_parameters(self):
         """Apply best parameters from population to UI."""
@@ -726,3 +805,212 @@ class StatsPanel(QWidget):
         
         # Clear fitness plot
         self.fitness_plot.clear()
+    
+    def run_multi_step_optimize(self):
+        """
+        Run multiple optimization steps asynchronously.
+        
+        Shows progress and allows stopping to keep current best.
+        """
+        if self.population is None:
+            print("Error: Population not initialized")
+            return
+        
+        if self.current_data is None:
+            print("Error: No data loaded")
+            return
+        
+        if self.is_optimizing:
+            print("Already optimizing...")
+            return
+        
+        n_gens = self.n_generations_spin.value()
+        
+        print(f"\n{'='*70}")
+        print(f"🚀 Starting Multi-Step Optimization: {n_gens} generations")
+        print(f"{'='*70}")
+        
+        # Show GPU recommendations
+        try:
+            from backtest.gpu_manager import get_gpu_manager
+            gpu_mgr = get_gpu_manager()
+            recs = gpu_mgr.get_recommendations(len(self.current_data))
+            
+            if recs['available']:
+                print(f"GPU: {recs['device']}")
+                print(f"VRAM: {recs['memory']['free_gb']:.2f} GB free")
+                print(f"Expected speedup: {recs['estimated_speedup']:.1f}x")
+            print()
+        except:
+            pass
+        
+        # Update UI state
+        self.is_optimizing = True
+        self.stop_requested = False
+        
+        self.step_btn.setEnabled(False)
+        self.optimize_btn.setEnabled(False)
+        self.stop_btn.setVisible(True)
+        self.n_generations_spin.setEnabled(False)
+        
+        # Emit initial progress
+        self.progress_updated.emit(0, n_gens, "Initializing optimization...")
+        
+        # Run optimization in separate thread to not block UI
+        import threading
+        thread = threading.Thread(
+            target=self._run_multi_step_thread,
+            args=(n_gens,),
+            daemon=True
+        )
+        thread.start()
+    
+    def _run_multi_step_thread(self, n_gens: int):
+        """
+        Worker thread for multi-step optimization.
+        
+        This runs in background thread so UI stays responsive.
+        """
+        try:
+            import time
+            start_time = time.time()
+            
+            for gen in range(n_gens):
+                if self.stop_requested:
+                    self.progress_updated.emit(gen, n_gens, "⏹ Stopped by user")
+                    print(f"\n⏹ Optimization stopped at generation {gen} (keeping best individual)")
+                    break
+                
+                # Update progress
+                elapsed = time.time() - start_time
+                avg_time = elapsed / (gen + 1) if gen > 0 else 1
+                remaining = avg_time * (n_gens - gen - 1)
+                
+                msg = f"Generation {gen+1}/{n_gens} | ETA: {remaining:.0f}s"
+                self.progress_updated.emit(gen, n_gens, msg)
+                
+                # Run one evolution step
+                try:
+                    ga_cfg = self._get_ga_settings()
+                    
+                    if self.use_gpu and self.gpu_optimizer:
+                        # GPU-accelerated evolution
+                        self.population = self.gpu_optimizer.evolution_step(
+                            self.population,
+                            self.current_data,
+                            self.current_tf,
+                            mutation_rate=ga_cfg['mutation_rate'],
+                            sigma=ga_cfg['sigma'],
+                            elite_fraction=ga_cfg['elite_fraction'],
+                            tournament_size=ga_cfg['tournament_size'],
+                            mutation_probability=ga_cfg['mutation_probability']
+                        )
+                    else:
+                        # CPU fallback
+                        self.population = evolution_step(
+                            self.population,
+                            self.current_data,
+                            self.current_tf,
+                            mutation_rate=ga_cfg['mutation_rate'],
+                            sigma=ga_cfg['sigma'],
+                            elite_fraction=ga_cfg['elite_fraction'],
+                            tournament_size=ga_cfg['tournament_size'],
+                            mutation_probability=ga_cfg['mutation_probability']
+                        )
+                    
+                    # Update UI (from main thread)
+                    from PySide6.QtCore import QMetaObject, Qt
+                    QMetaObject.invokeMethod(
+                        self,
+                        "_update_after_generation",
+                        Qt.QueuedConnection
+                    )
+                    
+                except Exception as e:
+                    print(f"Error in generation {gen+1}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
+            
+            # Final progress update
+            total_time = time.time() - start_time
+            if not self.stop_requested:
+                self.progress_updated.emit(n_gens, n_gens, f"✓ Complete in {total_time:.1f}s")
+                print(f"\n{'='*70}")
+                print(f"✓ Optimization complete! {n_gens} generations in {total_time:.1f}s")
+                print(f"  Average: {total_time/n_gens:.2f}s per generation")
+                print(f"{'='*70}\n")
+                
+                # Show final best results
+                if self.population.best_ever:
+                    best = self.population.best_ever
+                    print(f"\n🏆 Final Best Individual:")
+                    print(f"   Fitness: {best.fitness:.4f}")
+                    if best.metrics:
+                        print(f"   Trades: {best.metrics.get('n', 0)}")
+                        print(f"   Win Rate: {best.metrics.get('win_rate', 0):.2%}")
+                        print(f"   Avg R: {best.metrics.get('avg_R', 0):.2f}")
+                        print(f"   Total PnL: ${best.metrics.get('total_pnl', 0):.4f}\n")
+        
+        except Exception as e:
+            print(f"Error in multi-step optimization: {e}")
+            import traceback
+            traceback.print_exc()
+            self.progress_updated.emit(0, n_gens, f"❌ Error: {str(e)}")
+        
+        finally:
+            # Restore UI state (from main thread)
+            from PySide6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(
+                self,
+                "_restore_ui_after_optimize",
+                Qt.QueuedConnection
+            )
+    
+    def _update_after_generation(self):
+        """Update UI after each generation (called from main thread)."""
+        try:
+            # Update generation label
+            self.gen_label.setText(str(self.population.generation))
+            
+            # Update fitness plot
+            self.update_fitness_plot()
+            
+            # Update best fitness
+            if self.population.best_ever:
+                self.best_fitness_label.setText(f"{self.population.best_ever.fitness:.4f}")
+                self.apply_best_btn.setEnabled(True)
+        except Exception as e:
+            print(f"Error updating UI: {e}")
+    
+    def _restore_ui_after_optimize(self):
+        """Restore UI state after optimization completes (called from main thread)."""
+        self.is_optimizing = False
+        self.step_btn.setEnabled(True)
+        self.optimize_btn.setEnabled(True)
+        self.stop_btn.setVisible(False)
+        self.n_generations_spin.setEnabled(True)
+        
+        # Run final backtest with best individual
+        if self.population.best_ever:
+            try:
+                best = self.population.best_ever
+                raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
+                feats = build_features(raw_data, best.seller_params, self.current_tf)
+                backtest_result = run_backtest(feats, best.backtest_params)
+                
+                self.trades_df = backtest_result['trades']
+                self.metrics = backtest_result['metrics']
+                self.update_metrics()
+                self.update_equity_curve()
+                
+                # Emit signal for chart visualization
+                self.optimization_step_complete.emit(best, backtest_result)
+            except Exception as e:
+                print(f"Error running final backtest: {e}")
+    
+    def stop_optimization(self):
+        """Stop ongoing multi-step optimization (keeps progress)."""
+        if self.is_optimizing:
+            self.stop_requested = True
+            print("\n⏹ Stop requested... will finish current generation and keep best individual")

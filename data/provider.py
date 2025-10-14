@@ -74,7 +74,13 @@ class DataProvider:
         return await self.fetch_bars(ticker, from_, to, 15, "minute")
 
     async def fetch(self, ticker: str, tf: Timeframe, from_: str, to: str) -> pd.DataFrame:
-        """Fetch bars for given timeframe, with fallback to 1m + local resample on rate-limit/empty."""
+        """Always fetch 1m bars, clean them, then locally resample to target timeframe.
+
+        Dôvody:
+        - konzistentné čistenie a deterministické výsledky
+        - minimalizácia problémov s Polygon agregáciami naprieč TF
+        - lepšia kontrola nad orezaním neúplných intervalov
+        """
         tf_to_multiplier = {
             Timeframe.m1: 1,
             Timeframe.m3: 3,
@@ -84,41 +90,35 @@ class DataProvider:
         }
 
         multiplier = tf_to_multiplier.get(tf, 15)
-        try:
-            return await self.fetch_bars(
-                ticker,
-                from_,
-                to,
-                multiplier,
-                "minute",
-            )
-        except PolygonClient.RateLimitError:
-            # Fallback: download 1m and resample locally
-            base_df = await self.fetch_bars(
-                ticker,
-                from_,
-                to,
-                tf_to_multiplier[Timeframe.m1],
-                "minute",
-            )
 
-            if len(base_df) == 0 or multiplier == 1:
-                return base_df
+        # Vždy stiahnuť 1m (s rate-limit retry už rieši PolygonClient)
+        base_df = await self.fetch_bars(
+            ticker,
+            from_,
+            to,
+            tf_to_multiplier[Timeframe.m1],
+            "minute",
+        )
 
-            df = base_df.copy()
-            # Resample to target timeframe with OHLCV rules
-            ohlcv = df.resample(f"{multiplier}min", label="right", closed="right").agg({
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            }).dropna(subset=["open", "high", "low", "close"])  # drop incomplete intervals
+        if len(base_df) == 0 or multiplier == 1:
+            return base_df
 
-            # Preserve cleaning summary if present
-            summary = df.attrs.get("cleaning_summary")
-            ohlcv.attrs["cleaning_summary"] = summary
-            return ohlcv
+        df = base_df.copy()
+        # Resample na cieľový TF podľa OHLCV pravidiel, pravé uzatváranie
+        ohlcv = df.resample(f"{multiplier}min", label="right", closed="right").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        })
+        # Drop neúplné intervaly (chýbajúci open/close)
+        ohlcv = ohlcv.dropna(subset=["open", "high", "low", "close"])  # volume môže byť 0
+
+        # Zachovať cleaning summary z 1m
+        summary = df.attrs.get("cleaning_summary")
+        ohlcv.attrs["cleaning_summary"] = summary
+        return ohlcv
 
     def estimate_download(
         self,

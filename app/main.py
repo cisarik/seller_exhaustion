@@ -18,6 +18,7 @@ from app.widgets.candle_view import CandleChartWidget
 from app.widgets.settings_dialog import SettingsDialog
 from app.widgets.stats_panel import StatsPanel
 from strategy.seller_exhaustion import build_features
+from core.models import Timeframe
 from backtest.engine import run_backtest
 
 
@@ -117,9 +118,13 @@ class MainWindow(QMainWindow):
             
             # Get strategy params from settings
             params = self.settings_dialog.get_strategy_params()
+            # Determine timeframe from settings
+            tf_mult, tf_unit = self.settings_dialog.get_timeframe()
+            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15}
+            tf = tf_map.get(int(tf_mult), Timeframe.m15)
             
             # Build features
-            feats = build_features(df, params)
+            feats = build_features(df, params, tf)
             
             # Update chart
             self.chart_view.feats = feats

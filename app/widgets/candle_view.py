@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBu
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction
 import pyqtgraph as pg
-from data.provider import DataProvider
+from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 from strategy.seller_exhaustion import SellerParams, build_features
 from indicators.local import sma, rsi, macd
 from core.models import Timeframe
@@ -14,21 +14,31 @@ from core.models import Timeframe
 class CandlestickItem(pg.GraphicsObject):
     """Custom candlestick chart item for PyQtGraph."""
     
-    def __init__(self, data):
+    def __init__(self, data, x_values=None):
         pg.GraphicsObject.__init__(self)
         self.data = data
+        # x_values should be 1D array-like of the same length as data, typically epoch seconds
+        self.x_values = x_values
         self.generatePicture()
     
     def generatePicture(self):
         self.picture = pg.QtGui.QPicture()
         p = pg.QtGui.QPainter(self.picture)
         
-        w = 0.6
+        # Determine candle body width based on median spacing of x_values
+        if self.x_values is not None and len(self.x_values) > 1:
+            diffs = np.diff(self.x_values)
+            step = float(np.median(diffs)) if len(diffs) > 0 else 1.0
+            w = step * 0.8
+        else:
+            w = 0.6
+
         for i, (t, row) in enumerate(self.data.iterrows()):
             open_price = row['open']
             close_price = row['close']
             high_price = row['high']
             low_price = row['low']
+            x = float(self.x_values[i]) if self.x_values is not None else float(i)
             
             # Color based on direction
             if close_price > open_price:
@@ -39,14 +49,14 @@ class CandlestickItem(pg.GraphicsObject):
                 p.setBrush(pg.mkBrush('#f44336'))
             
             # Draw high-low line (wick)
-            p.drawLine(pg.QtCore.QPointF(i, low_price), pg.QtCore.QPointF(i, high_price))
+            p.drawLine(pg.QtCore.QPointF(x, low_price), pg.QtCore.QPointF(x, high_price))
 
             # Draw open-close box (body). Use normalized coordinates so down candles
             # have a visible body instead of collapsing to a line.
             top = max(open_price, close_price)
             bottom = min(open_price, close_price)
             height = max(top - bottom, 1e-6)
-            rect = pg.QtCore.QRectF(i - w / 2, bottom, w, height)
+            rect = pg.QtCore.QRectF(x - w / 2, bottom, w, height)
             p.drawRect(rect)
         
         p.end()
@@ -68,7 +78,6 @@ class CandleChartWidget(QWidget):
         super().__init__()
         self.df = None
         self.feats = None
-        self.dp = DataProvider()
         self.params = SellerParams()
         self.tf = Timeframe.m15
         self.backtest_result = None
@@ -103,9 +112,9 @@ class CandleChartWidget(QWidget):
         status_layout.addWidget(QLabel("TF:"))
         status_layout.addWidget(self.tf_combo)
 
-        self.refresh_btn = QPushButton("Refresh Data")
+        self.refresh_btn = QPushButton("Refresh View")
         self.refresh_btn.setObjectName("primaryButton")
-        self.refresh_btn.clicked.connect(lambda: asyncio.create_task(self.load_initial()))
+        self.refresh_btn.clicked.connect(self.refresh_view)
         status_layout.addWidget(self.refresh_btn)
         
         layout.addLayout(status_layout)
@@ -115,67 +124,27 @@ class CandleChartWidget(QWidget):
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
         
-        # Chart
-        self.plot_widget = pg.PlotWidget()
+        # Chart with DateAxis on bottom
+        axis = DateAxisItem(orientation='bottom')
+        self.plot_widget = pg.PlotWidget(axisItems={'bottom': axis})
         self.plot_widget.setBackground('#0f1a12')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Price', color='#e8f5e9')
-        self.plot_widget.setLabel('bottom', 'Bar Index', color='#e8f5e9')
+        self.plot_widget.setLabel('bottom', 'Time', color='#e8f5e9')
         layout.addWidget(self.plot_widget)
         
         # Info label
         self.info_label = QLabel("Load data to begin")
         layout.addWidget(self.info_label)
     
-    async def load_initial(self):
-        """Load initial data and render chart."""
-        try:
-            self.status_label.setText("Fetching data...")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-            
-            # Fetch data
-            self.df = await self.dp.fetch("X:ADAUSD", self.tf, "2024-01-01", "2025-01-13")
-            
-            if len(self.df) == 0:
-                self.status_label.setText("No data received")
-                return
-
-            summary = self.df.attrs.get("cleaning_summary")
-            
-            # Build features
-            self.status_label.setText("Calculating indicators...")
-            self.feats = build_features(self.df, self.params, self.tf)
-            
-            # Render
-            self.status_label.setText("Rendering chart...")
-            self.render_candles(self.feats)
-            
-            self.status_label.setText(f"Loaded {len(self.feats)} bars")
-
-            extra_info = ""
-            if summary and hasattr(summary, "changed") and summary.changed():
-                dropped = (
-                    summary.dropped_duplicates
-                    + summary.dropped_non_finite
-                    + summary.dropped_non_positive
-                    + summary.dropped_negative_volume
-                )
-                extra_info = f"\nRemoved {dropped} problematic bars during cleaning."
-                if summary.missing_expected_bars:
-                    extra_info += f" Missing bars vs expected cadence: {summary.missing_expected_bars}."
-            
-            self.info_label.setText(
-                f"Date range: {self.feats.index[0]} to {self.feats.index[-1]}\n"
-                f"Signals detected: {self.feats['exhaustion'].sum()}"
-                f"{extra_info}"
-            )
-            
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-            print(f"Error loading data: {e}")
-        finally:
-            self.progress.setVisible(False)
+    def refresh_view(self):
+        """Re-render current features without any downloads."""
+        if self.feats is None:
+            self.status_label.setText("No data loaded. Use Settings to download data.")
+            return
+        self.status_label.setText("Rendering chart...")
+        self.render_candles(self.feats, self.backtest_result)
+        self.status_label.setText(f"Loaded {len(self.feats)} bars")
 
     def on_tf_changed(self, value: str):
         # Update timeframe and refresh
@@ -183,7 +152,8 @@ class CandleChartWidget(QWidget):
             self.tf = Timeframe(value)
         except Exception:
             self.tf = Timeframe.m15
-        asyncio.create_task(self.load_initial())
+        # Do not auto-download on TF change in main UI
+        self.status_label.setText("Timeframe changed. Open Settings to reprocess data.")
     
     def set_indicator_config(self, config):
         """Update indicator configuration and re-render."""
@@ -209,11 +179,16 @@ class CandleChartWidget(QWidget):
         # Store for index mapping
         self.displayed_df = df
         
-        # Create candlestick item
-        candles = CandlestickItem(df[['open', 'high', 'low', 'close']])
+        # Map datetime index to epoch seconds for DateAxis
+        # Keep a mapping array to plot with numerical x values (epoch seconds)
+        epoch_seconds = (df.index.view('int64') // 1_000_000_000).astype(np.int64)
+        self._epoch_seconds = epoch_seconds
+
+        # Create candlestick item drawn in epoch-seconds X coordinates for proper DateAxis labeling
+        candles = CandlestickItem(df[['open', 'high', 'low', 'close']], x_values=epoch_seconds)
         self.plot_widget.addItem(candles)
         
-        x = np.arange(len(df))
+        x = epoch_seconds
         
         # Add EMA Fast
         if self.indicator_config.get('ema_fast', True) and 'ema_f' in df.columns:
@@ -245,7 +220,7 @@ class CandleChartWidget(QWidget):
         if self.indicator_config.get('signals', True) and 'exhaustion' in df.columns:
             signals = df[df['exhaustion'] == True]
             if len(signals) > 0:
-                signal_x = [df.index.get_loc(idx) for idx in signals.index]
+                signal_x = signals.index.view('int64') // 1_000_000_000
                 signal_y = signals['low'].values * 0.998  # Slightly below low
                 scatter = pg.ScatterPlotItem(
                     x=signal_x, y=signal_y,
@@ -267,8 +242,8 @@ class CandleChartWidget(QWidget):
                 for _, trade in trades.iterrows():
                     entry_ts = pd.Timestamp(trade['entry_ts'])
                     if entry_ts in df.index:
-                        idx = df.index.get_loc(entry_ts)
-                        entry_times.append(idx)
+                        idx_ts = int(entry_ts.value // 1_000_000_000)
+                        entry_times.append(idx_ts)
                         entry_prices.append(trade['entry'] * 0.998)  # Slightly below
                 
                 if entry_times:
@@ -289,8 +264,8 @@ class CandleChartWidget(QWidget):
                 for _, trade in trades.iterrows():
                     exit_ts = pd.Timestamp(trade['exit_ts'])
                     if exit_ts in df.index:
-                        idx = df.index.get_loc(exit_ts)
-                        exit_times.append(idx)
+                        idx_ts = int(exit_ts.value // 1_000_000_000)
+                        exit_times.append(idx_ts)
                         exit_prices.append(trade['exit'] * 1.002)  # Slightly above
                         
                         # Color based on outcome

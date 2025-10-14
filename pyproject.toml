@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "ada-agent"
+version = "0.1.0"
+description = "ADA Seller-Exhaustion Trading Agent (15-minute timeframe)"
+authors = ["Michal"]
+readme = "README.md"
+packages = [{include = "app"}, {include = "core"}, {include = "data"}, {include = "indicators"}, {include = "strategy"}, {include = "backtest"}, {include = "exec"}, {include = "config"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+httpx = "^0.27"
+pydantic = "^2.7"
+pydantic-settings = "^2.0"
+pandas = "^2.2"
+numpy = "^1.26"
+pyqtgraph = "^0.13"
+PySide6 = "^6.7"
+qasync = "^0.27"
+typer = {version = "^0.12", extras = ["all"]}
+python-dotenv = "^1.0"
+rich = "^13.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+ruff = "^0.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

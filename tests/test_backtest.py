@@ -38,7 +38,7 @@ def test_run_backtest_no_signals():
 
 
 def test_run_backtest_with_signal():
-    """Test backtest with a winning signal."""
+    """Test backtest with a winning signal using traditional TP."""
     dates = pd.date_range('2024-01-01', periods=20, freq='15min')
     
     # Create scenario: signal at bar 5, price goes up
@@ -58,7 +58,15 @@ def test_run_backtest_with_signal():
     # Adjust high to allow TP hit
     df.loc[df.index[10], 'high'] = 0.60  # Should hit TP
     
-    params = BacktestParams(atr_stop_mult=0.7, reward_r=2.0, max_hold=96)
+    # Enable traditional TP and stop-loss for this test
+    params = BacktestParams(
+        use_stop_loss=True,
+        use_traditional_tp=True,
+        use_fib_exits=False,
+        atr_stop_mult=0.7,
+        reward_r=2.0,
+        max_hold=96
+    )
     result = run_backtest(df, params)
     
     # Should have at least one trade

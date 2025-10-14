@@ -17,6 +17,7 @@ from app.theme import DARK_FOREST_QSS
 from app.widgets.candle_view import CandleChartWidget
 from app.widgets.settings_dialog import SettingsDialog
 from app.widgets.stats_panel import StatsPanel
+from app.widgets.strategy_editor import StrategyEditor
 from strategy.seller_exhaustion import build_features
 from core.models import Timeframe
 from backtest.engine import run_backtest
@@ -32,7 +33,9 @@ class MainWindow(QMainWindow):
         
         # Data and settings
         self.current_data = None
+        self.current_tf = Timeframe.m15
         self.settings_dialog = None
+        self.strategy_editor = None
         
         self.init_ui()
     
@@ -51,6 +54,9 @@ class MainWindow(QMainWindow):
         # Right side: Stats panel
         self.stats_panel = StatsPanel()
         splitter.addWidget(self.stats_panel)
+        
+        # Connect optimization signal
+        self.stats_panel.optimization_step_complete.connect(self.on_optimization_step_complete)
         
         # Set initial sizes (chart gets 70%, stats gets 30%)
         splitter.setSizes([1120, 480])
@@ -75,6 +81,12 @@ class MainWindow(QMainWindow):
         settings_action.setToolTip("Configure data download, strategy parameters, and indicators")
         settings_action.triggered.connect(self.show_settings)
         toolbar.addAction(settings_action)
+        
+        # Strategy Editor action
+        strategy_action = QAction("📊 Strategy Editor", self)
+        strategy_action.setToolTip("Edit strategy parameters and manage parameter sets")
+        strategy_action.triggered.connect(self.show_strategy_editor)
+        toolbar.addAction(strategy_action)
         
         toolbar.addSeparator()
         
@@ -109,6 +121,34 @@ class MainWindow(QMainWindow):
         
         self.settings_dialog.exec()
     
+    def show_strategy_editor(self):
+        """Show strategy editor dialog."""
+        if not self.strategy_editor:
+            from PySide6.QtWidgets import QDialog, QVBoxLayout
+            
+            # Create a dialog wrapper for the strategy editor
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Strategy Parameter Editor")
+            dialog.setMinimumWidth(1200)
+            dialog.setMinimumHeight(800)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # Create strategy editor widget
+            editor = StrategyEditor(dialog)
+            
+            # Connect signals
+            editor.params_changed.connect(self.on_strategy_params_changed)
+            editor.params_loaded.connect(self.on_strategy_params_loaded)
+            
+            layout.addWidget(editor)
+            
+            # Store references
+            self.strategy_editor = dialog
+            self.strategy_editor_widget = editor
+        
+        self.strategy_editor.exec()
+    
     def on_data_downloaded(self, df):
         """Handle data download completion."""
         try:
@@ -118,6 +158,8 @@ class MainWindow(QMainWindow):
             
             # Get strategy params from settings
             params = self.settings_dialog.get_strategy_params()
+            bt_params = self.settings_dialog.get_backtest_params()
+            
             # Determine timeframe from settings
             tf_mult, tf_unit = self.settings_dialog.get_timeframe()
             tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15}
@@ -139,6 +181,13 @@ class MainWindow(QMainWindow):
             
             # Store data
             self.current_data = feats
+            self.current_tf = tf
+            
+            # Load parameters into stats panel
+            self.stats_panel.load_params_from_settings(params, bt_params)
+            
+            # Pass data to stats panel for optimization
+            self.stats_panel.set_current_data(feats, tf)
             
             # Enable backtest button
             self.backtest_action.setEnabled(True)
@@ -182,14 +231,18 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, 0)
             self.backtest_action.setEnabled(False)
             
-            # Get backtest params from settings
-            bt_params = self.settings_dialog.get_backtest_params()
+            # Get current params from stats panel (user may have edited them)
+            seller_params, bt_params = self.stats_panel.get_current_params()
+            
+            # Rebuild features with current params
+            feats = build_features(self.current_data[['open', 'high', 'low', 'close', 'volume']], 
+                                   seller_params, self.current_tf)
             
             # Run backtest (in executor to avoid blocking)
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 run_backtest,
-                self.current_data,
+                feats,
                 bt_params
             )
             
@@ -238,9 +291,69 @@ class MainWindow(QMainWindow):
         """Clear backtest results."""
         self.stats_panel.clear()
         self.chart_view.backtest_result = None
+        self.chart_view.update_trade_table(None)
         if self.current_data is not None:
             self.chart_view.render_candles(self.current_data)
         self.statusBar().showMessage("Results cleared")
+    
+    def on_optimization_step_complete(self, best_individual, backtest_result):
+        """Handle optimization step completion and update chart."""
+        print(f"\n🎯 Displaying winning strategy on chart...")
+        
+        if backtest_result is None:
+            print("⚠ No backtest result to display")
+            return
+        
+        try:
+            # Get best individual's parameters
+            seller_params = best_individual.seller_params
+            
+            # Rebuild features for chart display
+            raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
+            feats = build_features(raw_data, seller_params, self.current_tf)
+            
+            # Update chart with features and backtest results
+            self.chart_view.feats = feats
+            self.chart_view.params = seller_params
+            self.chart_view.set_backtest_result(backtest_result)
+            
+            # Update status bar
+            metrics = backtest_result['metrics']
+            self.statusBar().showMessage(
+                f"🏆 Gen {best_individual.generation} Best: "
+                f"{metrics['n']} trades | "
+                f"Win rate: {metrics['win_rate']:.1%} | "
+                f"Avg R: {metrics['avg_R']:.2f} | "
+                f"Fitness: {best_individual.fitness:.4f}"
+            )
+            
+            print(f"✓ Chart updated with winning strategy")
+            
+        except Exception as e:
+            print(f"Error updating chart: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def on_strategy_params_changed(self):
+        """Handle strategy parameter changes from editor."""
+        self.statusBar().showMessage("Strategy parameters updated", 3000)
+    
+    def on_strategy_params_loaded(self, seller_params, backtest_params):
+        """Handle strategy parameter loading from editor."""
+        # Update settings dialog if it exists
+        if self.settings_dialog:
+            self.settings_dialog.set_strategy_params(seller_params)
+            self.settings_dialog.set_backtest_params(backtest_params)
+        
+        # Update stats panel if it exists
+        if hasattr(self, 'stats_panel'):
+            self.stats_panel.load_params(seller_params, backtest_params)
+        
+        self.statusBar().showMessage("Parameters loaded from file", 3000)
+        
+        # Re-run backtest if data is loaded
+        if self.current_data is not None:
+            asyncio.create_task(self.run_backtest())
     
     def show_help(self):
         """Show quick help dialog."""
@@ -251,6 +364,7 @@ class MainWindow(QMainWindow):
             "<p><b>Getting Started:</b></p>"
             "<ol>"
             "<li>Click <b>Settings</b> to download historical data</li>"
+            "<li>Click <b>📊 Strategy Editor</b> to view/edit strategy parameters with explanations</li>"
             "<li>Configure strategy parameters and indicators</li>"
             "<li>Click <b>Run Backtest</b> to test the strategy</li>"
             "<li>View results in the Stats panel and chart markers</li>"
@@ -262,11 +376,19 @@ class MainWindow(QMainWindow):
             "<li>🔽 Red/Green arrows down: Sell orders (exits)<br>"
             "   &nbsp;&nbsp;&nbsp;Green = winning trade, Red = losing trade</li>"
             "</ul>"
+            "<p><b>Strategy Editor Features:</b></p>"
+            "<ul>"
+            "<li>View all parameters with detailed explanations</li>"
+            "<li>Save/load evolved parameter sets</li>"
+            "<li>Export parameters to YAML</li>"
+            "<li>Fibonacci retracement exit configuration</li>"
+            "</ul>"
             "<p><b>Tips:</b></p>"
             "<ul>"
             "<li>Download at least 7 days of data for accurate indicators</li>"
             "<li>Toggle indicators in Settings → Chart Indicators</li>"
             "<li>Export trades to CSV from the Stats panel</li>"
+            "<li>Save good parameter sets via Strategy Editor</li>"
             "</ul>"
         )
     

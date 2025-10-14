@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 from indicators.local import ema, atr, zscore
+from indicators.fibonacci import add_fib_levels_to_df
 from core.models import Timeframe, minutes_to_bars
 
 
@@ -28,7 +29,14 @@ class SellerParams:
     cloc_min: float = 0.6
 
 
-def build_features(df: pd.DataFrame, p: SellerParams, tf: Timeframe = Timeframe.m15) -> pd.DataFrame:
+def build_features(
+    df: pd.DataFrame,
+    p: SellerParams,
+    tf: Timeframe = Timeframe.m15,
+    add_fib: bool = True,
+    fib_lookback: int = 96,
+    fib_lookahead: int = 5
+) -> pd.DataFrame:
     """
     Build features for seller exhaustion detection.
     
@@ -37,6 +45,11 @@ def build_features(df: pd.DataFrame, p: SellerParams, tf: Timeframe = Timeframe.
     - Volume z-score spike > vol_z threshold
     - True Range z-score spike > tr_z threshold
     - Close in top portion of candle (cloc > cloc_min)
+    
+    Additionally calculates Fibonacci retracement levels for exits:
+    - Finds swing high before signal
+    - Calculates Fib levels from signal low to swing high
+    - Levels: 38.2%, 50%, 61.8%, 78.6%, 100%
     """
     out = df.copy()
     
@@ -74,6 +87,15 @@ def build_features(df: pd.DataFrame, p: SellerParams, tf: Timeframe = Timeframe.
         (out["tr_z"] > p.tr_z) &
         (out["cloc"] > p.cloc_min)
     )
+    
+    # Add Fibonacci retracement levels
+    if add_fib:
+        out = add_fib_levels_to_df(
+            out,
+            signal_col="exhaustion",
+            lookback=fib_lookback,
+            lookahead=fib_lookahead
+        )
     
     return out
 

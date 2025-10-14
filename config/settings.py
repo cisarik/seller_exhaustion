@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     backtest_max_hold: int = 96
     backtest_fee_bp: float = 5.0
     backtest_slippage_bp: float = 5.0
+
+    # Genetic Algorithm Parameters
+    ga_population_size: int = 24
+    ga_mutation_rate: float = 0.3
+    ga_sigma: float = 0.1
+    ga_elite_fraction: float = 0.1
+    ga_tournament_size: int = 3
+    ga_mutation_probability: float = 0.9
     
     # Chart Indicator Display
     chart_ema_fast: bool = True
@@ -124,6 +132,14 @@ class SettingsManager:
             f.write(f"BACKTEST_MAX_HOLD={existing.get('BACKTEST_MAX_HOLD', '96')}\n")
             f.write(f"BACKTEST_FEE_BP={existing.get('BACKTEST_FEE_BP', '5.0')}\n")
             f.write(f"BACKTEST_SLIPPAGE_BP={existing.get('BACKTEST_SLIPPAGE_BP', '5.0')}\n\n")
+
+            f.write("# Genetic Algorithm Parameters\n")
+            f.write(f"GA_POPULATION_SIZE={existing.get('GA_POPULATION_SIZE', '24')}\n")
+            f.write(f"GA_MUTATION_RATE={existing.get('GA_MUTATION_RATE', '0.3')}\n")
+            f.write(f"GA_SIGMA={existing.get('GA_SIGMA', '0.1')}\n")
+            f.write(f"GA_ELITE_FRACTION={existing.get('GA_ELITE_FRACTION', '0.1')}\n")
+            f.write(f"GA_TOURNAMENT_SIZE={existing.get('GA_TOURNAMENT_SIZE', '3')}\n")
+            f.write(f"GA_MUTATION_PROBABILITY={existing.get('GA_MUTATION_PROBABILITY', '0.9')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

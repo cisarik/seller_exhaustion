@@ -1,9 +1,13 @@
 import asyncio
 import pandas as pd
 import numpy as np
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QToolBar, QComboBox
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, 
+    QToolBar, QComboBox, QSplitter, QTableWidget, QTableWidgetItem, 
+    QHeaderView, QGroupBox, QFileDialog
+)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 from strategy.seller_exhaustion import SellerParams, build_features
@@ -124,6 +128,14 @@ class CandleChartWidget(QWidget):
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
         
+        # Vertical splitter for chart and trade history
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Top: Chart widget
+        chart_widget = QWidget()
+        chart_layout = QVBoxLayout(chart_widget)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        
         # Chart with DateAxis on bottom
         axis = DateAxisItem(orientation='bottom')
         self.plot_widget = pg.PlotWidget(axisItems={'bottom': axis})
@@ -131,11 +143,22 @@ class CandleChartWidget(QWidget):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Price', color='#e8f5e9')
         self.plot_widget.setLabel('bottom', 'Time', color='#e8f5e9')
-        layout.addWidget(self.plot_widget)
+        chart_layout.addWidget(self.plot_widget)
         
         # Info label
         self.info_label = QLabel("Load data to begin")
-        layout.addWidget(self.info_label)
+        chart_layout.addWidget(self.info_label)
+        
+        splitter.addWidget(chart_widget)
+        
+        # Bottom: Trade history table
+        self.trades_group = self.create_trades_section()
+        splitter.addWidget(self.trades_group)
+        
+        # Set initial sizes (chart gets 70%, trade history gets 30%)
+        splitter.setSizes([700, 300])
+        
+        layout.addWidget(splitter)
     
     def refresh_view(self):
         """Re-render current features without any downloads."""
@@ -166,6 +189,12 @@ class CandleChartWidget(QWidget):
         self.backtest_result = result
         if self.feats is not None:
             self.render_candles(self.feats, result)
+        
+        # Update trade table
+        if result and 'trades' in result:
+            self.update_trade_table(result['trades'])
+        else:
+            self.update_trade_table(None)
     
     def render_candles(self, df: pd.DataFrame, backtest_result=None):
         """Render candlesticks, indicators, and trade markers."""
@@ -287,3 +316,136 @@ class CandleChartWidget(QWidget):
         
         # Add legend
         self.plot_widget.addLegend()
+    
+    def create_trades_section(self):
+        """Create trade list table."""
+        group = QGroupBox("Trade History")
+        layout = QVBoxLayout()
+        
+        self.trades_table = QTableWidget()
+        self.trades_table.setColumnCount(9)
+        self.trades_table.setHorizontalHeaderLabels([
+            "#", "Entry Time", "Exit Time", "Entry $", "Exit $",
+            "PnL $", "R-Multiple", "Bars", "Exit Reason"
+        ])
+        
+        # Set column resize modes
+        header = self.trades_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        
+        self.trades_table.setAlternatingRowColors(True)
+        self.trades_table.setSelectionBehavior(QTableWidget.SelectRows)
+        
+        layout.addWidget(self.trades_table)
+        
+        # Export button
+        export_layout = QHBoxLayout()
+        export_layout.addStretch()
+        
+        self.export_btn = QPushButton("Export Trades to CSV")
+        self.export_btn.clicked.connect(self.export_trades)
+        self.export_btn.setEnabled(False)
+        export_layout.addWidget(self.export_btn)
+        
+        layout.addLayout(export_layout)
+        
+        group.setLayout(layout)
+        return group
+    
+    def update_trade_table(self, trades_df):
+        """Update trade list table."""
+        self.trades_table.setRowCount(0)
+        
+        if trades_df is None or len(trades_df) == 0:
+            self.export_btn.setEnabled(False)
+            return
+        
+        self.trades_table.setRowCount(len(trades_df))
+        self.export_btn.setEnabled(True)
+        
+        for i, (idx, trade) in enumerate(trades_df.iterrows()):
+            # Trade number
+            self.trades_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            
+            # Entry time
+            entry_time = str(trade['entry_ts'])[:19]
+            self.trades_table.setItem(i, 1, QTableWidgetItem(entry_time))
+            
+            # Exit time
+            exit_time = str(trade['exit_ts'])[:19]
+            self.trades_table.setItem(i, 2, QTableWidgetItem(exit_time))
+            
+            # Entry price
+            entry_item = QTableWidgetItem(f"{trade['entry']:.4f}")
+            entry_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.trades_table.setItem(i, 3, entry_item)
+            
+            # Exit price
+            exit_item = QTableWidgetItem(f"{trade['exit']:.4f}")
+            exit_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.trades_table.setItem(i, 4, exit_item)
+            
+            # PnL
+            pnl = trade['pnl']
+            pnl_item = QTableWidgetItem(f"{pnl:.4f}")
+            pnl_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if pnl > 0:
+                pnl_item.setForeground(QColor('#4caf50'))
+            else:
+                pnl_item.setForeground(QColor('#f44336'))
+            self.trades_table.setItem(i, 5, pnl_item)
+            
+            # R-multiple
+            r = trade['R']
+            r_item = QTableWidgetItem(f"{r:.2f}R")
+            r_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if r > 0:
+                r_item.setForeground(QColor('#4caf50'))
+            else:
+                r_item.setForeground(QColor('#f44336'))
+            self.trades_table.setItem(i, 6, r_item)
+            
+            # Bars held
+            bars = trade.get('bars_held', '--')
+            bars_item = QTableWidgetItem(str(bars))
+            bars_item.setTextAlignment(Qt.AlignCenter)
+            self.trades_table.setItem(i, 7, bars_item)
+            
+            # Exit reason
+            reason = trade['reason']
+            reason_item = QTableWidgetItem(reason.upper())
+            reason_item.setTextAlignment(Qt.AlignCenter)
+            if reason == 'tp':
+                reason_item.setForeground(QColor('#4caf50'))
+            elif reason in ['stop', 'stop_gap']:
+                reason_item.setForeground(QColor('#f44336'))
+            else:
+                reason_item.setForeground(QColor('#ff9800'))
+            self.trades_table.setItem(i, 8, reason_item)
+    
+    def export_trades(self):
+        """Export trades to CSV file."""
+        if self.backtest_result is None or len(self.backtest_result.get('trades', [])) == 0:
+            return
+        
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Trades",
+            "trades.csv",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if filename:
+            try:
+                self.backtest_result['trades'].to_csv(filename, index=False)
+                print(f"✓ Exported {len(self.backtest_result['trades'])} trades to {filename}")
+            except Exception as e:
+                print(f"Error exporting trades: {e}")

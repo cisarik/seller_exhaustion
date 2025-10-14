@@ -19,6 +19,9 @@ qasync = "^0.27"
 typer = {version = "^0.12", extras = ["all"]}
 python-dotenv = "^1.0"
 rich = "^13.0"
+torch = "^2.8.0"
+torchvision = "^0.23.0"
+pyyaml = "^6.0.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

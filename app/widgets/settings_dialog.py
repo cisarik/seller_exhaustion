@@ -62,6 +62,9 @@ class SettingsDialog(QDialog):
         
         # Backtest Parameters Tab
         tabs.addTab(self.create_backtest_tab(), "Backtest Parameters")
+
+        # Optimization Parameters Tab
+        tabs.addTab(self.create_optimizer_tab(), "Optimization")
         
         layout.addWidget(tabs)
         
@@ -372,6 +375,81 @@ class SettingsDialog(QDialog):
         
         layout.addStretch()
         return widget
+
+    def create_optimizer_tab(self):
+        """Create optimization / genetic algorithm tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        group = QGroupBox("Genetic Algorithm Parameters")
+        form_layout = QFormLayout()
+
+        # Population size
+        self.ga_population = QSpinBox()
+        self.ga_population.setRange(4, 256)
+        self.ga_population.setValue(24)
+        self.ga_population.setSuffix(" individuals")
+        form_layout.addRow("Population Size:", self.ga_population)
+
+        # Mutation rate per parameter
+        self.ga_mutation_rate = QDoubleSpinBox()
+        self.ga_mutation_rate.setRange(0.0, 1.0)
+        self.ga_mutation_rate.setSingleStep(0.05)
+        self.ga_mutation_rate.setDecimals(3)
+        self.ga_mutation_rate.setValue(0.3)
+        form_layout.addRow("Mutation Rate:", self.ga_mutation_rate)
+
+        # Mutation sigma (strength)
+        self.ga_sigma = QDoubleSpinBox()
+        self.ga_sigma.setRange(0.01, 1.0)
+        self.ga_sigma.setSingleStep(0.01)
+        self.ga_sigma.setDecimals(3)
+        self.ga_sigma.setValue(0.1)
+        form_layout.addRow("Mutation Sigma:", self.ga_sigma)
+
+        # Elitism fraction
+        self.ga_elite_fraction = QDoubleSpinBox()
+        self.ga_elite_fraction.setRange(0.0, 0.5)
+        self.ga_elite_fraction.setSingleStep(0.05)
+        self.ga_elite_fraction.setDecimals(3)
+        self.ga_elite_fraction.setValue(0.1)
+        form_layout.addRow("Elite Fraction:", self.ga_elite_fraction)
+
+        # Tournament size
+        self.ga_tournament_size = QSpinBox()
+        self.ga_tournament_size.setRange(2, 10)
+        self.ga_tournament_size.setValue(3)
+        form_layout.addRow("Tournament Size:", self.ga_tournament_size)
+
+        # Mutation probability (per offspring)
+        self.ga_mutation_probability = QDoubleSpinBox()
+        self.ga_mutation_probability.setRange(0.0, 1.0)
+        self.ga_mutation_probability.setSingleStep(0.05)
+        self.ga_mutation_probability.setDecimals(3)
+        self.ga_mutation_probability.setValue(0.9)
+        form_layout.addRow("Mutation Probability:", self.ga_mutation_probability)
+
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(self.reset_ga_params)
+        layout.addWidget(reset_btn)
+
+        info = QLabel(
+            "💡 These controls adjust the evolutionary optimizer.\n"
+            "- Higher population improves exploration but needs more computation.\n"
+            "- Mutation rate and sigma control how aggressively new solutions mutate.\n"
+            "- Elite fraction preserves top performers per generation.\n"
+            "- Tournament size alters selection pressure.\n"
+            "- Mutation probability sets how often offspring are mutated."
+        )
+        info.setWordWrap(True)
+        info.setProperty("variant", "secondary")
+        layout.addWidget(info)
+
+        layout.addStretch()
+        return widget
     
     def load_from_settings(self):
         """Load UI values from saved settings."""
@@ -410,6 +488,14 @@ class SettingsDialog(QDialog):
         self.max_hold.setValue(settings.backtest_max_hold)
         self.fee_bp.setValue(settings.backtest_fee_bp)
         self.slippage_bp.setValue(settings.backtest_slippage_bp)
+
+        # Genetic algorithm parameters
+        self.ga_population.setValue(settings.ga_population_size)
+        self.ga_mutation_rate.setValue(settings.ga_mutation_rate)
+        self.ga_sigma.setValue(settings.ga_sigma)
+        self.ga_elite_fraction.setValue(settings.ga_elite_fraction)
+        self.ga_tournament_size.setValue(settings.ga_tournament_size)
+        self.ga_mutation_probability.setValue(settings.ga_mutation_probability)
         
         # Chart indicators
         self.show_ema_fast.setChecked(settings.chart_ema_fast)
@@ -454,6 +540,14 @@ class SettingsDialog(QDialog):
                 'backtest_max_hold': self.max_hold.value(),
                 'backtest_fee_bp': self.fee_bp.value(),
                 'backtest_slippage_bp': self.slippage_bp.value(),
+                
+                # Genetic algorithm
+                'ga_population_size': self.ga_population.value(),
+                'ga_mutation_rate': self.ga_mutation_rate.value(),
+                'ga_sigma': self.ga_sigma.value(),
+                'ga_elite_fraction': self.ga_elite_fraction.value(),
+                'ga_tournament_size': self.ga_tournament_size.value(),
+                'ga_mutation_probability': self.ga_mutation_probability.value(),
                 
                 # Chart indicators
                 'chart_ema_fast': self.show_ema_fast.isChecked(),
@@ -650,6 +744,15 @@ class SettingsDialog(QDialog):
         self.max_hold.setValue(96)
         self.fee_bp.setValue(5.0)
         self.slippage_bp.setValue(5.0)
+
+    def reset_ga_params(self):
+        """Reset genetic algorithm parameters to defaults."""
+        self.ga_population.setValue(24)
+        self.ga_mutation_rate.setValue(0.3)
+        self.ga_sigma.setValue(0.1)
+        self.ga_elite_fraction.setValue(0.1)
+        self.ga_tournament_size.setValue(3)
+        self.ga_mutation_probability.setValue(0.9)
     
     def get_timeframe(self):
         """Get selected timeframe as (multiplier, unit) tuple."""

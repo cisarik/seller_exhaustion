@@ -7,10 +7,10 @@ Runs multiple backtests in parallel on GPU for massive speedup during optimizati
 import torch
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from core.models import BacktestParams, Timeframe
+from core.models import BacktestParams, Timeframe, FitnessConfig
 from strategy.seller_exhaustion import SellerParams, build_features
 from indicators.gpu import get_device, to_tensor, to_numpy
 
@@ -87,6 +87,7 @@ def _run_single_backtest_gpu(df: pd.DataFrame, p: BacktestParams, device: torch.
 
 def calculate_fitness_gpu_batch(
     metrics_list: List[Dict[str, Any]],
+    fitness_config: Optional[FitnessConfig] = None,
     device: torch.device = None
 ) -> torch.Tensor:
     """
@@ -94,6 +95,7 @@ def calculate_fitness_gpu_batch(
     
     Args:
         metrics_list: List of backtest metrics
+        fitness_config: Fitness configuration (uses balanced defaults if None)
         device: PyTorch device
     
     Returns:
@@ -102,31 +104,15 @@ def calculate_fitness_gpu_batch(
     if device is None:
         device = get_device()
     
-    n = len(metrics_list)
+    from backtest.optimizer import calculate_fitness
     
-    # Extract metrics into tensors
-    n_trades = torch.tensor([m.get('n', 0) for m in metrics_list], device=device, dtype=torch.float32)
-    sharpe = torch.tensor([m.get('sharpe', 0.0) for m in metrics_list], device=device, dtype=torch.float32)
-    win_rate = torch.tensor([m.get('win_rate', 0.0) for m in metrics_list], device=device, dtype=torch.float32)
-    avg_r = torch.tensor([m.get('avg_R', 0.0) for m in metrics_list], device=device, dtype=torch.float32)
-    max_dd = torch.tensor([m.get('max_dd', 0.0) for m in metrics_list], device=device, dtype=torch.float32)
+    # Calculate fitness per individual using shared fitness configuration
+    scores = [
+        float(calculate_fitness(metrics, fitness_config))
+        for metrics in metrics_list
+    ]
     
-    # Penalize if too few trades
-    trade_penalty = torch.where(
-        n_trades < 10,
-        (10 - n_trades) * 0.1,
-        torch.zeros_like(n_trades)
-    )
-    
-    # Composite fitness (vectorized!)
-    fitness = (
-        sharpe * 0.4 +
-        win_rate * 0.3 +
-        avg_r * 0.2 +
-        torch.clamp(max_dd / 0.1, min=-10) * 0.1
-    ) - trade_penalty
-    
-    return fitness
+    return torch.tensor(scores, device=device, dtype=torch.float32)
 
 
 class GPUBacktestAccelerator:
@@ -154,7 +140,8 @@ class GPUBacktestAccelerator:
         data_ohlcv: pd.DataFrame,
         seller_params_list: List[SellerParams],
         backtest_params_list: List[BacktestParams],
-        tf: Timeframe = Timeframe.m15
+        tf: Timeframe = Timeframe.m15,
+        fitness_config: Optional[FitnessConfig] = None
     ) -> tuple:
         """
         Evaluate multiple parameter combinations in batch.
@@ -181,7 +168,11 @@ class GPUBacktestAccelerator:
         metrics_list = [r['metrics'] for r in results]
         
         # Calculate fitness on GPU
-        fitness_tensor = calculate_fitness_gpu_batch(metrics_list, self.device)
+        fitness_tensor = calculate_fitness_gpu_batch(
+            metrics_list,
+            fitness_config=fitness_config,
+            device=self.device
+        )
         fitness_scores = to_numpy(fitness_tensor)
         
         return fitness_scores, metrics_list, results

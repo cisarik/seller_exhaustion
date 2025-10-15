@@ -16,13 +16,14 @@ from backtest.optimizer import (
 from backtest.engine_gpu import GPUBacktestAccelerator, has_gpu
 from backtest.engine_gpu_batch import BatchGPUBacktestEngine, BatchBacktestConfig
 from strategy.seller_exhaustion import SellerParams
-from core.models import BacktestParams, Timeframe
+from core.models import BacktestParams, Timeframe, FitnessConfig
 
 
 def evolution_step_gpu(
     population: Population,
     data: pd.DataFrame,
     tf: Timeframe = Timeframe.m15,
+    fitness_config: FitnessConfig = None,
     mutation_rate: float = 0.3,
     sigma: float = 0.1,
     elite_fraction: float = 0.1,
@@ -39,6 +40,7 @@ def evolution_step_gpu(
         population: Current population
         data: Historical OHLCV data
         tf: Timeframe
+        fitness_config: Fitness configuration for scoring individuals
         mutation_rate: Probability of mutating each parameter
         sigma: Mutation strength (std dev as fraction of range)
         elite_fraction: Fraction of population to preserve as elite
@@ -83,7 +85,11 @@ def evolution_step_gpu(
             # Calculate fitness from metrics
             from backtest.engine_gpu import calculate_fitness_gpu_batch
             metrics_list = [r['metrics'] for r in results_list]
-            fitness_tensor = calculate_fitness_gpu_batch(metrics_list, fitness_config)
+            fitness_tensor = calculate_fitness_gpu_batch(
+                metrics_list,
+                fitness_config=fitness_config,
+                device=batch_engine.device
+            )
             fitness_scores = fitness_tensor.cpu().numpy()
             
             # Update individuals with results
@@ -108,7 +114,8 @@ def evolution_step_gpu(
                 data,
                 seller_params_list,
                 backtest_params_list,
-                tf
+                tf,
+                fitness_config=fitness_config
             )
             
             for ind, fitness, metrics in zip(unevaluated, fitness_scores, metrics_list):

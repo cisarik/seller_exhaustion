@@ -1,9 +1,12 @@
-# AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion Trading Agent
+# AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion **BACKTESTING** Tool
 
-**Last Updated**: 2025-01-15 (v2.1 - Configurable Fitness Functions)  
-**Project**: ADA 15-minute Seller-Exhaustion Trading Agent  
+**Last Updated**: 2025-01-15 (v2.1 - Strategy Export System)  
+**Project**: ADA Seller-Exhaustion **Backtesting & Strategy Development** Tool  
 **Owner**: Michal  
 **Python Version**: 3.10+ (tested on 3.13)
+
+**IMPORTANT**: This is the BACKTESTING application, NOT the live trading agent.  
+For live trading specifications, see **PRD_TRADING_AGENT.md**.
 
 ## Table of Contents
 
@@ -2321,22 +2324,512 @@ cli.py / main.py (presentation)
 5. Apply Best Parameters writes results back into UI + settings if saved
 ```
 
-### Data Flow: Live Trading (Future)
+### Data Flow: Strategy Export (NEW v2.1)
 
 ```
-1. Scheduler waits for bar close
+1. User optimizes strategy in backtesting tool
    ↓
-2. Fetch recent bars (last 7 days)
+2. User clicks "💾 Export Strategy" button
    ↓
-3. build_features() on full history
+3. UI calls param_editor.get_params() → (seller_params, backtest_params, fitness_config)
    ↓
-4. Check latest bar for signal
+4. main.py creates TradingConfig with all parameters
    ↓
-5. If signal: log paper trade (entry at next open)
+5. core/strategy_export.py exports to JSON file
    ↓
-6. Check existing positions for stop/TP
+6. Validation checks run (credentials, paper trading, risk limits)
    ↓
-7. Sleep until next bar close
+7. Success dialog shows next steps + warnings
+   ↓
+8. User copies JSON to separate trading agent application
+   ↓
+9. Trading agent imports config and starts paper trading
 ```
 
 ---
+
+## V2.1 Strategy Export System
+
+### Overview
+
+The Strategy Export System bridges the **backtesting tool** (this application) with a separate **trading agent** application (to be implemented). It provides complete parameter export/import with security, validation, and comprehensive documentation.
+
+**Key Achievement**: One-click export of all strategy parameters, risk management, and exchange settings into a single JSON file ready for deployment.
+
+---
+
+### Module: core/strategy_export.py
+
+**Purpose**: Complete strategy configuration export/import with validation and security.
+
+**Size**: 422 lines
+
+**Key Classes**:
+
+#### 1. RiskManagementConfig
+
+Position sizing and protective limits:
+```python
+@dataclass
+class RiskManagementConfig:
+    risk_per_trade_percent: float = 1.0      # % of account per trade
+    max_position_size_percent: float = 10.0  # Max position as % of account
+    max_daily_loss_percent: float = 5.0      # Stop trading if exceeded
+    max_daily_trades: int = 10               # Max trades per day
+    max_open_positions: int = 1              # Max concurrent positions
+    slippage_tolerance_percent: float = 0.5  # Reject orders if > this
+    order_timeout_seconds: int = 30          # Cancel order timeout
+```
+
+**Use Case**: Trading agent enforces these limits to protect capital.
+
+#### 2. ExchangeConfig
+
+Exchange connection settings:
+```python
+@dataclass
+class ExchangeConfig:
+    exchange_name: str = "binance"           # Exchange identifier
+    trading_pair: str = "ADA/USDT"           # Trading pair
+    base_currency: str = "ADA"
+    quote_currency: str = "USDT"
+    
+    # CRITICAL: These are PLACEHOLDERS in export
+    api_key: str = "YOUR_API_KEY_HERE"
+    api_secret: str = "YOUR_API_SECRET_HERE"
+    api_passphrase: Optional[str] = None
+    
+    # Safety defaults
+    testnet: bool = True                     # Use testnet (default)
+    enable_rate_limit: bool = True
+    paper_trading: bool = True               # Paper trading (default)
+    paper_initial_balance: float = 10000.0
+```
+
+**Security Model**: 
+- Exported files have PLACEHOLDERS only
+- Trading agent reads real keys from `.env` file
+- Safe to commit/share exported config
+
+#### 3. DataFeedConfig
+
+Real-time data configuration:
+```python
+@dataclass
+class DataFeedConfig:
+    data_source: str = "exchange"            # exchange/polygon/both
+    polygon_api_key: str = "YOUR_POLYGON_KEY_HERE"
+    use_websocket: bool = True               # WebSocket (preferred)
+    websocket_ping_interval: int = 20
+    rest_api_interval_seconds: int = 60      # REST fallback
+    max_missing_bars: int = 3                # Alert threshold
+    validate_ohlcv: bool = True              # Data integrity checks
+```
+
+#### 4. TradingConfig (Main Export Model)
+
+Complete strategy configuration:
+```python
+@dataclass
+class TradingConfig:
+    version: str = "2.1.0"
+    created_at: str                          # UTC timestamp
+    description: str                         # User notes
+    strategy_name: str = "Seller Exhaustion"
+    timeframe: Timeframe                     # m1, m3, m5, m10, m15
+    
+    seller_params: SellerParams              # Entry logic
+    backtest_params: BacktestParams          # Exit logic
+    risk_management: RiskManagementConfig    # Position sizing
+    exchange: ExchangeConfig                 # Exchange connection
+    data_feed: DataFeedConfig                # Real-time data
+    
+    backtest_metrics: Optional[Dict]         # Performance reference
+```
+
+---
+
+### Key Functions
+
+#### export_trading_config()
+
+Export strategy to JSON file:
+```python
+def export_trading_config(
+    config: TradingConfig,
+    output_path: str | Path,
+    pretty: bool = True
+) -> None:
+    """
+    Export trading configuration to JSON file.
+    
+    Args:
+        config: TradingConfig instance
+        output_path: Output file path (.json)
+        pretty: Pretty-print JSON (default True)
+    """
+    # Convert to dict
+    config_dict = config.model_dump(mode='json')
+    
+    # Write to file
+    with open(output_path, 'w') as f:
+        if pretty:
+            json.dump(config_dict, f, indent=2, sort_keys=False)
+        else:
+            json.dump(config_dict, f)
+    
+    print(f"✓ Trading config exported to: {output_path}")
+```
+
+#### import_trading_config()
+
+Import strategy from JSON file:
+```python
+def import_trading_config(input_path: str | Path) -> TradingConfig:
+    """
+    Import trading configuration from JSON file.
+    
+    Args:
+        input_path: Input file path (.json)
+    
+    Returns:
+        TradingConfig instance
+    
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        ValueError: If JSON is invalid or incompatible version
+    """
+    # Read file
+    with open(input_path, 'r') as f:
+        config_dict = json.load(f)
+    
+    # Check version compatibility
+    version = config_dict.get('version', '1.0.0')
+    major_version = int(version.split('.')[0])
+    
+    if major_version > 2:
+        raise ValueError(
+            f"Incompatible config version: {version} (max supported: 2.x.x)"
+        )
+    
+    # Parse and validate
+    config = TradingConfig(**config_dict)
+    
+    print(f"✓ Trading config imported from: {input_path}")
+    return config
+```
+
+#### create_default_config()
+
+Create config from current strategy:
+```python
+def create_default_config(
+    seller_params: SellerParams,
+    backtest_params: BacktestParams,
+    timeframe: Timeframe = Timeframe.m15,
+    description: str = "",
+    backtest_metrics: Optional[Dict[str, Any]] = None
+) -> TradingConfig:
+    """
+    Create a TradingConfig with default risk/exchange settings.
+    
+    This is the main function to use when exporting from the backtesting app.
+    """
+    return TradingConfig(
+        description=description,
+        timeframe=timeframe,
+        seller_params=seller_params,
+        backtest_params=backtest_params,
+        backtest_metrics=backtest_metrics,
+        # Risk/exchange settings use safe defaults
+        risk_management=RiskManagementConfig(),
+        exchange=ExchangeConfig(
+            paper_trading=True,  # Always start with paper trading
+            testnet=True  # Always start with testnet
+        ),
+        data_feed=DataFeedConfig()
+    )
+```
+
+#### validate_config_for_live_trading()
+
+Validate configuration safety:
+```python
+def validate_config_for_live_trading(config: TradingConfig) -> tuple[bool, list[str]]:
+    """
+    Validate that configuration is safe for live trading.
+    
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    
+    # Check API credentials
+    if config.exchange.api_key == "YOUR_API_KEY_HERE":
+        warnings.append("⚠️ API key not configured (using placeholder)")
+    
+    # Check paper trading
+    if not config.exchange.paper_trading:
+        warnings.append("⚠️ LIVE TRADING ENABLED - Real money at risk!")
+    
+    # Check testnet
+    if not config.exchange.testnet and not config.exchange.paper_trading:
+        warnings.append("⚠️ Production exchange + live trading - EXTREME RISK!")
+    
+    # Check risk limits
+    if config.risk_management.risk_per_trade_percent > 2.0:
+        warnings.append(f"⚠️ High risk per trade: {config.risk_management.risk_per_trade_percent}%")
+    
+    is_valid = len(warnings) == 0
+    return is_valid, warnings
+```
+
+---
+
+### UI Integration (app/main.py)
+
+#### Export Strategy Button
+
+```python
+def export_strategy_config(self):
+    """Export complete strategy configuration to JSON for live trading agent."""
+    # Get current parameters
+    seller_params, bt_params, fitness_config = self.param_editor.get_params()
+    
+    # Get backtest metrics if available
+    backtest_metrics = None
+    if hasattr(self.stats_panel, 'last_metrics'):
+        backtest_metrics = self.stats_panel.last_metrics
+    
+    # Create trading config
+    config = create_default_config(
+        seller_params=seller_params,
+        backtest_params=bt_params,
+        timeframe=self.current_tf,
+        description=f"Exported from backtesting app on {self.current_range[0]} to {self.current_range[1]}",
+        backtest_metrics=backtest_metrics
+    )
+    
+    # Prompt for save location
+    file_path, _ = QFileDialog.getSaveFileName(...)
+    
+    # Export to file
+    export_trading_config(config, file_path, pretty=True)
+    
+    # Validate configuration
+    is_valid, warnings = validate_config_for_live_trading(config)
+    
+    # Show success dialog with warnings
+    QMessageBox.information(self, "Strategy Exported Successfully", ...)
+```
+
+#### Import Strategy Button
+
+```python
+def import_strategy_config(self):
+    """Import strategy configuration from JSON."""
+    # Prompt for file
+    file_path, _ = QFileDialog.getOpenFileName(...)
+    
+    # Import from file
+    config = import_trading_config(file_path)
+    
+    # Validate configuration
+    is_valid, warnings = validate_config_for_live_trading(config)
+    
+    # Show warnings if any
+    if warnings:
+        result = QMessageBox.warning(self, "Configuration Warnings", ...)
+        if result == QMessageBox.No:
+            return
+    
+    # Apply to UI
+    self.param_editor.set_params(
+        config.seller_params,
+        config.backtest_params,
+        config.get('fitness_config')
+    )
+    
+    # Show success message
+    QMessageBox.information(self, "Strategy Imported Successfully", ...)
+```
+
+---
+
+### Usage Examples
+
+#### Example 1: Export After Optimization
+
+```python
+# After running GA optimization and applying best parameters
+poetry run python cli.py ui
+# → Run 50 generations
+# → Click "Apply Best Parameters"
+# → Run final backtest
+# → Click "💾 Export Strategy"
+# → Save as strategy_15m_opt_gen50.json
+
+# Result: JSON file with all parameters ready for trading agent
+```
+
+#### Example 2: Share Strategy with Team
+
+```python
+# Export strategy
+export_trading_config(config, "team_strategy.json")
+
+# Share file (safe - no credentials)
+git add team_strategy.json
+git commit -m "Add optimized strategy"
+git push
+
+# Team member imports
+config = import_trading_config("team_strategy.json")
+# → Backtest on their data
+# → Compare results
+```
+
+#### Example 3: Deploy to Production
+
+```bash
+# 1. Export from backtesting tool
+# File: strategy_15m_prod.json
+
+# 2. Copy to trading agent (separate repo)
+cp strategy_15m_prod.json ~/trading-agent/config.json
+
+# 3. Configure real credentials
+cd ~/trading-agent
+echo "EXCHANGE_API_KEY=..." >> .env
+echo "EXCHANGE_API_SECRET=..." >> .env
+
+# 4. Start agent with paper trading
+poetry run python -m agent.main
+# → Paper trading for 7+ days
+# → Graduate to testnet
+# → Graduate to live
+```
+
+---
+
+### File Format Example
+
+**Generated config.json**:
+```json
+{
+  "version": "2.1.0",
+  "created_at": "2025-01-15T10:30:00Z",
+  "description": "Optimized 15m strategy with Fibonacci exits",
+  "strategy_name": "Seller Exhaustion",
+  "timeframe": "15m",
+  
+  "seller_params": {
+    "ema_fast": 96,
+    "ema_slow": 672,
+    "z_window": 672,
+    "atr_window": 96,
+    "vol_z": 2.0,
+    "tr_z": 1.2,
+    "cloc_min": 0.6
+  },
+  
+  "backtest_params": {
+    "use_fib_exits": true,
+    "use_stop_loss": false,
+    "use_time_exit": false,
+    "use_traditional_tp": false,
+    "fib_swing_lookback": 96,
+    "fib_swing_lookahead": 5,
+    "fib_target_level": 0.618,
+    "atr_stop_mult": 0.7,
+    "reward_r": 2.0,
+    "max_hold": 96,
+    "fee_bp": 5.0,
+    "slippage_bp": 5.0
+  },
+  
+  "risk_management": {
+    "risk_per_trade_percent": 1.0,
+    "max_position_size_percent": 10.0,
+    "max_daily_loss_percent": 5.0,
+    "max_daily_trades": 10,
+    "max_open_positions": 1,
+    "slippage_tolerance_percent": 0.5,
+    "order_timeout_seconds": 30
+  },
+  
+  "exchange": {
+    "exchange_name": "binance",
+    "trading_pair": "ADA/USDT",
+    "base_currency": "ADA",
+    "quote_currency": "USDT",
+    "api_key": "YOUR_API_KEY_HERE",
+    "api_secret": "YOUR_API_SECRET_HERE",
+    "api_passphrase": null,
+    "testnet": true,
+    "enable_rate_limit": true,
+    "paper_trading": true,
+    "paper_initial_balance": 10000.0
+  },
+  
+  "data_feed": {
+    "data_source": "exchange",
+    "polygon_api_key": "YOUR_POLYGON_KEY_HERE",
+    "use_websocket": true,
+    "websocket_ping_interval": 20,
+    "rest_api_interval_seconds": 60,
+    "max_missing_bars": 3,
+    "validate_ohlcv": true
+  },
+  
+  "backtest_metrics": {
+    "total_trades": 67,
+    "win_rate": 0.62,
+    "avg_R": 0.51,
+    "total_pnl": 0.1567,
+    "max_drawdown": -0.0389,
+    "sharpe": 1.23
+  }
+}
+```
+
+---
+
+### Security Checklist
+
+**Before Exporting**:
+- [ ] Review parameter values
+- [ ] Check backtest metrics
+- [ ] Verify paper trading = true
+- [ ] Verify testnet = true
+
+**After Exporting**:
+- [ ] File contains NO real credentials
+- [ ] API keys are placeholders
+- [ ] Safe to commit/share file
+- [ ] Validation warnings reviewed
+
+**Before Deploying**:
+- [ ] Copy to trading agent directory
+- [ ] Configure real credentials in `.env`
+- [ ] Never commit `.env` file
+- [ ] Start with paper trading
+- [ ] Monitor for 7+ days minimum
+
+---
+
+### Related Documentation
+
+**For Users**:
+- **STRATEGY_EXPORT_GUIDE.md** (650 lines) - Complete user guide
+- **DEPLOYMENT_OVERVIEW.md** (800 lines) - Architecture overview
+- **PRD_TRADING_AGENT.md** (1,234 lines) - Trading agent specification
+
+**For Developers**:
+- **core/strategy_export.py** (422 lines) - Source code
+- **PRD.md** - V2.1 requirements section
+- **AGENTS.md** (this file) - Module breakdown
+
+---
+
+## Troubleshooting Guide

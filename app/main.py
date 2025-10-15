@@ -31,6 +31,12 @@ from app.session_store import (
     load_session_snapshot,
     clear_session_snapshot,
 )
+from core.strategy_export import (
+    create_default_config,
+    export_trading_config,
+    import_trading_config,
+    validate_config_for_live_trading,
+)
 
 TIMEFRAME_META = {
     Timeframe.m1: (1, "minute"),
@@ -184,6 +190,20 @@ class MainWindow(QMainWindow):
         self.backtest_action.setEnabled(False)
         self.backtest_action.triggered.connect(lambda: asyncio.create_task(self.run_backtest()))
         toolbar.addAction(self.backtest_action)
+        
+        toolbar.addSeparator()
+        
+        # Export Strategy action
+        export_action = QAction("💾 Export Strategy", self)
+        export_action.setToolTip("Export complete strategy configuration for live trading agent")
+        export_action.triggered.connect(self.export_strategy_config)
+        toolbar.addAction(export_action)
+        
+        # Import Strategy action
+        import_action = QAction("📥 Import Strategy", self)
+        import_action.setToolTip("Import strategy configuration")
+        import_action.triggered.connect(self.import_strategy_config)
+        toolbar.addAction(import_action)
         
         toolbar.addSeparator()
         
@@ -591,6 +611,157 @@ class MainWindow(QMainWindow):
             "<li>Save good parameter sets via Strategy Editor</li>"
             "</ul>"
         )
+    
+    def export_strategy_config(self):
+        """Export complete strategy configuration to JSON for live trading agent."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        
+        try:
+            # Get current parameters
+            seller_params, bt_params, fitness_config = self.param_editor.get_params()
+            
+            # Get backtest metrics if available
+            backtest_metrics = None
+            if hasattr(self.stats_panel, 'last_metrics') and self.stats_panel.last_metrics:
+                backtest_metrics = self.stats_panel.last_metrics
+            
+            # Create trading config
+            config = create_default_config(
+                seller_params=seller_params,
+                backtest_params=bt_params,
+                timeframe=self.current_tf,
+                description=f"Exported from backtesting app on {self.current_range[0]} to {self.current_range[1]}",
+                backtest_metrics=backtest_metrics
+            )
+            
+            # Prompt for save location
+            default_filename = f"strategy_{self.current_tf.value}_{self.current_range[0]}_{self.current_range[1]}.json"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Strategy Configuration",
+                default_filename,
+                "JSON Files (*.json);;All Files (*)"
+            )
+            
+            if not file_path:
+                return  # User cancelled
+            
+            # Export to file
+            export_trading_config(config, file_path, pretty=True)
+            
+            # Validate configuration
+            is_valid, warnings = validate_config_for_live_trading(config)
+            
+            # Show success message with warnings
+            warning_text = "\n".join(warnings) if warnings else "No warnings"
+            
+            QMessageBox.information(
+                self,
+                "Strategy Exported Successfully",
+                f"<h3>✅ Strategy Configuration Exported</h3>"
+                f"<p><b>File:</b> {file_path}</p>"
+                f"<p><b>Timeframe:</b> {config.timeframe.value}</p>"
+                f"<p><b>Exit Strategy:</b> {'Fibonacci' if config.backtest_params.use_fib_exits else 'Traditional'}</p>"
+                f"<p><b>Paper Trading:</b> {'Enabled' if config.exchange.paper_trading else 'DISABLED (LIVE)'}</p>"
+                f"<hr>"
+                f"<p><b>Validation:</b></p>"
+                f"<pre style='color: {'green' if is_valid else 'orange'};'>{warning_text}</pre>"
+                f"<hr>"
+                f"<p><b>Next Steps:</b></p>"
+                f"<ol>"
+                f"<li>Copy this file to your trading agent application</li>"
+                f"<li>Rename to <code>config.json</code></li>"
+                f"<li>Configure exchange credentials in <code>.env</code> file</li>"
+                f"<li>Start agent with paper trading enabled</li>"
+                f"</ol>"
+                f"<p><i>⚠️ See PRD_TRADING_AGENT.md for complete setup instructions</i></p>"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"<h3>❌ Failed to Export Strategy</h3>"
+                f"<p><b>Error:</b> {str(e)}</p>"
+                f"<p>Please check the logs for details.</p>"
+            )
+            import traceback
+            traceback.print_exc()
+    
+    def import_strategy_config(self):
+        """Import strategy configuration from JSON."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        
+        try:
+            # Prompt for file
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Strategy Configuration",
+                "",
+                "JSON Files (*.json);;All Files (*)"
+            )
+            
+            if not file_path:
+                return  # User cancelled
+            
+            # Import from file
+            config = import_trading_config(file_path)
+            
+            # Validate configuration
+            is_valid, warnings = validate_config_for_live_trading(config)
+            
+            # Show warnings if any
+            if warnings:
+                warning_text = "\n".join(warnings)
+                result = QMessageBox.warning(
+                    self,
+                    "Configuration Warnings",
+                    f"<h3>⚠️ Configuration has warnings:</h3>"
+                    f"<pre style='color: orange;'>{warning_text}</pre>"
+                    f"<p><b>Continue with import?</b></p>",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if result == QMessageBox.No:
+                    return
+            
+            # Apply to UI
+            self.param_editor.set_params(
+                config.seller_params,
+                config.backtest_params,
+                config.get('fitness_config')  # May not exist in older configs
+            )
+            
+            # Update timeframe if different
+            if config.timeframe != self.current_tf:
+                self.current_tf = config.timeframe
+                self.stats_panel.set_current_timeframe(config.timeframe)
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Strategy Imported Successfully",
+                f"<h3>✅ Strategy Configuration Imported</h3>"
+                f"<p><b>File:</b> {file_path}</p>"
+                f"<p><b>Strategy:</b> {config.strategy_name}</p>"
+                f"<p><b>Timeframe:</b> {config.timeframe.value}</p>"
+                f"<p><b>Description:</b> {config.description or 'None'}</p>"
+                f"<hr>"
+                f"<p>Parameters have been loaded into the UI.</p>"
+                f"<p><b>Click 'Run Backtest'</b> to test these parameters on your data.</p>"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Import Failed",
+                f"<h3>❌ Failed to Import Strategy</h3>"
+                f"<p><b>Error:</b> {str(e)}</p>"
+                f"<p>Please check that the file is a valid strategy configuration.</p>"
+            )
+            import traceback
+            traceback.print_exc()
     
     def save_window_state(self):
         """Save window and splitter state to settings."""

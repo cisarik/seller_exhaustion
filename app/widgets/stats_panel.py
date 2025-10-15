@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QPushButton,
     QFileDialog, QScrollArea, QSpinBox, QDoubleSpinBox
 )
-from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG
+from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG, Slot
 from PySide6.QtGui import QColor
 import pandas as pd
 import pyqtgraph as pg
@@ -451,7 +451,7 @@ class StatsPanel(QWidget):
             return
         
         # Get current params from UI
-        seller_params, backtest_params = self.get_current_params()
+        seller_params, backtest_params, _ = self.get_current_params()
         
         # Create seed individual
         seed = Individual(
@@ -618,6 +618,7 @@ class StatsPanel(QWidget):
         thread = Thread(target=_run_single_step, daemon=True)
         thread.start()
     
+    @Slot()
     def _update_after_generation(self):
         """Update UI after generation completes (runs in main thread)."""
         try:
@@ -910,6 +911,7 @@ class StatsPanel(QWidget):
         except Exception as e:
             print(f"Error updating UI: {e}")
     
+    @Slot()
     def _restore_ui_after_optimize(self):
         """Restore UI state after optimization completes (called from main thread)."""
         self.is_optimizing = False

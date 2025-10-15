@@ -1,8 +1,11 @@
-# ADA Seller-Exhaustion Trading Agent v2.0
+# ADA Seller-Exhaustion Backtesting Tool v2.1
 
-**Multi-timeframe trading research and backtesting system for Cardano (ADAUSD)**
+**Multi-timeframe strategy research, backtesting, and optimization for Cardano (ADAUSD)**
 
-A complete strategy development platform with Fibonacci-based exits, parameter optimization, and GPU acceleration.
+A complete strategy development platform with Fibonacci-based exits, parameter optimization, GPU acceleration, and **strategy export for live trading**.
+
+**🚨 IMPORTANT**: This is a BACKTESTING tool, not a live trading application.  
+For live trading, export your strategy using **💾 Export Strategy** and use the separate trading agent (see **PRD_TRADING_AGENT.md**).
 
 ---
 
@@ -69,6 +72,24 @@ All four conditions must be true:
 - **Golden Ratio prominently highlighted**
 - Exit line showing actual outcome
 - Toggle in Settings → Chart Indicators
+
+### 💾 Strategy Export System (**NEW**, **v2.1**, **CRITICAL FOR LIVE TRADING**)
+- **Export complete strategy** to JSON for live trading agent
+- **All parameters included**: Entry signals, exits, risk management, exchange settings
+- **Validation on export**: Warns about configuration issues
+- **Import strategies**: Load configurations from other users or previous sessions
+- **Safe defaults**: Paper trading and testnet enabled by default
+- **Complete specification**: See **PRD_TRADING_AGENT.md** for trading agent setup
+
+**Export Format Includes**:
+- ✅ Strategy parameters (EMA, z-score thresholds, etc.)
+- ✅ Exit configuration (Fibonacci, stop-loss, time, TP toggles)
+- ✅ Risk management (position sizing, daily limits)
+- ✅ Exchange connection (API placeholders, testnet/paper settings)
+- ✅ Data feed configuration (WebSocket/REST preferences)
+- ✅ Backtest metrics (performance reference)
+
+**Workflow**: Backtest → Optimize → **Export** → Deploy to VPS Trading Agent
 
 ### 🎨 Strategy Editor
 - Comprehensive parameter management with detailed explanations
@@ -149,17 +170,106 @@ poetry run python cli.py ui
 
 ---
 
+## 🔄 Complete Workflow: From Backtest to Live Trading
+
+This tool is **part 1** of a two-application system:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  PART 1: BACKTESTING TOOL (This Application)                │
+│  Purpose: Research, optimize, and export strategies          │
+├─────────────────────────────────────────────────────────────┤
+│  1. Download historical data (Polygon.io)                    │
+│  2. Configure strategy parameters                            │
+│  3. Run backtests to validate strategy                       │
+│  4. Optimize with genetic algorithm (optional)               │
+│  5. 💾 EXPORT STRATEGY to config.json                       │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           │ Transfer config.json
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  PART 2: LIVE TRADING AGENT (Separate Application)          │
+│  Purpose: Execute strategies on live markets                 │
+│  Spec: See PRD_TRADING_AGENT.md (1,234 lines)               │
+├─────────────────────────────────────────────────────────────┤
+│  1. Import config.json (contains ALL strategy parameters)   │
+│  2. Configure exchange credentials (.env file)               │
+│  3. Start paper trading (7+ days testing)                    │
+│  4. Graduate to testnet (7+ days testing)                    │
+│  5. Deploy live on VPS (start small!)                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Export System Security
+
+**Critical**: API credentials are NEVER in exported config.json
+- Backtesting tool exports with placeholders: `"YOUR_API_KEY_HERE"`
+- Trading agent reads real keys from separate `.env` file
+- Safe to commit/share config.json (no sensitive data)
+
+### Step-by-Step Guide
+
+1. **Research Phase** (this tool):
+   ```bash
+   poetry run python cli.py ui
+   # → Download data, run backtests, optimize
+   # → Click 💾 Export Strategy
+   # → Save as strategy_15m_optimized.json
+   ```
+
+2. **Deployment Phase** (trading agent):
+   ```bash
+   # Clone trading agent repo (implement per PRD_TRADING_AGENT.md)
+   cp strategy_15m_optimized.json trading-agent/config.json
+   
+   # Configure credentials (NEVER commit this!)
+   echo "EXCHANGE_API_KEY=..." >> trading-agent/.env
+   
+   # Start with paper trading
+   cd trading-agent && poetry run python -m agent.main
+   ```
+
+3. **Documentation Path**:
+   - **STRATEGY_EXPORT_GUIDE.md** - How to export/import
+   - **DEPLOYMENT_OVERVIEW.md** - Two-app architecture
+   - **PRD_TRADING_AGENT.md** - Complete agent specification
+
+---
+
 ## 📖 Documentation
 
-| File | Purpose |
-|------|---------|
-| **README.md** | This file - overview and quick start |
-| **AGENTS.md** | Comprehensive development guide for AI agents |
-| **PRD.md** | Product requirements document |
-| **STRATEGY_DEFAULTS_GUIDE.md** | Default behavior and customization guide |
-| **FIBONACCI_EXIT_IMPLEMENTATION.md** | Technical implementation details |
-| **CHANGELOG_DEFAULT_BEHAVIOR.md** | Migration guide from v1.0 |
-| **GOLDEN_BUTTON_FEATURE.md** | Golden button documentation |
+### Core Documentation
+
+| File | Purpose | Size |
+|------|---------|------|
+| **README.md** | This file - overview and quick start | Overview |
+| **AGENTS.md** | Comprehensive development guide for AI agents | 2,346 lines |
+| **PRD.md** | Product requirements document (backtesting tool) | 850 lines |
+
+### Strategy Export & Live Trading
+
+| File | Purpose | Size |
+|------|---------|------|
+| **PRD_TRADING_AGENT.md** | **Complete specification for live trading agent** | **1,234 lines** |
+| **STRATEGY_EXPORT_GUIDE.md** | How to export/import strategies | 650 lines |
+| **DEPLOYMENT_OVERVIEW.md** | Two-application architecture guide | 800 lines |
+
+### Feature-Specific Guides
+
+| File | Purpose | Size |
+|------|---------|------|
+| **STRATEGY_DEFAULTS_GUIDE.md** | Default behavior and customization guide | Reference |
+| **FIBONACCI_EXIT_IMPLEMENTATION.md** | Technical implementation details | Technical |
+| **CHANGELOG_DEFAULT_BEHAVIOR.md** | Migration guide from v1.0 | Migration |
+| **GOLDEN_BUTTON_FEATURE.md** | Golden button documentation | Feature |
+
+### Quick Navigation
+
+- **Want to backtest?** → Start with this README
+- **Want to develop?** → Read AGENTS.md
+- **Want to deploy live?** → Read DEPLOYMENT_OVERVIEW.md → PRD_TRADING_AGENT.md
+- **Need help with export?** → Read STRATEGY_EXPORT_GUIDE.md
 
 ---
 
@@ -194,7 +304,10 @@ seller_exhaustion-1/
 │   ├── provider.py                # Data provider with cache
 │   ├── cache.py                   # ⭐ Parquet caching (NEW)
 │   └── cleaning.py                # Data cleaning utilities
-├── core/                          # Models and utilities
+├── core/
+│   ├── models.py                  # Pydantic models (Bar, Trade, Params, FitnessConfig)
+│   ├── timeutils.py               # UTC time utilities
+│   └── strategy_export.py         # ⭐ Strategy export/import system (NEW)
 ├── config/                        # Settings management
 ├── tests/                         # 19 tests, all passing ✅
 └── cli.py                         # CLI commands

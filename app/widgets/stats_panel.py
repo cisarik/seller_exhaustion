@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QPushButton,
     QFileDialog, QScrollArea, QSpinBox, QDoubleSpinBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG
 from PySide6.QtGui import QColor
 import pandas as pd
 import pyqtgraph as pg
@@ -702,10 +702,24 @@ class StatsPanel(QWidget):
                 self.progress_updated.emit(0, 1, f"❌ Error: {str(e)}")
             finally:
                 # Re-enable buttons using thread-safe method
-                from PySide6.QtCore import QMetaObject, Qt
-                QMetaObject.invokeMethod(self.step_btn, "setEnabled", Qt.QueuedConnection, True)
-                QMetaObject.invokeMethod(self.step_btn, "setText", Qt.QueuedConnection, "Step (1 Gen)")
-                QMetaObject.invokeMethod(self.optimize_btn, "setEnabled", Qt.QueuedConnection, True)
+                QMetaObject.invokeMethod(
+                    self.step_btn,
+                    "setEnabled",
+                    Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
+                QMetaObject.invokeMethod(
+                    self.step_btn,
+                    "setText",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, "Step (1 Gen)")
+                )
+                QMetaObject.invokeMethod(
+                    self.optimize_btn,
+                    "setEnabled",
+                    Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
         
         # Start thread
         thread = Thread(target=_run_single_step, daemon=True)
@@ -919,7 +933,6 @@ class StatsPanel(QWidget):
                         )
                     
                     # Update UI (from main thread)
-                    from PySide6.QtCore import QMetaObject, Qt
                     QMetaObject.invokeMethod(
                         self,
                         "_update_after_generation",
@@ -960,7 +973,6 @@ class StatsPanel(QWidget):
         
         finally:
             # Restore UI state (from main thread)
-            from PySide6.QtCore import QMetaObject, Qt
             QMetaObject.invokeMethod(
                 self,
                 "_restore_ui_after_optimize",

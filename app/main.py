@@ -25,6 +25,20 @@ from backtest.engine import run_backtest
 from data.provider import DataProvider
 from data.cache import DataCache
 from config.settings import settings, SettingsManager
+from app.session_store import (
+    save_session_snapshot,
+    load_session_snapshot,
+    clear_session_snapshot,
+)
+
+TIMEFRAME_META = {
+    Timeframe.m1: (1, "minute"),
+    Timeframe.m3: (3, "minute"),
+    Timeframe.m5: (5, "minute"),
+    Timeframe.m10: (10, "minute"),
+    Timeframe.m15: (15, "minute"),
+    Timeframe.m60: (60, "minute"),
+}
 
 
 class MainWindow(QMainWindow):
@@ -41,7 +55,9 @@ class MainWindow(QMainWindow):
         self.settings_dialog = None
         self.strategy_editor = None
         self.data_provider = DataProvider(use_cache=True)
-        self.cache = DataCache()
+        self.cache = DataCache(settings.data_dir)
+        self.current_ticker = settings.last_ticker
+        self.current_range = (settings.last_date_from, settings.last_date_to)
         
         self.init_ui()
     
@@ -76,6 +92,56 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage("Initializing...")
+
+    def _indicator_config_from_settings(self) -> dict[str, bool]:
+        """Return chart indicator configuration based on saved settings."""
+        return {
+            'ema_fast': bool(settings.chart_ema_fast),
+            'ema_slow': bool(settings.chart_ema_slow),
+            'sma': bool(settings.chart_sma),
+            'rsi': bool(settings.chart_rsi),
+            'macd': bool(settings.chart_macd),
+            'volume': bool(settings.chart_volume),
+            'signals': bool(settings.chart_signals),
+            'entries': bool(settings.chart_entries),
+            'exits': bool(settings.chart_exits),
+            'fib_retracements': True,  # Default ON; settings field not persisted yet
+            'fib_0382': True,
+            'fib_0500': True,
+            'fib_0618': True,
+            'fib_0786': True,
+            'fib_1000': True,
+        }
+
+    def _infer_date_range(self, df=None) -> tuple[str, str]:
+        """Infer date range from a DataFrame or fallback to last known range."""
+        source = df if df is not None else self.current_data
+        if source is not None and len(source) > 0:
+            start = str(source.index[0].date())
+            end = str(source.index[-1].date())
+            return start, end
+        return self.current_range
+
+    def _persist_session(self, seller_params, backtest_params, backtest_result):
+        """Persist the last backtest so it can be restored on restart."""
+        if self.current_tf not in TIMEFRAME_META:
+            return
+
+        ticker = self.current_ticker or settings.last_ticker or "X:ADAUSD"
+        start, end = self._infer_date_range()
+        multiplier, timespan = TIMEFRAME_META[self.current_tf]
+
+        save_session_snapshot(
+            ticker=ticker,
+            date_from=start,
+            date_to=end,
+            timeframe=self.current_tf,
+            multiplier=multiplier,
+            timespan=timespan,
+            seller_params=seller_params,
+            backtest_params=backtest_params,
+            backtest_result=backtest_result,
+        )
     
     def create_toolbar(self):
         """Create main toolbar with actions."""
@@ -189,7 +255,11 @@ class MainWindow(QMainWindow):
             self.chart_view.params = params
             
             # Get indicator config and apply
-            indicator_config = self.settings_dialog.get_indicator_config()
+            indicator_config = (
+                self.settings_dialog.get_indicator_config()
+                if self.settings_dialog
+                else self._indicator_config_from_settings()
+            )
             self.chart_view.set_indicator_config(indicator_config)
             
             # Render chart
@@ -198,6 +268,12 @@ class MainWindow(QMainWindow):
             # Store data
             self.current_data = feats
             self.current_tf = tf
+            self.current_ticker = "X:ADAUSD"
+            if len(feats) > 0:
+                self.current_range = (
+                    str(feats.index[0].date()),
+                    str(feats.index[-1].date()),
+                )
             
             # Load parameters into stats panel
             self.stats_panel.load_params_from_settings(params, bt_params)
@@ -256,6 +332,7 @@ class MainWindow(QMainWindow):
             feats = build_features(self.current_data[['open', 'high', 'low', 'close', 'volume']], 
                                    seller_params, self.current_tf)
             self.current_data = feats
+            self.current_range = self._infer_date_range(feats)
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
             
@@ -272,6 +349,9 @@ class MainWindow(QMainWindow):
             
             # Update chart with trade markers
             self.chart_view.set_backtest_result(result)
+
+            # Persist session snapshot
+            self._persist_session(seller_params, bt_params, result)
             
             # Update status
             metrics = result['metrics']
@@ -319,6 +399,7 @@ class MainWindow(QMainWindow):
         if self.current_data is not None:
             self.chart_view.render_candles(self.current_data)
         self.statusBar().showMessage("Results cleared")
+        clear_session_snapshot()
     
     def update_progress(self, current: int, total: int, message: str):
         """
@@ -363,6 +444,8 @@ class MainWindow(QMainWindow):
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
             self.chart_view.set_backtest_result(backtest_result)
+            self.current_data = feats
+            self.current_range = self._infer_date_range(feats)
             
             # Update status bar
             metrics = backtest_result['metrics']
@@ -373,6 +456,8 @@ class MainWindow(QMainWindow):
                 f"Avg R: {metrics['avg_R']:.2f} | "
                 f"Fitness: {best_individual.fitness:.4f}"
             )
+
+            self._persist_session(seller_params, best_individual.backtest_params, backtest_result)
             
             print(f"✓ Chart updated with winning strategy")
             
@@ -531,90 +616,105 @@ class MainWindow(QMainWindow):
     async def try_load_cached_data(self):
         """Try to load cached data from last session."""
         try:
-            # Get last download parameters from settings
-            ticker = settings.last_ticker
-            from_ = settings.last_date_from
-            to = settings.last_date_to
-            tf_mult = int(settings.timeframe)
-            tf_unit = settings.timeframe_unit
-            
-            # Check if cache exists
-            has_cache = self.cache.has_cached_data(ticker, from_, to, 1, "minute")
-            
-            if not has_cache:
-                self.statusBar().showMessage(
-                    "No cached data found - Click Settings to download data"
+            snapshot = load_session_snapshot()
+
+            if snapshot:
+                ticker = snapshot["ticker"]
+                from_ = snapshot["date_from"]
+                to = snapshot["date_to"]
+                self.current_tf = snapshot["timeframe"]
+                self.chart_view.set_timeframe(self.current_tf)
+                seller_params = snapshot["seller_params"]
+                bt_params = snapshot["backtest_params"]
+                target_multiplier = int(snapshot.get("multiplier", TIMEFRAME_META.get(self.current_tf, (15, "minute"))[0]))
+                target_timespan = snapshot.get("timespan", "minute")
+                self.current_ticker = ticker
+            else:
+                ticker = settings.last_ticker
+                from_ = settings.last_date_from
+                to = settings.last_date_to
+                seller_params = SellerParams(
+                    ema_fast=settings.strategy_ema_fast,
+                    ema_slow=settings.strategy_ema_slow,
+                    z_window=settings.strategy_z_window,
+                    vol_z=settings.strategy_vol_z,
+                    tr_z=settings.strategy_tr_z,
+                    cloc_min=settings.strategy_cloc_min,
+                    atr_window=settings.strategy_atr_window,
                 )
-                return
+                bt_params = BacktestParams(
+                    atr_stop_mult=settings.backtest_atr_stop_mult,
+                    reward_r=settings.backtest_reward_r,
+                    max_hold=settings.backtest_max_hold,
+                    fee_bp=settings.backtest_fee_bp,
+                    slippage_bp=settings.backtest_slippage_bp,
+                )
+                target_multiplier, target_timespan = TIMEFRAME_META.get(self.current_tf, (15, "minute"))
+                self.current_ticker = ticker
             
-            # Load from cache
-            self.statusBar().showMessage("Loading cached data...")
+            base_available = self.cache.has_cached_data(ticker, from_, to, 1, "minute")
+            target_available = self.cache.has_cached_data(ticker, from_, to, target_multiplier, target_timespan)
+
+            if base_available or target_available:
+                self.statusBar().showMessage("Restoring cached data…")
+            else:
+                self.statusBar().showMessage("Checking for cached data…")
             self.progress.setVisible(True)
             self.progress.setRange(0, 0)
-            
-            # Fetch data (will use cache automatically)
-            df = await self.data_provider.fetch(ticker, self.current_tf, from_, to)
-            
+
+            df = await self.data_provider.fetch(
+                ticker,
+                self.current_tf,
+                from_,
+                to,
+                use_cache_only=True,
+            )
+
+            if (df is None or len(df) == 0) and target_available:
+                df = self.cache.get_cached_data(ticker, from_, to, target_multiplier, target_timespan)
+
             if df is None or len(df) == 0:
                 self.statusBar().showMessage(
-                    "Cache empty - Click Settings to download data"
+                    "Cached data unavailable - Click Settings to download data"
                 )
-                self.progress.setVisible(False)
                 return
-            
-            # Load strategy params from settings
-            seller_params = SellerParams(
-                ema_fast=settings.strategy_ema_fast,
-                ema_slow=settings.strategy_ema_slow,
-                z_window=settings.strategy_z_window,
-                vol_z=settings.strategy_vol_z,
-                tr_z=settings.strategy_tr_z,
-                cloc_min=settings.strategy_cloc_min,
-                atr_window=settings.strategy_atr_window,
-            )
-            
-            # Build features
+
             feats = build_features(df, seller_params, self.current_tf)
-            
-            # Update chart
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
+            self.chart_view.set_indicator_config(self._indicator_config_from_settings())
             self.chart_view.render_candles(feats)
-            
-            # Store data
+
             self.current_data = feats
-            
-            # Load backtest params and pass to stats panel
-            bt_params = BacktestParams(
-                atr_stop_mult=settings.backtest_atr_stop_mult,
-                reward_r=settings.backtest_reward_r,
-                max_hold=settings.backtest_max_hold,
-                fee_bp=settings.backtest_fee_bp,
-                slippage_bp=settings.backtest_slippage_bp,
-            )
-            
+            self.current_range = self._infer_date_range(feats)
+
             self.stats_panel.load_params_from_settings(seller_params, bt_params)
             self.stats_panel.set_current_data(feats, self.current_tf)
-            
-            # Enable backtest button
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, run_backtest, feats, bt_params)
+
+            self.stats_panel.update_stats(result)
+            self.chart_view.set_backtest_result(result)
+
+            self._persist_session(seller_params, bt_params, result)
             self.backtest_action.setEnabled(True)
-            
-            # Update status
-            signals = feats['exhaustion'].sum()
-            date_range = f"{feats.index[0].date()} to {feats.index[-1].date()}"
+
+            metrics = result["metrics"]
+            signals = int(feats["exhaustion"].sum())
+            date_range = f"{self.current_range[0]} to {self.current_range[1]}"
             self.statusBar().showMessage(
-                f"✓ Loaded {len(feats)} bars from cache ({date_range}) | "
-                f"{signals} signals | Ready to backtest"
+                f"✓ Restored {len(feats)} bars ({date_range}) | "
+                f"{signals} signals | {metrics['n']} trades | Win {metrics['win_rate']:.1%}"
             )
-            
-            # Update chart info
+
             self.chart_view.info_label.setText(
                 f"📊 {ticker} {self.current_tf.value} | "
                 f"Date range: {date_range}\n"
-                f"Signals detected: {signals} | Data loaded from cache"
+                f"Signals: {signals} | Trades: {metrics['n']}"
             )
-            
-            print(f"✓ Auto-loaded cached data: {len(feats)} bars, {signals} signals")
+
+            print(f"✓ Auto-loaded cached data: {len(feats)} bars, {signals} signals, {metrics['n']} trades")
             
         except Exception as e:
             print(f"⚠ Could not auto-load cached data: {e}")

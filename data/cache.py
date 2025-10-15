@@ -5,11 +5,12 @@ Caches OHLCV data to parquet files in .data/ directory to avoid
 redundant API calls on app restarts.
 """
 
-import os
-import hashlib
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any
 import pandas as pd
+
+from data.cleaning import CleaningSummary
 
 try:  # Determine parquet engine availability once
     import pyarrow  # type: ignore  # noqa: F401
@@ -34,10 +35,41 @@ class DataCache:
         Args:
             cache_dir: Directory to store cached data files
         """
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(cache_dir).expanduser().resolve()
         self.cache_dir.mkdir(exist_ok=True)
         self._parquet_engine = PARQUET_ENGINE
         self._warned_no_parquet = False
+
+    def _serialize_attr(self, value: Any) -> Any:
+        """
+        Convert DataFrame attributes to parquet-friendly values.
+
+        PyArrow stores attrs as JSON metadata; ensure everything is serializable.
+        """
+        if is_dataclass(value):
+            return {k: self._serialize_attr(v) for k, v in asdict(value).items()}
+        if isinstance(value, dict):
+            return {k: self._serialize_attr(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._serialize_attr(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        # Fallback: convert to string representation
+        return str(value)
+
+    def _sanitize_attrs(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy of attrs with parquet-safe values."""
+        return {key: self._serialize_attr(val) for key, val in attrs.items()}
+
+    def _rehydrate_attrs(self, df: pd.DataFrame):
+        """Restore known dataclass attrs after loading from disk."""
+        summary = df.attrs.get("cleaning_summary")
+        if isinstance(summary, dict):
+            try:
+                df.attrs["cleaning_summary"] = CleaningSummary(**summary)
+            except TypeError:
+                # Leave as dict if structure unexpected
+                pass
     
     def _make_cache_key(
         self,
@@ -93,6 +125,8 @@ class DataCache:
                 
                 if df.index.name == 'ts':
                     df.index = pd.to_datetime(df.index, utc=True)
+
+                self._rehydrate_attrs(df)
                 
                 print(f"✓ Loaded {len(df)} bars from cache: {cache_file.name}")
                 return df
@@ -105,6 +139,8 @@ class DataCache:
                 
                 if df.index.name == 'ts':
                     df.index = pd.to_datetime(df.index, utc=True)
+
+                self._rehydrate_attrs(df)
                 
                 print(f"✓ Loaded {len(df)} bars from cache: {pickle_file.name}")
                 return df
@@ -149,17 +185,24 @@ class DataCache:
         )
         pickle_file = cache_file.with_suffix(".pkl")
         
+        original_attrs = df.attrs.copy()
+        parquet_safe_attrs = self._sanitize_attrs(original_attrs)
+
         try:
+            parquet_saved = False
+
             if self._parquet_engine:
+                df.attrs = parquet_safe_attrs
                 try:
                     df.to_parquet(cache_file, engine=self._parquet_engine)
-                    print(f"✓ Cached {len(df)} bars to: {cache_file.name}")
-                    return
+                    parquet_saved = True
                 except Exception as parquet_err:
                     print(
                         f"⚠ Error saving parquet cache {cache_file}: {parquet_err}\n"
                         "  ↳ Falling back to pickle cache."
                     )
+                finally:
+                    df.attrs = original_attrs
             else:
                 if not self._warned_no_parquet:
                     print(
@@ -167,9 +210,16 @@ class DataCache:
                         "Install 'pyarrow' or 'fastparquet' for parquet support."
                     )
                     self._warned_no_parquet = True
+
+            if parquet_saved:
+                print(f"✓ Cached {len(df)} bars to: {cache_file.name}")
+                return
+
+            # Parquet not saved (either disabled or errored); pickle as fallback.
             df.to_pickle(pickle_file)
             print(f"✓ Cached {len(df)} bars to: {pickle_file.name}")
         except Exception as e:
+            df.attrs = original_attrs
             print(f"⚠ Error saving cache file {pickle_file}: {e}")
     
     def clear_cache(self):

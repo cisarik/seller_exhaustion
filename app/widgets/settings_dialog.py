@@ -333,16 +333,45 @@ class SettingsDialog(QDialog):
         self.show_exits.setChecked(True)
         indicators_layout.addWidget(self.show_exits)
         
-        self.show_fib_ladders = QCheckBox("📊 Fibonacci Exit Ladders (Rainbow)")
-        self.show_fib_ladders.setChecked(True)
-        self.show_fib_ladders.setToolTip(
-            "Show beautiful Fibonacci retracement levels for each trade:\n"
+        # Fibonacci Retracements Section
+        indicators_layout.addWidget(QLabel("\nFibonacci Retracements (click trade to view):"))
+        
+        self.show_fib_retracements = QCheckBox("📊 Show Fibonacci Retracements")
+        self.show_fib_retracements.setChecked(True)
+        self.show_fib_retracements.setToolTip(
+            "Show Fibonacci retracement levels for selected trade:\n"
             "- Swing high marker (⭐ star)\n"
-            "- Rainbow-colored levels (38.2% blue → 100% red)\n"
+            "- Rainbow-colored levels\n"
             "- Golden Ratio (61.8%) highlighted\n"
-            "- Actual exit marked with bold line"
+            "- Click on a trade in Trade History to view its Fib levels"
         )
-        indicators_layout.addWidget(self.show_fib_ladders)
+        indicators_layout.addWidget(self.show_fib_retracements)
+        
+        # Individual Fib Level Controls (indented)
+        fib_levels_layout = QVBoxLayout()
+        fib_levels_layout.setContentsMargins(30, 0, 0, 0)  # Indent
+        
+        self.show_fib_0382 = QCheckBox("38.2% (Orange)")
+        self.show_fib_0382.setChecked(True)
+        fib_levels_layout.addWidget(self.show_fib_0382)
+        
+        self.show_fib_0500 = QCheckBox("50.0% (Green)")
+        self.show_fib_0500.setChecked(True)
+        fib_levels_layout.addWidget(self.show_fib_0500)
+        
+        self.show_fib_0618 = QCheckBox("61.8% ⭐ Golden Ratio (Gold)")
+        self.show_fib_0618.setChecked(True)
+        fib_levels_layout.addWidget(self.show_fib_0618)
+        
+        self.show_fib_0786 = QCheckBox("78.6% (Cyan)")
+        self.show_fib_0786.setChecked(True)
+        fib_levels_layout.addWidget(self.show_fib_0786)
+        
+        self.show_fib_1000 = QCheckBox("100% (Blue)")
+        self.show_fib_1000.setChecked(True)
+        fib_levels_layout.addWidget(self.show_fib_1000)
+        
+        indicators_layout.addLayout(fib_levels_layout)
         
         group.setLayout(indicators_layout)
         layout.addWidget(group)
@@ -721,6 +750,27 @@ class SettingsDialog(QDialog):
             # Get timeframe
             tf_key = self.timeframe_combo.currentData()
             mult, unit, label = TIMEFRAMES[tf_key]
+
+            tf_map = {
+                1: Timeframe.m1,
+                3: Timeframe.m3,
+                5: Timeframe.m5,
+                10: Timeframe.m10,
+                15: Timeframe.m15,
+                60: Timeframe.m60,
+            }
+            tf_enum = tf_map.get(mult)
+            if tf_enum is None:
+                QMessageBox.warning(
+                    self,
+                    "Unsupported Timeframe",
+                    "Selected timeframe is not yet supported in the main application.\n"
+                    "Defaulting to 15-minute timeframe for this download."
+                )
+                tf_enum = Timeframe.m15
+                mult = 15
+                unit = "minute"
+                label = "15 minutes"
             
             # Update UI
             self.download_btn.setEnabled(False)
@@ -731,20 +781,22 @@ class SettingsDialog(QDialog):
             if not self.dp:
                 self.dp = DataProvider()
 
-            estimate = self.dp.estimate_download(from_date, to_date, mult, unit)
+            # Always download base 1-minute data to populate cache
+            base_estimate = self.dp.estimate_download(from_date, to_date, 1, "minute")
 
             def format_bars(current: int, total: int | None) -> str:
                 if total and total > 0:
                     return f"{current:,}/{total:,}"
                 return f"{current:,}"
 
-            self.progress_bar.setRange(0, max(estimate.pages, 1))
+            self.progress_bar.setRange(0, max(base_estimate.pages, 1))
             self.progress_bar.setValue(0)
-            est_time_text = self.format_duration(estimate.seconds_total)
+            est_time_text = self.format_duration(base_estimate.seconds_total)
             self.progress_label.setText(
                 "Free tier: 5 API calls/min.\n"
-                f"Downloading ADA data ({label}) {from_date} → {to_date}.\n"
-                f"Estimated {estimate.pages} request(s) (~{est_time_text})."
+                f"Downloading ADA data ({label}) {from_date} → {to_date} "
+                "(base 1-minute cache).\n"
+                f"Estimated {base_estimate.pages} request(s) (~{est_time_text})."
             )
 
             async def on_progress(progress):
@@ -773,15 +825,14 @@ class SettingsDialog(QDialog):
                     f"| Bars fetched: {bars_text} | {remaining_text}"
                 )
             
-            # Fetch data (force download to get fresh data when user explicitly clicks download)
-            df = await self.dp.fetch_bars(
+            # Fetch data via 1-minute base download (force fresh data)
+            df = await self.dp.fetch(
                 "X:ADAUSD",
+                tf_enum,
                 from_date,
                 to_date,
-                mult,
-                unit,
                 progress_callback=on_progress,
-                estimate=estimate,
+                estimate=base_estimate,
                 force_download=True,
             )
             self.progress_bar.setValue(self.progress_bar.maximum())
@@ -935,7 +986,12 @@ class SettingsDialog(QDialog):
             'signals': self.show_signals.isChecked(),
             'entries': self.show_entries.isChecked(),
             'exits': self.show_exits.isChecked(),
-            'fib_ladders': self.show_fib_ladders.isChecked(),
+            'fib_retracements': self.show_fib_retracements.isChecked(),
+            'fib_0382': self.show_fib_0382.isChecked(),
+            'fib_0500': self.show_fib_0500.isChecked(),
+            'fib_0618': self.show_fib_0618.isChecked(),
+            'fib_0786': self.show_fib_0786.isChecked(),
+            'fib_1000': self.show_fib_1000.isChecked(),
         }
     
     async def cleanup(self):

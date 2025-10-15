@@ -9,6 +9,7 @@ from data.cleaning import clean_ohlcv
 from data.polygon_client import AggregationProgress, PolygonClient
 from data.cache import DataCache
 from core.models import Timeframe
+from config.settings import settings
 
 
 @dataclass
@@ -22,7 +23,8 @@ class DownloadEstimate:
 class DataProvider:
     def __init__(self, use_cache: bool = True):
         self.poly = PolygonClient()
-        self.cache = DataCache() if use_cache else None
+        cache_dir = settings.data_dir if use_cache else ".data"
+        self.cache = DataCache(cache_dir) if use_cache else None
 
     async def fetch_bars(
         self,
@@ -35,6 +37,7 @@ class DataProvider:
         progress_callback: Optional[Callable[[AggregationProgress], Awaitable[None] | None]] = None,
         estimate: Optional[DownloadEstimate] = None,
         force_download: bool = False,
+        use_cache_only: bool = False,
     ) -> pd.DataFrame:
         """
         Fetch bars with specified timeframe and return as pandas DataFrame.
@@ -48,6 +51,7 @@ class DataProvider:
             multiplier: Timeframe multiplier (e.g., 15, 30, 60)
             timespan: Timeframe unit (minute, hour, day)
             force_download: If True, skip cache and download fresh data
+            use_cache_only: If True, only return cached data without hitting the API
         
         Returns:
             DataFrame with OHLCV data and UTC DatetimeIndex
@@ -57,6 +61,12 @@ class DataProvider:
             cached_df = self.cache.get_cached_data(ticker, from_, to, multiplier, timespan)
             if cached_df is not None:
                 return cached_df
+
+            if use_cache_only:
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        if use_cache_only:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         
         # Download from API
         bars = await self.poly.aggregates(
@@ -91,7 +101,18 @@ class DataProvider:
         """Fetch 15-minute bars (backwards compatibility)."""
         return await self.fetch_bars(ticker, from_, to, 15, "minute")
 
-    async def fetch(self, ticker: str, tf: Timeframe, from_: str, to: str) -> pd.DataFrame:
+    async def fetch(
+        self,
+        ticker: str,
+        tf: Timeframe,
+        from_: str,
+        to: str,
+        *,
+        progress_callback: Optional[Callable[[AggregationProgress], Awaitable[None] | None]] = None,
+        estimate: Optional[DownloadEstimate] = None,
+        force_download: bool = False,
+        use_cache_only: bool = False,
+    ) -> pd.DataFrame:
         """Always fetch 1m bars, clean them, then locally resample to target timeframe.
 
         Dôvody:
@@ -109,17 +130,39 @@ class DataProvider:
         }
 
         multiplier = tf_to_multiplier.get(tf, 15)
+        base_multiplier = tf_to_multiplier[Timeframe.m1]
+        base_timespan = "minute"
+
+        base_estimate = estimate
+        if base_estimate is None and not use_cache_only:
+            base_estimate = self.estimate_download(
+                from_,
+                to,
+                base_multiplier,
+                base_timespan,
+            )
 
         # Vždy stiahnuť 1m (s rate-limit retry už rieši PolygonClient)
         base_df = await self.fetch_bars(
             ticker,
             from_,
             to,
-            tf_to_multiplier[Timeframe.m1],
-            "minute",
+            base_multiplier,
+            base_timespan,
+            progress_callback=progress_callback,
+            estimate=base_estimate,
+            force_download=force_download,
+            use_cache_only=use_cache_only,
         )
 
-        if len(base_df) == 0 or multiplier == 1:
+        if len(base_df) == 0:
+            if self.cache and use_cache_only and multiplier != 1:
+                fallback = self.cache.get_cached_data(ticker, from_, to, multiplier, "minute")
+                if fallback is not None:
+                    return fallback
+            return base_df
+
+        if multiplier == 1:
             return base_df
 
         df = base_df.copy()

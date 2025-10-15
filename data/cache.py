@@ -13,16 +13,11 @@ import pandas as pd
 from data.cleaning import CleaningSummary
 
 try:  # Determine parquet engine availability once
-    import pyarrow  # type: ignore  # noqa: F401
+    import fastparquet  # type: ignore  # noqa: F401
 
-    PARQUET_ENGINE = "pyarrow"
+    PARQUET_ENGINE = "fastparquet"
 except ImportError:  # pragma: no cover - optional dependency
-    try:
-        import fastparquet  # type: ignore  # noqa: F401
-
-        PARQUET_ENGINE = "fastparquet"
-    except ImportError:
-        PARQUET_ENGINE = None
+    PARQUET_ENGINE = None
 
 
 class DataCache:

@@ -203,46 +203,73 @@ class Population:
         }
 
 
-def calculate_fitness(metrics: Dict[str, Any]) -> float:
+def calculate_fitness(metrics: Dict[str, Any], config: "FitnessConfig" = None) -> float:
     """
-    Calculate composite fitness from backtest metrics.
+    Calculate composite fitness from backtest metrics using configurable weights.
     
-    Combines multiple objectives:
-    - Sharpe ratio (risk-adjusted returns) - 40%
-    - Win rate (consistency) - 30%
-    - Average R-multiple (profitability) - 20%
-    - Max drawdown penalty - 10%
+    Supports multiple optimization strategies:
+    - Balanced: Standard multi-objective (default)
+    - High Frequency: Maximize trade count (scalping/day trading)
+    - Conservative: Prioritize win rate and drawdown control
+    - Profit Focused: Maximize total PnL
+    - Custom: User-defined weights
     
     Args:
         metrics: Backtest metrics dictionary
+        config: FitnessConfig with weights and requirements (uses balanced if None)
     
     Returns:
         Fitness score (higher is better)
     """
+    # Import here to avoid circular dependency
+    from core.models import FitnessConfig
+    
+    if config is None:
+        config = FitnessConfig()  # Use balanced defaults
+    
     # Handle case with no trades
     if metrics['n'] == 0:
         return -1000.0
     
     # Extract metrics
-    sharpe = metrics.get('sharpe', 0.0)
+    n_trades = metrics['n']
     win_rate = metrics.get('win_rate', 0.0)
     avg_r = metrics.get('avg_R', 0.0)
+    total_pnl = metrics.get('total_pnl', 0.0)
     max_dd = metrics.get('max_dd', 0.0)
-    n_trades = metrics['n']
     
-    # Penalize if too few trades (need statistical significance)
-    if n_trades < 10:
-        trade_penalty = (10 - n_trades) * 0.1
-    else:
-        trade_penalty = 0.0
+    # Apply minimum requirements (hard filters)
+    if n_trades < config.min_trades:
+        return -100.0  # Fail: not enough trades
     
-    # Composite fitness
+    if win_rate < config.min_win_rate:
+        return -50.0  # Fail: win rate too low
+    
+    # Normalize trade count (0-1 scale, higher is better)
+    # Scale based on reasonable expectations: 100 trades = 1.0
+    trade_count_normalized = min(n_trades / 100.0, 1.0)
+    
+    # Normalize PnL (sigmoid-like, centered at 0)
+    # Positive PnL → positive contribution, negative → penalty
+    import numpy as np
+    pnl_normalized = np.tanh(total_pnl / 0.5)  # Range: -1 to 1
+    
+    # Normalize avg R-multiple (typical range: -2 to 5)
+    # Scale to 0-1 range
+    avg_r_normalized = np.clip((avg_r + 2) / 7.0, 0.0, 1.0)
+    
+    # Normalize drawdown penalty (0 = no DD, -1 = severe DD)
+    # More negative DD → more negative contribution
+    dd_normalized = max(max_dd / 0.5, -1.0)
+    
+    # Calculate weighted fitness
     fitness = (
-        sharpe * 0.4 +                    # Risk-adjusted returns
-        win_rate * 0.3 +                  # Win rate (0-1 scale)
-        avg_r * 0.2 +                     # Average R-multiple
-        max(max_dd / 0.1, -10) * 0.1      # Drawdown penalty (capped)
-    ) - trade_penalty
+        config.trade_count_weight * trade_count_normalized +
+        config.win_rate_weight * win_rate +  # Already 0-1
+        config.avg_r_weight * avg_r_normalized +
+        config.total_pnl_weight * pnl_normalized +
+        config.max_drawdown_penalty * dd_normalized  # Negative contribution
+    )
     
     return fitness
 
@@ -250,7 +277,8 @@ def calculate_fitness(metrics: Dict[str, Any]) -> float:
 def evaluate_individual(
     individual: Individual,
     data: pd.DataFrame,
-    tf: Timeframe = Timeframe.m15
+    tf: Timeframe = Timeframe.m15,
+    fitness_config: "FitnessConfig" = None
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Evaluate an individual by running backtest and calculating fitness.
@@ -259,6 +287,7 @@ def evaluate_individual(
         individual: Individual to evaluate
         data: Historical OHLCV data
         tf: Timeframe
+        fitness_config: FitnessConfig for fitness calculation (uses balanced if None)
     
     Returns:
         (fitness, metrics) tuple
@@ -270,9 +299,9 @@ def evaluate_individual(
         # Run backtest with individual's backtest params
         result = run_backtest(feats, individual.backtest_params)
         
-        # Calculate fitness
+        # Calculate fitness with configurable weights
         metrics = result['metrics']
-        fitness = calculate_fitness(metrics)
+        fitness = calculate_fitness(metrics, fitness_config)
         
         return fitness, metrics
         
@@ -442,6 +471,7 @@ def evolution_step(
     population: Population,
     data: pd.DataFrame,
     tf: Timeframe = Timeframe.m15,
+    fitness_config: "FitnessConfig" = None,
     mutation_rate: float = 0.3,
     sigma: float = 0.1,
     elite_fraction: float = 0.1,
@@ -480,7 +510,7 @@ def evolution_step(
     if unevaluated:
         print(f"Evaluating {len(unevaluated)} individuals...")
         for i, ind in enumerate(unevaluated):
-            fitness, metrics = evaluate_individual(ind, data, tf)
+            fitness, metrics = evaluate_individual(ind, data, tf, fitness_config)
             ind.fitness = fitness
             ind.metrics = metrics
             print(f"  [{i+1}/{len(unevaluated)}] Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")

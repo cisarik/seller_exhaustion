@@ -202,72 +202,8 @@ class StrategyEditor(QWidget):
         
         layout.addRow(QLabel(""), QLabel(""))  # Spacer
         
-        # === FIBONACCI PARAMETERS ===
-        layout.addRow(QLabel("<b>Fibonacci Parameters:</b>"), QLabel(""))
-        
-        # Fibonacci Swing Lookback
-        self.fib_lookback_spin = QSpinBox()
-        self.fib_lookback_spin.setRange(20, 500)
-        self.fib_lookback_spin.setValue(96)
-        self.fib_lookback_spin.setSuffix(" bars")
-        self.fib_lookback_spin.valueChanged.connect(self.on_param_changed)
-        layout.addRow("Fib Swing Lookback:", self.fib_lookback_spin)
-        
-        # Fibonacci Swing Lookahead
-        self.fib_lookahead_spin = QSpinBox()
-        self.fib_lookahead_spin.setRange(2, 20)
-        self.fib_lookahead_spin.setValue(5)
-        self.fib_lookahead_spin.setSuffix(" bars")
-        self.fib_lookahead_spin.valueChanged.connect(self.on_param_changed)
-        layout.addRow("Fib Swing Lookahead:", self.fib_lookahead_spin)
-        
-        # Fibonacci Target Level with Golden Button
-        fib_target_layout = QHBoxLayout()
-        
-        self.fib_target_combo = QComboBox()
-        self.fib_target_combo.addItem("38.2% Fib", 0.382)
-        self.fib_target_combo.addItem("50.0% Fib", 0.5)
-        self.fib_target_combo.addItem("61.8% Fib (Golden)", 0.618)
-        self.fib_target_combo.addItem("78.6% Fib", 0.786)
-        self.fib_target_combo.addItem("100% Fib (Full)", 1.0)
-        self.fib_target_combo.setCurrentIndex(2)  # 61.8% default
-        self.fib_target_combo.currentIndexChanged.connect(self.on_param_changed)
-        fib_target_layout.addWidget(self.fib_target_combo)
-        
-        # Golden Ratio Button
-        self.golden_btn = QPushButton("⭐ Set Golden")
-        self.golden_btn.setToolTip("Start with 61.8% (Golden Ratio) for balanced risk/reward")
-        self.golden_btn.setMaximumWidth(120)
-        self.golden_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFD700, stop:0.5 #FFA500, stop:1 #FF8C00);
-                color: #000000;
-                border: 2px solid #DAA520;
-                border-radius: 5px;
-                padding: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFED4E, stop:0.5 #FFB84D, stop:1 #FFA500);
-                border: 2px solid #FFD700;
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #DAA520, stop:0.5 #B8860B, stop:1 #8B6914);
-            }
-        """)
-        self.golden_btn.clicked.connect(self.set_golden_ratio)
-        fib_target_layout.addWidget(self.golden_btn)
-        
-        fib_target_layout.addStretch()
-        
-        fib_target_widget = QWidget()
-        fib_target_widget.setLayout(fib_target_layout)
-        layout.addRow("Fib Target Level:", fib_target_widget)
-        
-        layout.addRow(QLabel(""), QLabel(""))  # Spacer
+        # NOTE: Fibonacci parameters moved to main window's compact parameter editor
+        # to avoid duplication and keep settings in one place
         
         # === STOP LOSS PARAMETERS ===
         layout.addRow(QLabel("<b>Stop-Loss Parameters:</b>"), QLabel(""))
@@ -482,10 +418,10 @@ class StrategyEditor(QWidget):
             reward_r=self.reward_r_spin.value(),
             # Time exit parameters
             max_hold=self.max_hold_spin.value(),
-            # Fibonacci parameters
-            fib_swing_lookback=self.fib_lookback_spin.value(),
-            fib_swing_lookahead=self.fib_lookahead_spin.value(),
-            fib_target_level=self.fib_target_combo.currentData(),
+            # Fibonacci parameters - use defaults (managed in main window)
+            fib_swing_lookback=96,
+            fib_swing_lookahead=5,
+            fib_target_level=0.618,
             # Transaction costs
             fee_bp=self.fee_bp_spin.value(),
             slippage_bp=self.slippage_bp_spin.value()
@@ -518,15 +454,7 @@ class StrategyEditor(QWidget):
         # Time exit parameters
         self.max_hold_spin.setValue(params.max_hold)
         
-        # Fibonacci parameters
-        self.fib_lookback_spin.setValue(params.fib_swing_lookback)
-        self.fib_lookahead_spin.setValue(params.fib_swing_lookahead)
-        
-        # Set Fib target combo
-        for i in range(self.fib_target_combo.count()):
-            if abs(self.fib_target_combo.itemData(i) - params.fib_target_level) < 0.001:
-                self.fib_target_combo.setCurrentIndex(i)
-                break
+        # NOTE: Fibonacci parameters are now in main window's compact parameter editor
         
         # Transaction costs
         self.fee_bp_spin.setValue(params.fee_bp)
@@ -729,23 +657,9 @@ class StrategyEditor(QWidget):
         self.params_changed.emit()
     
     def set_golden_ratio(self):
-        """Set Fibonacci target to Golden Ratio (61.8%)."""
-        # Find the index for 0.618 (Golden Ratio)
-        for i in range(self.fib_target_combo.count()):
-            if abs(self.fib_target_combo.itemData(i) - 0.618) < 0.001:
-                self.fib_target_combo.setCurrentIndex(i)
-                break
+        """Set Fibonacci target to Golden Ratio (61.8%).
         
-        # Also enable Fibonacci exits if not already enabled
-        self.use_fib_check.setChecked(True)
-        
-        # Show confirmation
-        from PySide6.QtWidgets import QToolTip
-        from PySide6.QtGui import QCursor
-        QToolTip.showText(
-            QCursor.pos(),
-            "✓ Golden Ratio set: 61.8% Fibonacci target",
-            self.golden_btn,
-            self.golden_btn.rect(),
-            2000  # Show for 2 seconds
-        )
+        NOTE: This method is obsolete - Fibonacci parameters moved to main window.
+        Kept for backwards compatibility but does nothing.
+        """
+        pass

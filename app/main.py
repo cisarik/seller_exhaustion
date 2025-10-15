@@ -18,6 +18,7 @@ from app.widgets.candle_view import CandleChartWidget
 from app.widgets.settings_dialog import SettingsDialog
 from app.widgets.stats_panel import StatsPanel
 from app.widgets.strategy_editor import StrategyEditor
+from app.widgets.compact_params import CompactParamsEditor
 from strategy.seller_exhaustion import build_features, SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe
@@ -37,6 +38,7 @@ TIMEFRAME_META = {
     Timeframe.m5: (5, "minute"),
     Timeframe.m10: (10, "minute"),
     Timeframe.m15: (15, "minute"),
+    Timeframe.m30: (30, "minute"),
     Timeframe.m60: (60, "minute"),
 }
 
@@ -66,23 +68,36 @@ class MainWindow(QMainWindow):
         # Create toolbar
         self.create_toolbar()
         
-        # Create main layout with splitter
+        # Create main layout with 3-column splitter
         splitter = QSplitter(Qt.Horizontal)
         
-        # Left side: Chart
+        # Left: Chart
         self.chart_view = CandleChartWidget()
         splitter.addWidget(self.chart_view)
         
-        # Right side: Stats panel
+        # Middle: Stats/Optimization panel
         self.stats_panel = StatsPanel()
         splitter.addWidget(self.stats_panel)
+        
+        # Right: Compact parameter editor
+        self.param_editor = CompactParamsEditor()
+        splitter.addWidget(self.param_editor)
+        
+        # Connect stats panel to param editor
+        self.stats_panel.set_param_editor(self.param_editor)
+        
+        # Connect param editor's strategy editor button to open dialog
+        self.param_editor.strategy_editor_btn.clicked.connect(self.show_strategy_editor)
         
         # Connect optimization signals
         self.stats_panel.optimization_step_complete.connect(self.on_optimization_step_complete)
         self.stats_panel.progress_updated.connect(self.update_progress)
         
-        # Set initial sizes (chart gets 70%, stats gets 30%)
-        splitter.setSizes([1120, 480])
+        # Connect param changes to trigger re-calculation
+        self.param_editor.params_changed.connect(self.on_params_changed)
+        
+        # Set initial sizes (chart: 50%, stats: 30%, params: 20%)
+        splitter.setSizes([800, 480, 320])
         
         self.setCentralWidget(splitter)
         
@@ -242,10 +257,12 @@ class MainWindow(QMainWindow):
                 5: Timeframe.m5,
                 10: Timeframe.m10,
                 15: Timeframe.m15,
+                30: Timeframe.m30,
                 60: Timeframe.m60,
             }
             tf = tf_map.get(int(tf_mult), Timeframe.m15)
             self.chart_view.set_timeframe(tf)
+            self.param_editor.set_timeframe(tf)
             
             # Build features
             feats = build_features(df, params, tf)
@@ -275,8 +292,8 @@ class MainWindow(QMainWindow):
                     str(feats.index[-1].date()),
                 )
             
-            # Load parameters into stats panel
-            self.stats_panel.load_params_from_settings(params, bt_params)
+            # Load parameters into param editor
+            self.param_editor.set_params(params, bt_params)
             
             # Pass data to stats panel for optimization
             self.stats_panel.set_current_data(feats, tf)
@@ -307,6 +324,12 @@ class MainWindow(QMainWindow):
         finally:
             self.progress.setVisible(False)
     
+    def on_params_changed(self):
+        """Handle parameter changes from the compact editor."""
+        # Just mark that params changed - backtest will use latest values when run
+        if self.current_data is not None:
+            self.statusBar().showMessage("Parameters changed - run backtest to see effects", 2000)
+    
     async def run_backtest(self):
         """Run backtest on current data."""
         if self.current_data is None:
@@ -325,8 +348,9 @@ class MainWindow(QMainWindow):
             self.backtest_action.setEnabled(False)
             self.chart_view.show_action_progress("Running backtest…")
             
-            # Get current params from stats panel (user may have edited them)
-            seller_params, bt_params = self.stats_panel.get_current_params()
+            # Get current params from param editor (user may have edited them)
+            # Note: fitness_config (3rd value) not used for single backtest
+            seller_params, bt_params, _ = self.param_editor.get_params()
             
             # Rebuild features with current params
             feats = build_features(self.current_data[['open', 'high', 'low', 'close', 'volume']], 
@@ -477,9 +501,9 @@ class MainWindow(QMainWindow):
             self.settings_dialog.set_strategy_params(seller_params)
             self.settings_dialog.set_backtest_params(backtest_params)
         
-        # Update stats panel if it exists
-        if hasattr(self, 'stats_panel'):
-            self.stats_panel.load_params(seller_params, backtest_params)
+        # Update param editor
+        if hasattr(self, 'param_editor'):
+            self.param_editor.set_params(seller_params, backtest_params)
         
         self.statusBar().showMessage("Parameters loaded from file", 3000)
         
@@ -573,11 +597,13 @@ class MainWindow(QMainWindow):
         from config.settings import SettingsManager
         
         try:
+            sizes = self.centralWidget().sizes()
             settings_dict = {
                 'window_width': self.width(),
                 'window_height': self.height(),
-                'splitter_left': self.centralWidget().sizes()[0],
-                'splitter_right': self.centralWidget().sizes()[1],
+                'splitter_chart': sizes[0] if len(sizes) > 0 else 800,
+                'splitter_stats': sizes[1] if len(sizes) > 1 else 480,
+                'splitter_params': sizes[2] if len(sizes) > 2 else 320,
             }
             
             # Save chart view state if available
@@ -605,52 +631,59 @@ class MainWindow(QMainWindow):
             if settings.window_width and settings.window_height:
                 self.resize(settings.window_width, settings.window_height)
             
-            # Restore splitter sizes
-            if settings.splitter_left and settings.splitter_right:
-                self.centralWidget().setSizes([settings.splitter_left, settings.splitter_right])
+            # Restore 3-column splitter sizes
+            if hasattr(settings, 'splitter_chart') and hasattr(settings, 'splitter_stats') and hasattr(settings, 'splitter_params'):
+                self.centralWidget().setSizes([
+                    settings.splitter_chart,
+                    settings.splitter_stats,
+                    settings.splitter_params
+                ])
+            elif hasattr(settings, 'splitter_left') and hasattr(settings, 'splitter_right'):
+                # Backwards compatibility: old 2-column layout
+                # Convert to 3-column by taking 20% from right side for params
+                left = settings.splitter_left
+                right = int(settings.splitter_right * 0.6)
+                params = int(settings.splitter_right * 0.4)
+                self.centralWidget().setSizes([left, right, params])
             
             # Note: Chart view range restored when data is loaded
         except Exception as e:
             print(f"Warning: Could not restore window state: {e}")
     
     async def try_load_cached_data(self):
-        """Try to load cached data from last session."""
+        """Try to load cached data from last session, prioritizing current settings."""
         try:
-            snapshot = load_session_snapshot()
-
-            if snapshot:
-                ticker = snapshot["ticker"]
-                from_ = snapshot["date_from"]
-                to = snapshot["date_to"]
-                self.current_tf = snapshot["timeframe"]
-                self.chart_view.set_timeframe(self.current_tf)
-                seller_params = snapshot["seller_params"]
-                bt_params = snapshot["backtest_params"]
-                target_multiplier = int(snapshot.get("multiplier", TIMEFRAME_META.get(self.current_tf, (15, "minute"))[0]))
-                target_timespan = snapshot.get("timespan", "minute")
-                self.current_ticker = ticker
-            else:
-                ticker = settings.last_ticker
-                from_ = settings.last_date_from
-                to = settings.last_date_to
-                seller_params = SellerParams(
-                    ema_fast=settings.strategy_ema_fast,
-                    ema_slow=settings.strategy_ema_slow,
-                    z_window=settings.strategy_z_window,
-                    vol_z=settings.strategy_vol_z,
-                    tr_z=settings.strategy_tr_z,
-                    cloc_min=settings.strategy_cloc_min,
-                    atr_window=settings.strategy_atr_window,
-                )
-                bt_params = BacktestParams(
-                    atr_stop_mult=settings.backtest_atr_stop_mult,
-                    reward_r=settings.backtest_reward_r,
-                    max_hold=settings.backtest_max_hold,
-                    fee_bp=settings.backtest_fee_bp,
-                    slippage_bp=settings.backtest_slippage_bp,
-                )
-                target_multiplier, target_timespan = TIMEFRAME_META.get(self.current_tf, (15, "minute"))
-                self.current_ticker = ticker
+            # Always use current settings for timeframe and date range
+            ticker = settings.last_ticker or "X:ADAUSD"
+            from_ = settings.last_date_from or "2024-01-01"
+            to = settings.last_date_to or "2025-12-31"
+            
+            # Derive current_tf from settings.timeframe (integer minutes)
+            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15, 30: Timeframe.m30, 60: Timeframe.m60}
+            self.current_tf = tf_map.get(settings.timeframe, Timeframe.m15)
+            self.chart_view.set_timeframe(self.current_tf)
+            self.param_editor.set_timeframe(self.current_tf)
+            self.current_ticker = ticker
+            
+            # Load strategy parameters from settings (always use current values)
+            seller_params = SellerParams(
+                ema_fast=settings.strategy_ema_fast,
+                ema_slow=settings.strategy_ema_slow,
+                z_window=settings.strategy_z_window,
+                vol_z=settings.strategy_vol_z,
+                tr_z=settings.strategy_tr_z,
+                cloc_min=settings.strategy_cloc_min,
+                atr_window=settings.strategy_atr_window,
+            )
+            bt_params = BacktestParams(
+                atr_stop_mult=settings.backtest_atr_stop_mult,
+                reward_r=settings.backtest_reward_r,
+                max_hold=settings.backtest_max_hold,
+                fee_bp=settings.backtest_fee_bp,
+                slippage_bp=settings.backtest_slippage_bp,
+            )
+            
+            target_multiplier, target_timespan = TIMEFRAME_META.get(self.current_tf, (15, "minute"))
             
             base_available = self.cache.has_cached_data(ticker, from_, to, 1, "minute")
             target_available = self.cache.has_cached_data(ticker, from_, to, target_multiplier, target_timespan)
@@ -688,7 +721,7 @@ class MainWindow(QMainWindow):
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
 
-            self.stats_panel.load_params_from_settings(seller_params, bt_params)
+            self.param_editor.set_params(seller_params, bt_params)
             self.stats_panel.set_current_data(feats, self.current_tf)
 
             loop = asyncio.get_event_loop()
@@ -734,6 +767,9 @@ class MainWindow(QMainWindow):
     
     async def initialize(self):
         """Async initialization after window is shown."""
+        # Reload settings to ensure .env values override any stale environment variables
+        SettingsManager.reload_settings()
+        
         # Restore window state
         self.restore_window_state()
         
@@ -745,6 +781,7 @@ class MainWindow(QMainWindow):
                 5: Timeframe.m5,
                 10: Timeframe.m10,
                 15: Timeframe.m15,
+                30: Timeframe.m30,
                 60: Timeframe.m60,
             }
             tf_mult = int(settings.timeframe)
@@ -756,6 +793,8 @@ class MainWindow(QMainWindow):
             
             self.current_tf = tf_map[tf_mult]
             self.chart_view.set_timeframe(self.current_tf)
+            self.param_editor.set_timeframe(self.current_tf)
+            print(f"✓ Timeframe set to: {self.current_tf.value} ({tf_mult} minutes)")
         except Exception as e:
             print(f"Warning: Could not sync timeframe from settings: {e}")
             self.current_tf = Timeframe.m15

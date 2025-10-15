@@ -40,6 +40,12 @@ Chcem backtestovať a potom spúšťať agenta, ktorý na **15‑min timeframe**
 - Portfóliová alokácia viacerých párov.
 - Auto-scaling na viac GPU / distribuovaná optimalizácia (single GPU alebo CPU fallback postačuje).
 
+### Implemented in v2.1
+✅ **Configurable Fitness Functions**: GA optimizer podporuje 4 presety + custom (balanced, high_frequency, conservative, profit_focused)  
+✅ **Time-Based Parameters**: Všetky časové parametre zobrazené v minútach, automatická konverzia na bary  
+✅ **Reorganized UI**: Parameter Editor rozdelený do 4 logických sekcií (Strategy, Exit, Costs, Fitness)  
+✅ **No Duplication**: Fibonacci parametre iba v main window, nie v Strategy Editor dialógu
+
 ---
 
 ## 3) Požiadavky
@@ -49,11 +55,15 @@ Chcem backtestovať a potom spúšťať agenta, ktorý na **15‑min timeframe**
 2. **UI candles** s overlay EMA/SMA/RSI/MACD; zvýraznenie barov, kde platí seller‑exhaustion.
 3. **Paper‑trading** tick (15m): po uzatvorení baru skontrolovať signál a podľa pravidiel otvoriť/riadiť pozíciu.
 4. **Export**: `trades.csv`, `features.csv`, JSON snapshot parametrov a metrík.
+5. **Konfigurovateľné fitness funkcie** (**v2.1**): Optimizer podporuje rôzne optimalizačné ciele (HFT, konzervativný, profit-focused) s nastaviteľnými váhami a minimálnymi požiadavkami.
+6. **Time-based parameter display** (**v2.1**): Všetky časové parametre zobrazené v minútach s automatickou konverziou na bary podľa timeframe.
+7. **Reorganizovaný Parameter Editor** (**v2.1**): 4 logické sekcie (Strategy, Exit, Costs, Fitness) namiesto pôvodných 2 zmiešaných sekcií.
 
 ### Nefunkčné
 - **Deterministickosť** backtestu (rovnaké vstupy → rovnaké výsledky).
 - **Modularita**: čisté hranice medzi DataProvider, Indicators, Strategy, Backtest, UI, Execution.
 - **Async I/O**: žiadne blokovanie UI počas fetchu.
+- **Goal-oriented optimization** (**v2.1**): GA dokáže optimalizovať pre špecifické trading štýly pomocou konfigurovateľných fitness funkcií.
 
 ---
 

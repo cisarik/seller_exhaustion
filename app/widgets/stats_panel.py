@@ -44,6 +44,7 @@ class StatsPanel(QWidget):
         self.population = None
         self.current_data = None
         self.current_tf = None
+        self.param_editor = None  # Will be set by main window
         
         # Multi-step optimization state
         self.is_optimizing = False
@@ -96,11 +97,7 @@ class StatsPanel(QWidget):
         self.equity_group = self.create_equity_section()
         layout.addWidget(self.equity_group)
         
-        # Parameters section (NEW)
-        self.params_group = self.create_parameters_section()
-        layout.addWidget(self.params_group, stretch=1)
-        
-        # Optimization controls (NEW)
+        # Optimization controls
         self.optimization_group = self.create_optimization_section()
         layout.addWidget(self.optimization_group)
     
@@ -179,94 +176,9 @@ class StatsPanel(QWidget):
         group.setLayout(layout)
         return group
     
-    def create_parameters_section(self):
-        """Create parameters display with editable values."""
-        group = QGroupBox("Strategy Parameters")
-        layout = QVBoxLayout()
-        
-        # Scroll area for parameters
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(400)
-        
-        params_widget = QWidget()
-        params_layout = QGridLayout(params_widget)
-        
-        row = 0
-        
-        # SellerParams section
-        seller_label = QLabel("<b>Seller Exhaustion Parameters:</b>")
-        params_layout.addWidget(seller_label, row, 0, 1, 3)
-        row += 1
-        
-        self.param_widgets = {}
-        
-        # Define parameters with labels and types
-        seller_params_config = [
-            ('ema_fast', 'EMA Fast (bars)', 48, 192, 1),
-            ('ema_slow', 'EMA Slow (bars)', 336, 1344, 1),
-            ('z_window', 'Z-Score Window (bars)', 336, 1344, 1),
-            ('vol_z', 'Volume Z-Score Threshold', 1.0, 3.5, 0.1),
-            ('tr_z', 'True Range Z-Score', 0.8, 2.0, 0.1),
-            ('cloc_min', 'Close Location Min', 0.4, 0.8, 0.01),
-            ('atr_window', 'ATR Window (bars)', 48, 192, 1),
-        ]
-        
-        for param_name, label_text, min_val, max_val, step in seller_params_config:
-            label = QLabel(f"{label_text}:")
-            params_layout.addWidget(label, row, 0)
-            
-            if isinstance(step, int):
-                widget = QSpinBox()
-                widget.setRange(int(min_val), int(max_val))
-                widget.setSingleStep(step)
-            else:
-                widget = QDoubleSpinBox()
-                widget.setRange(min_val, max_val)
-                widget.setSingleStep(step)
-                widget.setDecimals(2)
-            
-            params_layout.addWidget(widget, row, 1)
-            self.param_widgets[param_name] = widget
-            row += 1
-        
-        # BacktestParams section
-        row += 1
-        backtest_label = QLabel("<b>Backtest Parameters:</b>")
-        params_layout.addWidget(backtest_label, row, 0, 1, 3)
-        row += 1
-        
-        backtest_params_config = [
-            ('atr_stop_mult', 'ATR Stop Multiplier', 0.3, 1.5, 0.05),
-            ('reward_r', 'Reward:Risk Ratio', 1.5, 4.0, 0.1),
-            ('max_hold', 'Max Hold (bars)', 48, 192, 1),
-            ('fee_bp', 'Fee (basis points)', 2.0, 10.0, 0.5),
-            ('slippage_bp', 'Slippage (basis points)', 2.0, 10.0, 0.5),
-        ]
-        
-        for param_name, label_text, min_val, max_val, step in backtest_params_config:
-            label = QLabel(f"{label_text}:")
-            params_layout.addWidget(label, row, 0)
-            
-            if isinstance(step, int):
-                widget = QSpinBox()
-                widget.setRange(int(min_val), int(max_val))
-                widget.setSingleStep(step)
-            else:
-                widget = QDoubleSpinBox()
-                widget.setRange(min_val, max_val)
-                widget.setSingleStep(step)
-                widget.setDecimals(2)
-            
-            params_layout.addWidget(widget, row, 1)
-            self.param_widgets[param_name] = widget
-            row += 1
-        
-        scroll.setWidget(params_widget)
-        layout.addWidget(scroll)
-        
-        group.setLayout(layout)
-        return group
+    def set_param_editor(self, param_editor):
+        """Set external parameter editor reference."""
+        self.param_editor = param_editor
     
     def create_optimization_section(self):
         """Create optimization controls."""
@@ -515,47 +427,22 @@ class StatsPanel(QWidget):
         self.init_pop_btn.setEnabled(True)
     
     def get_current_params(self):
-        """Get current parameters from UI widgets."""
-        seller_params = SellerParams(
-            ema_fast=self.param_widgets['ema_fast'].value(),
-            ema_slow=self.param_widgets['ema_slow'].value(),
-            z_window=self.param_widgets['z_window'].value(),
-            vol_z=self.param_widgets['vol_z'].value(),
-            tr_z=self.param_widgets['tr_z'].value(),
-            cloc_min=self.param_widgets['cloc_min'].value(),
-            atr_window=self.param_widgets['atr_window'].value(),
-        )
+        """Get current parameters from external editor.
         
-        backtest_params = BacktestParams(
-            atr_stop_mult=self.param_widgets['atr_stop_mult'].value(),
-            reward_r=self.param_widgets['reward_r'].value(),
-            max_hold=self.param_widgets['max_hold'].value(),
-            fee_bp=self.param_widgets['fee_bp'].value(),
-            slippage_bp=self.param_widgets['slippage_bp'].value(),
-        )
-        
-        return seller_params, backtest_params
+        Returns:
+            Tuple of (SellerParams, BacktestParams, FitnessConfig)
+        """
+        if self.param_editor:
+            return self.param_editor.get_params()
+        else:
+            # Fallback to defaults if no editor connected
+            from core.models import FitnessConfig
+            return SellerParams(), BacktestParams(), FitnessConfig()
     
     def set_params_from_individual(self, individual: Individual):
-        """Update UI widgets from an individual."""
-        sp = individual.seller_params
-        bp = individual.backtest_params
-        
-        # Update SellerParams
-        self.param_widgets['ema_fast'].setValue(sp.ema_fast)
-        self.param_widgets['ema_slow'].setValue(sp.ema_slow)
-        self.param_widgets['z_window'].setValue(sp.z_window)
-        self.param_widgets['vol_z'].setValue(sp.vol_z)
-        self.param_widgets['tr_z'].setValue(sp.tr_z)
-        self.param_widgets['cloc_min'].setValue(sp.cloc_min)
-        self.param_widgets['atr_window'].setValue(sp.atr_window)
-        
-        # Update BacktestParams
-        self.param_widgets['atr_stop_mult'].setValue(bp.atr_stop_mult)
-        self.param_widgets['reward_r'].setValue(bp.reward_r)
-        self.param_widgets['max_hold'].setValue(bp.max_hold)
-        self.param_widgets['fee_bp'].setValue(bp.fee_bp)
-        self.param_widgets['slippage_bp'].setValue(bp.slippage_bp)
+        """Update external editor from an individual."""
+        if self.param_editor:
+            self.param_editor.set_params(individual.seller_params, individual.backtest_params)
     
     def initialize_population(self):
         """Initialize population with current parameters as seed."""
@@ -624,9 +511,13 @@ class StatsPanel(QWidget):
                         "Reinitialize the population to apply the new size."
                     )
 
+                # Get fitness configuration from parameter editor
+                _, _, fitness_config = self.get_current_params()
+                
                 # Run evolution step (GPU if available, else CPU)
                 print(f"\n{'='*60}")
                 print(f"Running Evolution Step {'[GPU]' if self.use_gpu else '[CPU]'}...")
+                print(f"Fitness Preset: {fitness_config.preset}")
                 print(f"{'='*60}")
                 
                 if self.use_gpu and self.gpu_optimizer:
@@ -635,6 +526,7 @@ class StatsPanel(QWidget):
                         self.population,
                         self.current_data,
                         self.current_tf,
+                        fitness_config=fitness_config,
                         mutation_rate=ga_cfg['mutation_rate'],
                         sigma=ga_cfg['sigma'],
                         elite_fraction=ga_cfg['elite_fraction'],
@@ -646,13 +538,14 @@ class StatsPanel(QWidget):
                     self.population = evolution_step(
                         self.population,
                         self.current_data,
-                    self.current_tf,
-                    mutation_rate=ga_cfg['mutation_rate'],
-                    sigma=ga_cfg['sigma'],
-                    elite_fraction=ga_cfg['elite_fraction'],
-                    tournament_size=ga_cfg['tournament_size'],
-                    mutation_probability=ga_cfg['mutation_probability']
-                )
+                        self.current_tf,
+                        fitness_config=fitness_config,
+                        mutation_rate=ga_cfg['mutation_rate'],
+                        sigma=ga_cfg['sigma'],
+                        elite_fraction=ga_cfg['elite_fraction'],
+                        tournament_size=ga_cfg['tournament_size'],
+                        mutation_probability=ga_cfg['mutation_probability']
+                    )
                 
                 # Store backtest result for main thread
                 backtest_result = None
@@ -771,8 +664,13 @@ class StatsPanel(QWidget):
             import traceback
             traceback.print_exc()
     
-    def apply_best_parameters(self):
-        """Apply best parameters from population to UI."""
+    def apply_best_parameters(self, auto_save: bool = False):
+        """
+        Apply best parameters from population to UI and optionally save to settings.
+        
+        Args:
+            auto_save: If True, automatically save parameters to .env file
+        """
         if self.population is None or self.population.best_ever is None:
             print("No best individual to apply")
             return
@@ -782,27 +680,39 @@ class StatsPanel(QWidget):
         
         print(f"✓ Applied best parameters from generation {best.generation}")
         print(f"  Fitness: {best.fitness:.4f}")
+        
+        # Auto-save to .env if requested
+        if auto_save:
+            try:
+                from config.settings import SettingsManager
+                
+                # Build settings dict from best individual
+                settings_dict = {
+                    'strategy_ema_fast': int(best.seller_params.ema_fast),
+                    'strategy_ema_slow': int(best.seller_params.ema_slow),
+                    'strategy_z_window': int(best.seller_params.z_window),
+                    'strategy_vol_z': float(best.seller_params.vol_z),
+                    'strategy_tr_z': float(best.seller_params.tr_z),
+                    'strategy_cloc_min': float(best.seller_params.cloc_min),
+                    'strategy_atr_window': int(best.seller_params.atr_window),
+                    'backtest_atr_stop_mult': float(best.backtest_params.atr_stop_mult),
+                    'backtest_reward_r': float(best.backtest_params.reward_r),
+                    'backtest_max_hold': int(best.backtest_params.max_hold),
+                    'backtest_fee_bp': float(best.backtest_params.fee_bp),
+                    'backtest_slippage_bp': float(best.backtest_params.slippage_bp),
+                }
+                
+                SettingsManager.save_to_env(settings_dict)
+                SettingsManager.reload_settings()
+                
+                print("✓ Auto-saved best parameters to .env")
+            except Exception as e:
+                print(f"⚠ Failed to auto-save parameters: {e}")
     
     def load_params_from_settings(self, seller_params, backtest_params):
-        """Load parameters into UI from settings dialog."""
-        sp = seller_params
-        bp = backtest_params
-        
-        # Update SellerParams
-        self.param_widgets['ema_fast'].setValue(sp.ema_fast)
-        self.param_widgets['ema_slow'].setValue(sp.ema_slow)
-        self.param_widgets['z_window'].setValue(sp.z_window)
-        self.param_widgets['vol_z'].setValue(sp.vol_z)
-        self.param_widgets['tr_z'].setValue(sp.tr_z)
-        self.param_widgets['cloc_min'].setValue(sp.cloc_min)
-        self.param_widgets['atr_window'].setValue(sp.atr_window)
-        
-        # Update BacktestParams
-        self.param_widgets['atr_stop_mult'].setValue(bp.atr_stop_mult)
-        self.param_widgets['reward_r'].setValue(bp.reward_r)
-        self.param_widgets['max_hold'].setValue(bp.max_hold)
-        self.param_widgets['fee_bp'].setValue(bp.fee_bp)
-        self.param_widgets['slippage_bp'].setValue(bp.slippage_bp)
+        """Load parameters into external editor from settings dialog."""
+        if self.param_editor:
+            self.param_editor.set_params(seller_params, backtest_params)
     
     def clear(self):
         """Clear all displays."""
@@ -907,12 +817,16 @@ class StatsPanel(QWidget):
                 try:
                     ga_cfg = self._get_ga_settings()
                     
+                    # Get fitness configuration from parameter editor
+                    _, _, fitness_config = self.get_current_params()
+                    
                     if self.use_gpu and self.gpu_optimizer:
                         # GPU-accelerated evolution
                         self.population = self.gpu_optimizer.evolution_step(
                             self.population,
                             self.current_data,
                             self.current_tf,
+                            fitness_config=fitness_config,
                             mutation_rate=ga_cfg['mutation_rate'],
                             sigma=ga_cfg['sigma'],
                             elite_fraction=ga_cfg['elite_fraction'],
@@ -925,6 +839,7 @@ class StatsPanel(QWidget):
                             self.population,
                             self.current_data,
                             self.current_tf,
+                            fitness_config=fitness_config,
                             mutation_rate=ga_cfg['mutation_rate'],
                             sigma=ga_cfg['sigma'],
                             elite_fraction=ga_cfg['elite_fraction'],
@@ -1018,6 +933,13 @@ class StatsPanel(QWidget):
                 
                 # Emit signal for chart visualization
                 self.optimization_step_complete.emit(best, backtest_result)
+                
+                # Auto-save best parameters to .env
+                print("\n" + "="*70)
+                print("💾 Auto-saving best parameters...")
+                print("="*70)
+                self.apply_best_parameters(auto_save=True)
+                
             except Exception as e:
                 print(f"Error running final backtest: {e}")
     

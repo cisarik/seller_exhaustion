@@ -10,9 +10,8 @@ def find_swing_high(df: pd.DataFrame, idx: int, lookback: int = 20, lookahead: i
     """
     Find the most recent swing high before the given index.
     
-    A swing high is a local maximum where:
-    - High[i] > High[i-lookback:i]
-    - High[i] > High[i+1:i+lookahead]
+    Uses a RELAXED approach: finds the highest high in the lookback window
+    that has at least `lookahead` bars of confirmation after it.
     
     Args:
         df: DataFrame with 'high' column
@@ -27,31 +26,56 @@ def find_swing_high(df: pd.DataFrame, idx: int, lookback: int = 20, lookahead: i
         return None
     
     # Search backwards from idx for swing high
-    for i in range(idx - lookahead, max(lookback, 0), -1):
+    # Use a sliding window approach to find local maxima
+    search_start = max(0, idx - lookback)
+    search_end = idx - lookahead
+    
+    if search_start >= search_end:
+        return None
+    
+    # Find all potential swing highs (local maxima)
+    candidates = []
+    
+    for i in range(search_start + lookahead, search_end):
         if i >= len(df):
             continue
             
         high_price = df.iloc[i]["high"]
         
-        # Check if it's higher than lookback period
-        left_ok = True
-        for j in range(max(0, i - lookback), i):
-            if df.iloc[j]["high"] >= high_price:
-                left_ok = False
+        # Check if this is a local maximum
+        # (higher than `lookahead` bars before and after)
+        is_local_max = True
+        
+        # Check bars before
+        for j in range(max(0, i - lookahead), i):
+            if df.iloc[j]["high"] > high_price:
+                is_local_max = False
                 break
         
-        if not left_ok:
+        if not is_local_max:
             continue
         
-        # Check if it's higher than lookahead period
-        right_ok = True
+        # Check bars after
         for j in range(i + 1, min(i + lookahead + 1, len(df))):
-            if df.iloc[j]["high"] >= high_price:
-                right_ok = False
+            if df.iloc[j]["high"] > high_price:
+                is_local_max = False
                 break
         
-        if right_ok:
-            return high_price
+        if is_local_max:
+            candidates.append((i, high_price))
+    
+    # Return the highest swing high found
+    if candidates:
+        # Sort by price (descending) and return the highest
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][1]
+    
+    # Fallback: if no swing high found with strict criteria,
+    # just return the max high in the lookback window
+    window_start = max(0, idx - lookback)
+    window_end = idx - lookahead
+    if window_start < window_end:
+        return df.iloc[window_start:window_end]['high'].max()
     
     return None
 

@@ -22,6 +22,7 @@ rich = "^13.0"
 torch = "^2.8.0"
 torchvision = "^0.23.0"
 pyyaml = "^6.0.3"
+fastparquet = "^2024.11.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

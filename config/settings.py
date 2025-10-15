@@ -1,6 +1,21 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import Optional
 import os
+
+# Clear environment variables on module import to prevent interference with .env file
+# This ensures Settings dialog is the ONLY source of truth
+_ENV_VARS_TO_CLEAR = [
+    'TIMEFRAME', 'TIMEFRAME_UNIT', 'LAST_TICKER', 'LAST_DATE_FROM', 'LAST_DATE_TO',
+    'STRATEGY_EMA_FAST', 'STRATEGY_EMA_SLOW', 'STRATEGY_Z_WINDOW',
+    'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
+    'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
+    'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
+]
+
+for var in _ENV_VARS_TO_CLEAR:
+    if var in os.environ:
+        del os.environ[var]
 
 
 class Settings(BaseSettings):
@@ -66,6 +81,14 @@ class Settings(BaseSettings):
     window_height: int = 1000
     splitter_left: int = 1120
     splitter_right: int = 480
+    
+    @field_validator('chart_x_min', 'chart_x_max', 'chart_y_min', 'chart_y_max', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v):
+        """Convert empty strings to None for optional float fields."""
+        if v == '' or v is None:
+            return None
+        return v
 
     class Config:
         env_prefix = ""
@@ -166,7 +189,23 @@ class SettingsManager:
     
     @staticmethod
     def reload_settings():
-        """Reload settings from .env file."""
+        """Reload settings from .env file by clearing environment variable overrides."""
         global settings
+        
+        # Clear environment variables that might override .env file
+        # This ensures .env file values take precedence
+        env_vars_to_clear = [
+            'TIMEFRAME', 'TIMEFRAME_UNIT', 'LAST_TICKER', 'LAST_DATE_FROM', 'LAST_DATE_TO',
+            'STRATEGY_EMA_FAST', 'STRATEGY_EMA_SLOW', 'STRATEGY_Z_WINDOW',
+            'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
+            'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
+            'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
+        ]
+        
+        for var in env_vars_to_clear:
+            if var in os.environ:
+                del os.environ[var]
+        
         settings = Settings()
+        print(f"✓ Settings reloaded: timeframe={settings.timeframe}m, ticker={settings.last_ticker}")
         return settings

@@ -83,7 +83,7 @@ def evolution_step_gpu(
             # Calculate fitness from metrics
             from backtest.engine_gpu import calculate_fitness_gpu_batch
             metrics_list = [r['metrics'] for r in results_list]
-            fitness_tensor = calculate_fitness_gpu_batch(metrics_list)
+            fitness_tensor = calculate_fitness_gpu_batch(metrics_list, fitness_config)
             fitness_scores = fitness_tensor.cpu().numpy()
             
             # Update individuals with results
@@ -93,10 +93,10 @@ def evolution_step_gpu(
                 if metrics.get('n', 0) > 0:
                     print(f"  Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")
             
-            # Show GPU memory usage
+            # Show GPU memory usage (peak during evaluation)
             mem_info = batch_engine.get_memory_usage()
             if mem_info['available']:
-                print(f"  GPU Memory: {mem_info['allocated_gb']:.2f}/{mem_info['total_gb']:.2f} GB ({mem_info['utilization']:.1%})")
+                print(f"  GPU Memory (Peak): {mem_info['peak_gb']:.2f}/{mem_info['total_gb']:.2f} GB ({mem_info['peak_utilization']:.1%})")
             
             # Clear cache
             batch_engine.clear_cache()

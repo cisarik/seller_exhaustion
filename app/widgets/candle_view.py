@@ -46,6 +46,14 @@ class CandlestickItem(pg.GraphicsObject):
             diffs = np.diff(self.x_values)
             step = float(np.median(diffs)) if len(diffs) > 0 else 1.0
             w = step * 0.8
+            
+            # DEBUG: Print spacing info
+            print(f"\n🕯️ CandlestickItem spacing:")
+            print(f"   Number of candles: {len(self.x_values)}")
+            print(f"   Median spacing: {step} seconds ({step/60:.1f} minutes)")
+            print(f"   Candle width: {w} seconds ({w/60:.1f} minutes)")
+            print(f"   First 3 x_values: {self.x_values[:3]}")
+            print(f"   First 3 diffs: {diffs[:3]}")
         else:
             w = 0.6
 
@@ -210,10 +218,29 @@ class CandleChartWidget(QWidget):
         # Store full dataframe as feats for Fibonacci access
         self.feats = df
         
+        # DEBUG: Print data info
+        print(f"\n📊 Rendering chart:")
+        print(f"   Total bars: {len(df)}")
+        print(f"   Date range: {df.index[0]} to {df.index[-1]}")
+        print(f"   Timeframe: {self.tf.value}")
+        print(f"   Columns: {list(df.columns)}")
+        
+        # Check actual spacing between bars
+        if len(df) > 1:
+            time_diffs = df.index.to_series().diff()[1:6]  # First 5 differences
+            print(f"   First 5 time deltas:")
+            for i, td in enumerate(time_diffs):
+                print(f"     {i+1}: {td} ({td.total_seconds()/60:.0f} minutes)")
+            
+            median_minutes = df.index.to_series().diff().median().total_seconds() / 60
+            print(f"   Median bar spacing: {median_minutes:.0f} minutes")
+        
         # Sample if too many candles (for performance)
+        # DISABLED: User wants to see all data
         original_df = df
-        if len(df) > 5000:
-            df = df.iloc[-5000:]
+        # if len(df) > 5000:
+        #     df = df.iloc[-5000:]
+        #     print(f"   Sampled to last 5000 bars: {df.index[0]} to {df.index[-1]}")
         
         # Store for index mapping
         self.displayed_df = df
@@ -222,6 +249,9 @@ class CandleChartWidget(QWidget):
         # Keep a mapping array to plot with numerical x values (epoch seconds)
         epoch_seconds = (df.index.view('int64') // 1_000_000_000).astype(np.int64)
         self._epoch_seconds = epoch_seconds
+        
+        print(f"   First epoch second: {epoch_seconds[0]} ({pd.Timestamp(epoch_seconds[0], unit='s', tz='UTC')})")
+        print(f"   Last epoch second: {epoch_seconds[-1]} ({pd.Timestamp(epoch_seconds[-1], unit='s', tz='UTC')})")
 
         # Create candlestick item drawn in epoch-seconds X coordinates for proper DateAxis labeling
         candles = CandlestickItem(df[['open', 'high', 'low', 'close']], x_values=epoch_seconds)
@@ -275,60 +305,105 @@ class CandleChartWidget(QWidget):
             
             # Draw Fibonacci retracements FIRST (so they're behind markers)
             if self.indicator_config.get('fib_retracements', True) and self.selected_trade_idx is not None:
-                self.render_fibonacci_retracement_for_trade(original_df, trades, self.selected_trade_idx)
+                print(f"\n🎯 Attempting to render Fibonacci for selected trade #{self.selected_trade_idx + 1}")
+                self.render_fibonacci_retracement_for_trade(self.feats, trades, self.selected_trade_idx)
             
-            # Buy markers (green arrows up) - use original_df for lookups
+            # Render trade markers as BALLS (entry point, sized by PnL)
             if self.indicator_config.get('entries', True):
-                entry_times = []
-                entry_prices = []
-                
-                for _, trade in trades.iterrows():
-                    entry_ts = pd.Timestamp(trade['entry_ts'])
-                    # Check in original_df instead of sampled df
-                    if entry_ts in original_df.index:
-                        idx_ts = int(entry_ts.value // 1_000_000_000)
-                        entry_times.append(idx_ts)
-                        # Position arrow slightly below entry price
-                        entry_prices.append(trade['entry'] * 0.995)
-                
-                if entry_times:
-                    buy_scatter = pg.ScatterPlotItem(
-                        x=entry_times, y=entry_prices,
-                        pen=pg.mkPen('#4caf50', width=3),
-                        brush=pg.mkBrush('#4caf50'),
-                        size=18, symbol='t1'  # Triangle up
-                    )
-                    self.plot_widget.addItem(buy_scatter)
-                    print(f"✓ Rendered {len(entry_times)} entry arrows")
-            
-            # Sell markers (red arrows down) - SELL action, always red
-            if self.indicator_config.get('exits', True):
-                exit_times = []
-                exit_prices = []
-                
-                for _, trade in trades.iterrows():
-                    exit_ts = pd.Timestamp(trade['exit_ts'])
-                    # Check in original_df instead of sampled df
-                    if exit_ts in original_df.index:
-                        idx_ts = int(exit_ts.value // 1_000_000_000)
-                        exit_times.append(idx_ts)
-                        # Position arrow slightly above exit price
-                        exit_prices.append(trade['exit'] * 1.005)
-                
-                if exit_times:
-                    # All exit arrows are RED (sell action)
-                    sell_scatter = pg.ScatterPlotItem(
-                        x=exit_times, y=exit_prices,
-                        pen=pg.mkPen('#f44336', width=3),
-                        brush=pg.mkBrush('#f44336'),
-                        size=18, symbol='t'  # Triangle down
-                    )
-                    self.plot_widget.addItem(sell_scatter)
-                    print(f"✓ Rendered {len(exit_times)} exit arrows (red=sell)")
+                self.render_trade_balls(trades, original_df)
         
         # Add legend (only if not already present)
         if not hasattr(self.plot_widget.plotItem, 'legend') or self.plot_widget.plotItem.legend is None:
             self.plot_widget.addLegend()
+    
+    def render_trade_balls(self, trades: pd.DataFrame, df: pd.DataFrame):
+        """
+        Render trades as BALLS positioned at entry points:
+        - Green balls for profitable trades (size proportional to profit)
+        - Red balls for losing trades (size proportional to loss)
+        - WHITE ball for the currently selected trade
+        
+        Args:
+            trades: DataFrame of all trades
+            df: Full OHLCV DataFrame for timestamp lookups
+        """
+        if len(trades) == 0:
+            return
+        
+        # Calculate ball sizes based on PnL magnitude
+        pnl_values = trades['pnl'].values
+        
+        # Normalize PnL to reasonable ball sizes (20-80 range)
+        max_abs_pnl = max(abs(pnl_values.max()), abs(pnl_values.min()), 0.01)
+        
+        ball_data = []
+        for i, (_, trade) in enumerate(trades.iterrows()):
+            entry_ts = pd.Timestamp(trade['entry_ts'])
+            
+            # Check if timestamp exists in dataframe
+            if entry_ts not in df.index:
+                continue
+            
+            # Position at entry
+            entry_x = int(entry_ts.value // 1_000_000_000)
+            entry_y = trade['entry']
+            
+            # Calculate ball size (proportional to |PnL|)
+            pnl = trade['pnl']
+            size = (20 + (abs(pnl) / max_abs_pnl) * 60) * 0.33  # Range: 6.6-26.4 (1/3 of original)
+            
+            # Determine color
+            if i == self.selected_trade_idx:
+                # Selected trade = WHITE with black border
+                color = '#FFFFFF'
+                border_color = '#000000'
+                border_width = 3
+            elif pnl > 0:
+                # Profit = GREEN
+                color = '#4CAF50'
+                border_color = '#2E7D32'
+                border_width = 2
+            else:
+                # Loss = RED
+                color = '#F44336'
+                border_color = '#C62828'
+                border_width = 2
+            
+            ball_data.append({
+                'x': entry_x,
+                'y': entry_y,
+                'size': size,
+                'color': color,
+                'border_color': border_color,
+                'border_width': border_width
+            })
+        
+        if not ball_data:
+            print("⚠ No valid trade balls to render")
+            return
+        
+        # Render all balls as scatter plot
+        x_coords = [b['x'] for b in ball_data]
+        y_coords = [b['y'] for b in ball_data]
+        sizes = [b['size'] for b in ball_data]
+        
+        # Create brushes and pens for each ball
+        brushes = [pg.mkBrush(b['color']) for b in ball_data]
+        pens = [pg.mkPen(b['border_color'], width=b['border_width']) for b in ball_data]
+        
+        scatter = pg.ScatterPlotItem(
+            x=x_coords,
+            y=y_coords,
+            size=sizes,
+            pen=pens,
+            brush=brushes,
+            symbol='o',
+            pxMode=True  # Size in pixels
+        )
+        self.plot_widget.addItem(scatter)
+        
+        selected_str = f" (#{self.selected_trade_idx + 1} highlighted)" if self.selected_trade_idx is not None else ""
+        print(f"✓ Rendered {len(ball_data)} trade balls{selected_str}")
     
     def render_fibonacci_retracement_for_trade(self, df: pd.DataFrame, trades: pd.DataFrame, trade_idx: int):
         """
@@ -346,8 +421,19 @@ class CandleChartWidget(QWidget):
             trades: DataFrame of all trades
             trade_idx: Index of the trade to visualize (0-based)
         """
-        if self.feats is None or 'fib_swing_high' not in self.feats.columns:
-            print("⚠ No Fibonacci data available in features")
+        print(f"\n🔍 DEBUG: render_fibonacci_retracement_for_trade called")
+        print(f"   trade_idx: {trade_idx}")
+        print(f"   self.feats is None: {self.feats is None}")
+        
+        if self.feats is None:
+            print("⚠ self.feats is None - cannot render Fibonacci")
+            return
+            
+        print(f"   self.feats columns: {list(self.feats.columns)}")
+        print(f"   'fib_swing_high' in columns: {'fib_swing_high' in self.feats.columns}")
+        
+        if 'fib_swing_high' not in self.feats.columns:
+            print("⚠ No Fibonacci data available in features (fib_swing_high column missing)")
             return
         
         if trade_idx < 0 or trade_idx >= len(trades):
@@ -364,7 +450,7 @@ class CandleChartWidget(QWidget):
             
             # Find the signal bar (one bar before entry)
             # Get timeframe minutes
-            tf_minutes = {'m1': 1, 'm3': 3, 'm5': 5, 'm10': 10, 'm15': 15, 'm60': 60}
+            tf_minutes = {'m1': 1, 'm3': 3, 'm5': 5, 'm10': 10, 'm15': 15, 'm30': 30, 'm60': 60}
             minutes = tf_minutes.get(self.tf.value, 15)
             signal_ts = entry_ts - pd.Timedelta(minutes=minutes)
             
@@ -382,9 +468,19 @@ class CandleChartWidget(QWidget):
             print(f"   Has fib_swing_high: {'fib_swing_high' in signal_bar.index}")
             
             # Check if this signal has Fib levels
-            if pd.isna(signal_bar.get('fib_swing_high')):
+            fib_swing_high_value = signal_bar.get('fib_swing_high')
+            print(f"   fib_swing_high value: {fib_swing_high_value}")
+            
+            if pd.isna(fib_swing_high_value):
                 print(f"⚠ No Fibonacci levels calculated for trade #{trade_idx + 1}")
+                print(f"   Signal bar low: {signal_bar.get('low')}")
+                print(f"   This means find_swing_high returned None for this signal")
                 print(f"   Available Fib columns in feats: {[c for c in self.feats.columns if 'fib' in c]}")
+                
+                # Count how many signals have Fib data
+                signals_with_fib = self.feats[self.feats['fib_swing_high'].notna()].shape[0]
+                total_signals = self.feats[self.feats.get('exhaustion', False) == True].shape[0]
+                print(f"   Signals with Fib data: {signals_with_fib}/{total_signals}")
                 return
             
             swing_high_price = signal_bar['fib_swing_high']
@@ -432,23 +528,22 @@ class CandleChartWidget(QWidget):
             self.plot_widget.addItem(range_line)
             
             # === 3. Draw Horizontal Fibonacci Levels ===
+            # Only include levels that are actually calculated by the strategy
             fib_config = {
-                0.236: {'col': 'fib_0236', 'color': '#E91E63', 'label': '23.6%'},
-                0.382: {'col': 'fib_0382', 'color': '#FF9800', 'label': '38.2%'},
-                0.500: {'col': 'fib_0500', 'color': '#8BC34A', 'label': '50.0%'},
+                0.382: {'col': 'fib_0382', 'color': '#2196F3', 'label': '38.2%'},
+                0.500: {'col': 'fib_0500', 'color': '#00BCD4', 'label': '50.0%'},
                 0.618: {'col': 'fib_0618', 'color': '#FFD700', 'label': '61.8% ⭐'},  # Golden
-                0.786: {'col': 'fib_0786', 'color': '#00BCD4', 'label': '78.6%'},
-                1.000: {'col': 'fib_1000', 'color': '#2196F3', 'label': '100%'},
+                0.786: {'col': 'fib_0786', 'color': '#FF9800', 'label': '78.6%'},
+                1.000: {'col': 'fib_1000', 'color': '#F44336', 'label': '100%'},
             }
             
             for fib_ratio, config in fib_config.items():
                 # Check if this level is enabled in config
-                config_key = f"fib_{int(fib_ratio * 10000):04d}"[:8]  # e.g., 'fib_0618'
-                if not self.indicator_config.get(config_key, True):
+                fib_col = config['col']
+                if not self.indicator_config.get(fib_col, True):
                     continue
                 
                 # Get Fib price from signal bar
-                fib_col = f"fib_{int(fib_ratio * 1000):04d}"
                 fib_price = signal_bar.get(fib_col)
                 
                 if pd.isna(fib_price):

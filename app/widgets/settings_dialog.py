@@ -323,15 +323,21 @@ class SettingsDialog(QDialog):
         
         self.show_signals = QCheckBox("Entry Signals (Yellow Triangles)")
         self.show_signals.setChecked(True)
+        self.show_signals.setToolTip("Show yellow triangles marking seller exhaustion signals")
         indicators_layout.addWidget(self.show_signals)
         
-        self.show_entries = QCheckBox("Buy Orders (Green Arrows ↑)")
+        self.show_entries = QCheckBox("Trade Balls (Green/Red circles, sized by PnL)")
         self.show_entries.setChecked(True)
+        self.show_entries.setToolTip(
+            "Show trade markers as colored balls:\n"
+            "• Green = Profit (larger = more profit)\n"
+            "• Red = Loss (larger = more loss)\n"
+            "• White = Selected trade"
+        )
         indicators_layout.addWidget(self.show_entries)
         
-        self.show_exits = QCheckBox("Sell Orders (Red/Green Arrows ↓)")
-        self.show_exits.setChecked(True)
-        indicators_layout.addWidget(self.show_exits)
+        # Remove the old "Sell Orders" checkbox - it's no longer used
+        # (exits are now shown as part of the trade balls)
         
         # Fibonacci Retracements Section
         indicators_layout.addWidget(QLabel("\nFibonacci Retracements (click trade to view):"))
@@ -351,11 +357,11 @@ class SettingsDialog(QDialog):
         fib_levels_layout = QVBoxLayout()
         fib_levels_layout.setContentsMargins(30, 0, 0, 0)  # Indent
         
-        self.show_fib_0382 = QCheckBox("38.2% (Orange)")
+        self.show_fib_0382 = QCheckBox("38.2% (Blue)")
         self.show_fib_0382.setChecked(True)
         fib_levels_layout.addWidget(self.show_fib_0382)
         
-        self.show_fib_0500 = QCheckBox("50.0% (Green)")
+        self.show_fib_0500 = QCheckBox("50.0% (Cyan)")
         self.show_fib_0500.setChecked(True)
         fib_levels_layout.addWidget(self.show_fib_0500)
         
@@ -363,11 +369,11 @@ class SettingsDialog(QDialog):
         self.show_fib_0618.setChecked(True)
         fib_levels_layout.addWidget(self.show_fib_0618)
         
-        self.show_fib_0786 = QCheckBox("78.6% (Cyan)")
+        self.show_fib_0786 = QCheckBox("78.6% (Orange)")
         self.show_fib_0786.setChecked(True)
         fib_levels_layout.addWidget(self.show_fib_0786)
         
-        self.show_fib_1000 = QCheckBox("100% (Blue)")
+        self.show_fib_1000 = QCheckBox("100% (Red)")
         self.show_fib_1000.setChecked(True)
         fib_levels_layout.addWidget(self.show_fib_1000)
         
@@ -568,7 +574,7 @@ class SettingsDialog(QDialog):
         self.show_volume.setChecked(settings.chart_volume)
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
-        self.show_exits.setChecked(settings.chart_exits)
+        # show_exits removed - now integrated into show_entries (trade balls)
         
         self._loading_settings = False  # Re-enable auto-adjust
     
@@ -591,6 +597,7 @@ class SettingsDialog(QDialog):
             "5m": Timeframe.m5,
             "10m": Timeframe.m10,
             "15m": Timeframe.m15,
+            "30m": Timeframe.m30,
             "60m": Timeframe.m60,
             "1h": Timeframe.m60,
         }
@@ -709,7 +716,7 @@ class SettingsDialog(QDialog):
                 'chart_volume': self.show_volume.isChecked(),
                 'chart_signals': self.show_signals.isChecked(),
                 'chart_entries': self.show_entries.isChecked(),
-                'chart_exits': self.show_exits.isChecked(),
+                'chart_exits': True,  # Always true for backwards compatibility (not shown in UI)
             }
             
             SettingsManager.save_to_env(settings_dict)
@@ -757,6 +764,7 @@ class SettingsDialog(QDialog):
                 5: Timeframe.m5,
                 10: Timeframe.m10,
                 15: Timeframe.m15,
+                30: Timeframe.m30,
                 60: Timeframe.m60,
             }
             tf_enum = tf_map.get(mult)
@@ -985,7 +993,7 @@ class SettingsDialog(QDialog):
             'volume': self.show_volume.isChecked(),
             'signals': self.show_signals.isChecked(),
             'entries': self.show_entries.isChecked(),
-            'exits': self.show_exits.isChecked(),
+            # 'exits' not used anymore - trade balls show both entry and exit
             'fib_retracements': self.show_fib_retracements.isChecked(),
             'fib_0382': self.show_fib_0382.isChecked(),
             'fib_0500': self.show_fib_0500.isChecked(),

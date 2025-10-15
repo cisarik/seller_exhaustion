@@ -95,6 +95,10 @@ class BatchGPUBacktestEngine:
             dtype=torch.float32
         ).contiguous()
         
+        # Track peak memory usage during operations
+        self.peak_memory_gb = 0.0
+        self._update_peak_memory()
+        
         if self.config.verbose:
             mem_mb = self._get_tensor_memory_mb()
             print(f"✓ Converted {self.n_bars} bars to GPU tensors ({mem_mb:.1f} MB)")
@@ -280,11 +284,13 @@ class BatchGPUBacktestEngine:
         if self.config.verbose:
             print(f"   Step 1/4: Calculating indicators...")
         indicators = self.batch_calculate_indicators(seller_params_list)
+        self._update_peak_memory()
         
         # Step 2: Detect signals (batch)
         if self.config.verbose:
             print(f"   Step 2/4: Detecting signals...")
         signals = self.batch_detect_signals(indicators, seller_params_list)
+        self._update_peak_memory()
         
         # Step 3: Vectorized backtesting (batch)
         if self.config.verbose:
@@ -295,6 +301,7 @@ class BatchGPUBacktestEngine:
             seller_params_list,
             backtest_params_list
         )
+        self._update_peak_memory()
         
         # Step 4: Calculate metrics (batch)
         if self.config.verbose:
@@ -541,6 +548,12 @@ class BatchGPUBacktestEngine:
         )
         return total_bytes / (1024 * 1024)
     
+    def _update_peak_memory(self):
+        """Update peak memory usage tracker."""
+        if torch.cuda.is_available():
+            current = torch.cuda.memory_allocated(0) / 1e9
+            self.peak_memory_gb = max(self.peak_memory_gb, current)
+    
     def get_memory_usage(self) -> Dict[str, float]:
         """Get GPU memory usage statistics."""
         if not torch.cuda.is_available():
@@ -554,9 +567,11 @@ class BatchGPUBacktestEngine:
             'available': True,
             'allocated_gb': allocated,
             'reserved_gb': reserved,
+            'peak_gb': self.peak_memory_gb,
             'total_gb': total,
             'free_gb': total - allocated,
-            'utilization': allocated / total
+            'utilization': allocated / total,
+            'peak_utilization': self.peak_memory_gb / total
         }
     
     def clear_cache(self):
@@ -622,10 +637,11 @@ def benchmark_batch_vs_sequential(
         print(f"✓ GPU Time: {gpu_time:.2f}s")
         print(f"  Avg per individual: {gpu_time/n_individuals:.3f}s")
         
-        # Show memory usage
+        # Show memory usage (peak during batch)
         mem = engine.get_memory_usage()
         if mem['available']:
-            print(f"  GPU Memory: {mem['allocated_gb']:.2f}/{mem['total_gb']:.2f} GB ({mem['utilization']:.1%})")
+            print(f"  GPU Memory (Peak): {mem['peak_gb']:.2f}/{mem['total_gb']:.2f} GB ({mem['peak_utilization']:.1%})")
+            print(f"  GPU Memory (Current): {mem['allocated_gb']:.2f}/{mem['total_gb']:.2f} GB ({mem['utilization']:.1%})")
     else:
         print("⚠ GPU not available")
         gpu_time = None

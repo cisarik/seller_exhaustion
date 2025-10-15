@@ -32,7 +32,23 @@ All four conditions must be true:
 
 ## ✨ Key Features
 
-### 💾 Data Caching System (**NEW**)
+### 🎯 Configurable Fitness Functions (**NEW**, **v2.1**)
+- **Goal-oriented optimization** for different trading styles
+- **4 presets**: Balanced, High Frequency, Conservative, Profit Focused
+- **Custom weights**: Fine-tune optimization goals (trade count, win rate, avg R, PnL, drawdown)
+- **Minimum requirements**: Filter strategies by min trades and win rate
+- **Real-time switching**: Change optimization goals without restarting
+- **Example**: High Frequency preset generates 50-100+ trades vs 10-20 with Balanced
+
+### 📐 Reorganized Parameter Editor (**NEW**, **v2.1**)
+- **4 logical sections**: Strategy Parameters, Exit Strategy, Transaction Costs, Fitness Function
+- **Time-based display**: All time parameters shown in minutes (e.g., "1440 min" = 24h)
+- **Automatic conversion**: Minutes ↔ bars based on active timeframe
+- **No duplication**: Single source of truth for all parameters
+- **Always visible**: Sidebar access without opening dialogs
+- **Helpful tooltips**: Show both time periods and bar counts
+
+### 💾 Data Caching System
 - **Automatic caching** of downloaded data to `.data/` directory
 - **Parquet format** for efficient storage
 - **Auto-load on startup** - no more re-downloading
@@ -435,9 +451,15 @@ asyncio.run(run())
 
 ---
 
-## 🆕 What's New in v2.0
+## 🆕 What's New
 
-### Major Features
+### v2.1 (Latest)
+✨ **Configurable Fitness Functions** - Optimize for HFT, conservative, profit-focused strategies  
+✨ **Reorganized Parameter Editor** - 4 logical sections with time-based display  
+✨ **Time-Based Parameters** - Intuitive minutes display, auto-converts to bars  
+✨ **No Duplication** - Single source of truth for all parameters  
+
+### v2.0
 ✨ **Fibonacci Exit System** - Market-driven exits at resistance levels  
 ✨ **Strategy Editor** - Comprehensive parameter UI with explanations  
 ✨ **Parameter Persistence** - Save/load evolved configurations  
@@ -632,6 +654,40 @@ For issues or questions:
 
 ---
 
-**Version**: 2.0.0  
-**Last Updated**: 2025-01-14  
+## 🎯 Fitness Function Presets
+
+### ⚖️ Balanced (Default)
+Multi-objective optimization with balanced emphasis:
+- Trade Count: 15% | Win Rate: 25% | Avg R: 30% | Total PnL: 20% | DD Penalty: 10%
+- Min 10 trades, 40% win rate required
+- **Use case**: General-purpose optimization
+
+### 🚀 High Frequency (Scalping/Day Trading)
+Maximizes trade count for active strategies:
+- **Trade Count: 40%** | Win Rate: 15% | Avg R: 20% | Total PnL: 15% | DD Penalty: 10%
+- Min 20 trades, 40% win rate required
+- **Expected result**: 50-100+ trades (vs 10-20 with balanced)
+- **Use case**: Scalpers and day traders wanting maximum activity
+
+### 🛡️ Conservative (Quality over Quantity)
+Prioritizes reliability and risk control:
+- Trade Count: 5% | **Win Rate: 35%** | Avg R: 25% | Total PnL: 15% | **DD Penalty: 20%**
+- Min 5 trades, **50% win rate required**
+- **Expected result**: 60%+ win rate, minimal drawdowns
+- **Use case**: Risk-averse traders prioritizing consistency
+
+### 💰 Profit Focused (Maximum PnL)
+Maximizes absolute returns:
+- Trade Count: 10% | Win Rate: 20% | Avg R: 30% | **Total PnL: 30%** | DD Penalty: 10%
+- Min 10 trades, 40% win rate required
+- **Expected result**: 2-3x higher total PnL
+- **Use case**: Aggressive profit maximization
+
+### ✏️ Custom
+User-defined weights for specific optimization goals.
+
+---
+
+**Version**: 2.1.0  
+**Last Updated**: 2025-01-15  
 **Status**: ✅ Production Ready

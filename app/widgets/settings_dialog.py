@@ -58,9 +58,6 @@ class SettingsDialog(QDialog):
         # Data Download Tab
         tabs.addTab(self.create_data_tab(), "Data Download")
         
-        # Strategy Parameters Tab
-        tabs.addTab(self.create_strategy_tab(), "Strategy Parameters")
-        
         # Indicator Selection Tab
         tabs.addTab(self.create_indicators_tab(), "Chart Indicators")
         
@@ -194,82 +191,6 @@ class SettingsDialog(QDialog):
             "💡 Tip: Download at least 7 days of data for proper indicator calculation.\n"
             "Free tier: 5 API calls/minute. Large date ranges may take a few minutes.\n"
             "Settings are auto-saved when you download data or click 'Save Settings'."
-        )
-        info.setWordWrap(True)
-        info.setProperty("variant", "secondary")
-        layout.addWidget(info)
-        
-        layout.addStretch()
-        return widget
-    
-    def create_strategy_tab(self):
-        """Create strategy parameters tab."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        group = QGroupBox("Seller Exhaustion Parameters")
-        form_layout = QFormLayout()
-        
-        # EMA periods
-        self.ema_fast = QSpinBox()
-        self.ema_fast.setRange(10, 2000)
-        self.ema_fast.setValue(96)
-        self.ema_fast.setSuffix(" bars")
-        form_layout.addRow("EMA Fast:", self.ema_fast)
-        
-        self.ema_slow = QSpinBox()
-        self.ema_slow.setRange(100, 5000)
-        self.ema_slow.setValue(672)
-        self.ema_slow.setSuffix(" bars")
-        form_layout.addRow("EMA Slow:", self.ema_slow)
-        
-        # Z-score window
-        self.z_window = QSpinBox()
-        self.z_window.setRange(100, 5000)
-        self.z_window.setValue(672)
-        self.z_window.setSuffix(" bars")
-        form_layout.addRow("Z-Score Window:", self.z_window)
-        
-        # Volume z-score threshold
-        self.vol_z = QDoubleSpinBox()
-        self.vol_z.setRange(0.5, 10.0)
-        self.vol_z.setValue(2.0)
-        self.vol_z.setSingleStep(0.1)
-        form_layout.addRow("Volume Z-Score:", self.vol_z)
-        
-        # True range z-score threshold
-        self.tr_z = QDoubleSpinBox()
-        self.tr_z.setRange(0.5, 10.0)
-        self.tr_z.setValue(1.2)
-        self.tr_z.setSingleStep(0.1)
-        form_layout.addRow("True Range Z-Score:", self.tr_z)
-        
-        # Close location minimum
-        self.cloc_min = QDoubleSpinBox()
-        self.cloc_min.setRange(0.0, 1.0)
-        self.cloc_min.setValue(0.6)
-        self.cloc_min.setSingleStep(0.05)
-        form_layout.addRow("Min Close Location:", self.cloc_min)
-        
-        # ATR window
-        self.atr_window = QSpinBox()
-        self.atr_window.setRange(10, 500)
-        self.atr_window.setValue(96)
-        self.atr_window.setSuffix(" bars")
-        form_layout.addRow("ATR Window:", self.atr_window)
-        
-        group.setLayout(form_layout)
-        layout.addWidget(group)
-        
-        # Reset button
-        reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.clicked.connect(self.reset_strategy_params)
-        layout.addWidget(reset_btn)
-        
-        # Info
-        info = QLabel(
-            "💡 These parameters control when seller exhaustion signals are generated.\n"
-            "Adjust based on your selected timeframe for optimal results."
         )
         info.setWordWrap(True)
         info.setProperty("variant", "secondary")
@@ -450,6 +371,21 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
+        # Optimizer Iterations (Common to all optimizers)
+        common_group = QGroupBox("Optimizer Settings")
+        common_layout = QFormLayout()
+        
+        self.optimizer_iterations = QSpinBox()
+        self.optimizer_iterations.setRange(10, 1000)
+        self.optimizer_iterations.setValue(50)
+        self.optimizer_iterations.setSuffix(" iterations")
+        self.optimizer_iterations.setToolTip("Number of iterations for multi-step optimization (used by all optimizer types)")
+        common_layout.addRow("Iterations:", self.optimizer_iterations)
+        
+        common_group.setLayout(common_layout)
+        layout.addWidget(common_group)
+
+        # Genetic Algorithm Parameters
         group = QGroupBox("Genetic Algorithm Parameters")
         form_layout = QFormLayout()
 
@@ -501,12 +437,12 @@ class SettingsDialog(QDialog):
         group.setLayout(form_layout)
         layout.addWidget(group)
 
-        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn = QPushButton("Reset GA Defaults")
         reset_btn.clicked.connect(self.reset_ga_params)
         layout.addWidget(reset_btn)
 
         info = QLabel(
-            "💡 These controls adjust the evolutionary optimizer.\n"
+            "💡 Genetic Algorithm (Evolutionary) Optimizer:\n"
             "- Higher population improves exploration but needs more computation.\n"
             "- Mutation rate and sigma control how aggressively new solutions mutate.\n"
             "- Elite fraction preserves top performers per generation.\n"
@@ -516,6 +452,78 @@ class SettingsDialog(QDialog):
         info.setWordWrap(True)
         info.setProperty("variant", "secondary")
         layout.addWidget(info)
+
+        # ADAM Optimizer Parameters
+        adam_group = QGroupBox("ADAM Optimizer Parameters")
+        adam_layout = QFormLayout()
+        
+        # Learning rate
+        self.adam_learning_rate = QDoubleSpinBox()
+        self.adam_learning_rate.setRange(0.0001, 1.0)
+        self.adam_learning_rate.setSingleStep(0.001)
+        self.adam_learning_rate.setDecimals(4)
+        self.adam_learning_rate.setValue(0.01)
+        adam_layout.addRow("Learning Rate:", self.adam_learning_rate)
+        
+        # Epsilon (for finite differences)
+        self.adam_epsilon = QDoubleSpinBox()
+        self.adam_epsilon.setRange(1e-5, 0.1)
+        self.adam_epsilon.setSingleStep(0.0001)
+        self.adam_epsilon.setDecimals(5)
+        self.adam_epsilon.setValue(0.001)
+        adam_layout.addRow("FD Epsilon:", self.adam_epsilon)
+        
+        # Max gradient norm
+        self.adam_max_grad_norm = QDoubleSpinBox()
+        self.adam_max_grad_norm.setRange(0.1, 10.0)
+        self.adam_max_grad_norm.setSingleStep(0.1)
+        self.adam_max_grad_norm.setDecimals(2)
+        self.adam_max_grad_norm.setValue(1.0)
+        adam_layout.addRow("Max Gradient Norm:", self.adam_max_grad_norm)
+        
+        # Beta1 (momentum)
+        self.adam_beta1 = QDoubleSpinBox()
+        self.adam_beta1.setRange(0.0, 1.0)
+        self.adam_beta1.setSingleStep(0.01)
+        self.adam_beta1.setDecimals(3)
+        self.adam_beta1.setValue(0.9)
+        adam_layout.addRow("Beta1 (Momentum):", self.adam_beta1)
+        
+        # Beta2 (RMSprop-like)
+        self.adam_beta2 = QDoubleSpinBox()
+        self.adam_beta2.setRange(0.0, 1.0)
+        self.adam_beta2.setSingleStep(0.001)
+        self.adam_beta2.setDecimals(4)
+        self.adam_beta2.setValue(0.999)
+        adam_layout.addRow("Beta2 (RMSprop):", self.adam_beta2)
+        
+        # Epsilon stability
+        self.adam_epsilon_stability = QDoubleSpinBox()
+        self.adam_epsilon_stability.setRange(1e-10, 1e-6)
+        self.adam_epsilon_stability.setSingleStep(1e-9)
+        self.adam_epsilon_stability.setDecimals(10)
+        self.adam_epsilon_stability.setValue(1e-8)
+        adam_layout.addRow("Epsilon Stability:", self.adam_epsilon_stability)
+        
+        adam_group.setLayout(adam_layout)
+        layout.addWidget(adam_group)
+        
+        adam_reset_btn = QPushButton("Reset ADAM Defaults")
+        adam_reset_btn.clicked.connect(self.reset_adam_params)
+        layout.addWidget(adam_reset_btn)
+        
+        adam_info = QLabel(
+            "💡 ADAM (Adaptive Moment Estimation) Optimizer:\n"
+            "- Learning rate controls step size for parameter updates.\n"
+            "- FD epsilon is step size for finite difference gradient approximation.\n"
+            "- Max gradient norm clips gradients for stability.\n"
+            "- Beta1 controls exponential decay rate for first moment (momentum).\n"
+            "- Beta2 controls exponential decay rate for second moment (RMSprop-like).\n"
+            "- Epsilon stability prevents division by zero in ADAM updates."
+        )
+        adam_info.setWordWrap(True)
+        adam_info.setProperty("variant", "secondary")
+        layout.addWidget(adam_info)
 
         layout.addStretch()
         return widget
@@ -544,15 +552,6 @@ class SettingsDialog(QDialog):
         except:
             pass
         
-        # Strategy parameters
-        self.ema_fast.setValue(settings.strategy_ema_fast)
-        self.ema_slow.setValue(settings.strategy_ema_slow)
-        self.z_window.setValue(settings.strategy_z_window)
-        self.vol_z.setValue(settings.strategy_vol_z)
-        self.tr_z.setValue(settings.strategy_tr_z)
-        self.cloc_min.setValue(settings.strategy_cloc_min)
-        self.atr_window.setValue(settings.strategy_atr_window)
-        
         # Backtest parameters
         self.atr_stop_mult.setValue(settings.backtest_atr_stop_mult)
         self.reward_r.setValue(settings.backtest_reward_r)
@@ -560,6 +559,9 @@ class SettingsDialog(QDialog):
         self.fee_bp.setValue(settings.backtest_fee_bp)
         self.slippage_bp.setValue(settings.backtest_slippage_bp)
 
+        # Optimizer parameters (common)
+        self.optimizer_iterations.setValue(settings.optimizer_iterations)
+        
         # Genetic algorithm parameters
         self.ga_population.setValue(settings.ga_population_size)
         self.ga_mutation_rate.setValue(settings.ga_mutation_rate)
@@ -567,6 +569,14 @@ class SettingsDialog(QDialog):
         self.ga_elite_fraction.setValue(settings.ga_elite_fraction)
         self.ga_tournament_size.setValue(settings.ga_tournament_size)
         self.ga_mutation_probability.setValue(settings.ga_mutation_probability)
+        
+        # ADAM optimizer parameters
+        self.adam_learning_rate.setValue(settings.adam_learning_rate)
+        self.adam_epsilon.setValue(settings.adam_epsilon)
+        self.adam_max_grad_norm.setValue(settings.adam_max_grad_norm)
+        self.adam_beta1.setValue(settings.adam_beta1)
+        self.adam_beta2.setValue(settings.adam_beta2)
+        self.adam_epsilon_stability.setValue(settings.adam_epsilon_stability)
         
         # Chart indicators
         self.show_ema_fast.setChecked(settings.chart_ema_fast)
@@ -622,33 +632,26 @@ class SettingsDialog(QDialog):
             config = get_defaults_for_timeframe(tf)
             bar_counts = config.get_bar_counts()
             
-            # Ask user for confirmation
+            # Ask user for confirmation (only for backtest params now)
             reply = QMessageBox.question(
                 self,
                 "Auto-Adjust Parameters",
                 f"<h3>Adjust parameters for {label} timeframe?</h3>"
                 f"<p>Current timeframe requires different parameter values to maintain "
-                f"consistent time periods (e.g., 24 hours for EMA Fast).</p>"
+                f"consistent time periods.</p>"
                 f"<h4>Proposed adjustments:</h4>"
                 f"<table>"
-                f"<tr><td><b>EMA Fast:</b></td><td>{self.ema_fast.value()} bars → {bar_counts['ema_fast_bars']} bars</td><td>(24 hours)</td></tr>"
-                f"<tr><td><b>EMA Slow:</b></td><td>{self.ema_slow.value()} bars → {bar_counts['ema_slow_bars']} bars</td><td>(7 days)</td></tr>"
-                f"<tr><td><b>Z-Window:</b></td><td>{self.z_window.value()} bars → {bar_counts['z_window_bars']} bars</td><td>(7 days)</td></tr>"
-                f"<tr><td><b>ATR Window:</b></td><td>{self.atr_window.value()} bars → {bar_counts['atr_window_bars']} bars</td><td>(24 hours)</td></tr>"
                 f"<tr><td><b>Max Hold:</b></td><td>{self.max_hold.value()} bars → {bar_counts['max_hold_bars']} bars</td><td>({config.max_hold_minutes//60} hours)</td></tr>"
                 f"</table>"
-                f"<p><b>Click Yes</b> to apply these adjustments.<br>"
-                f"<b>Click No</b> to keep current values (not recommended).</p>",
+                f"<p><b>Note:</b> Strategy parameters are now managed in the main window.</p>"
+                f"<p><b>Click Yes</b> to apply backtest adjustments.<br>"
+                f"<b>Click No</b> to keep current values.</p>",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
             )
             
             if reply == QMessageBox.Yes:
-                # Apply adjustments
-                self.ema_fast.setValue(bar_counts['ema_fast_bars'])
-                self.ema_slow.setValue(bar_counts['ema_slow_bars'])
-                self.z_window.setValue(bar_counts['z_window_bars'])
-                self.atr_window.setValue(bar_counts['atr_window_bars'])
+                # Apply backtest adjustments only
                 self.max_hold.setValue(bar_counts['max_hold_bars'])
                 
                 # Also adjust costs if significantly different
@@ -659,8 +662,8 @@ class SettingsDialog(QDialog):
                 QMessageBox.information(
                     self,
                     "Parameters Adjusted",
-                    f"✓ Parameters have been adjusted for {label} timeframe.\n\n"
-                    f"All time periods remain consistent (24h short-term, 7d long-term).\n"
+                    f"✓ Backtest parameters adjusted for {label} timeframe.\n\n"
+                    f"Strategy parameters are managed in the main window.\n"
                     f"Remember to save settings before closing!"
                 )
             else:
@@ -869,21 +872,15 @@ class SettingsDialog(QDialog):
                 'last_date_from': self.date_from.date().toString("yyyy-MM-dd"),
                 'last_date_to': self.date_to.date().toString("yyyy-MM-dd"),
                 
-                # Strategy
-                'strategy_ema_fast': self.ema_fast.value(),
-                'strategy_ema_slow': self.ema_slow.value(),
-                'strategy_z_window': self.z_window.value(),
-                'strategy_vol_z': self.vol_z.value(),
-                'strategy_tr_z': self.tr_z.value(),
-                'strategy_cloc_min': self.cloc_min.value(),
-                'strategy_atr_window': self.atr_window.value(),
-                
                 # Backtest
                 'backtest_atr_stop_mult': self.atr_stop_mult.value(),
                 'backtest_reward_r': self.reward_r.value(),
                 'backtest_max_hold': self.max_hold.value(),
                 'backtest_fee_bp': self.fee_bp.value(),
                 'backtest_slippage_bp': self.slippage_bp.value(),
+                
+                # Optimizer (Common)
+                'optimizer_iterations': self.optimizer_iterations.value(),
                 
                 # Genetic algorithm
                 'ga_population_size': self.ga_population.value(),
@@ -892,6 +889,14 @@ class SettingsDialog(QDialog):
                 'ga_elite_fraction': self.ga_elite_fraction.value(),
                 'ga_tournament_size': self.ga_tournament_size.value(),
                 'ga_mutation_probability': self.ga_mutation_probability.value(),
+                
+                # ADAM Optimizer
+                'adam_learning_rate': self.adam_learning_rate.value(),
+                'adam_epsilon': self.adam_epsilon.value(),
+                'adam_max_grad_norm': self.adam_max_grad_norm.value(),
+                'adam_beta1': self.adam_beta1.value(),
+                'adam_beta2': self.adam_beta2.value(),
+                'adam_epsilon_stability': self.adam_epsilon_stability.value(),
                 
                 # Acceleration settings (NEW)
                 'acceleration_mode': self.accel_mode_combo.currentData(),
@@ -1100,16 +1105,7 @@ class SettingsDialog(QDialog):
 
         return " ".join(parts)
 
-    def reset_strategy_params(self):
-        """Reset strategy parameters to defaults."""
-        self.ema_fast.setValue(96)
-        self.ema_slow.setValue(672)
-        self.z_window.setValue(672)
-        self.vol_z.setValue(2.0)
-        self.tr_z.setValue(1.2)
-        self.cloc_min.setValue(0.6)
-        self.atr_window.setValue(96)
-    
+
     def reset_backtest_params(self):
         """Reset backtest parameters to defaults."""
         self.atr_stop_mult.setValue(0.7)
@@ -1117,16 +1113,6 @@ class SettingsDialog(QDialog):
         self.max_hold.setValue(96)
         self.fee_bp.setValue(5.0)
         self.slippage_bp.setValue(5.0)
-    
-    def set_strategy_params(self, params: SellerParams):
-        """Update strategy tab controls from SellerParams."""
-        self.ema_fast.setValue(int(params.ema_fast))
-        self.ema_slow.setValue(int(params.ema_slow))
-        self.z_window.setValue(int(params.z_window))
-        self.vol_z.setValue(float(params.vol_z))
-        self.tr_z.setValue(float(params.tr_z))
-        self.cloc_min.setValue(float(params.cloc_min))
-        self.atr_window.setValue(int(params.atr_window))
     
     def set_backtest_params(self, params: BacktestParams):
         """Update backtest tab controls from BacktestParams."""
@@ -1145,6 +1131,15 @@ class SettingsDialog(QDialog):
         self.ga_tournament_size.setValue(3)
         self.ga_mutation_probability.setValue(0.9)
     
+    def reset_adam_params(self):
+        """Reset ADAM optimizer parameters to defaults."""
+        self.adam_learning_rate.setValue(0.01)
+        self.adam_epsilon.setValue(0.001)
+        self.adam_max_grad_norm.setValue(1.0)
+        self.adam_beta1.setValue(0.9)
+        self.adam_beta2.setValue(0.999)
+        self.adam_epsilon_stability.setValue(1e-8)
+    
     def get_timeframe(self):
         """Get selected timeframe as (multiplier, unit) tuple."""
         tf_key = self.timeframe_combo.currentData()
@@ -1152,16 +1147,10 @@ class SettingsDialog(QDialog):
         return mult, unit
     
     def get_strategy_params(self):
-        """Get strategy parameters from UI."""
-        return SellerParams(
-            ema_fast=self.ema_fast.value(),
-            ema_slow=self.ema_slow.value(),
-            z_window=self.z_window.value(),
-            vol_z=self.vol_z.value(),
-            tr_z=self.tr_z.value(),
-            cloc_min=self.cloc_min.value(),
-            atr_window=self.atr_window.value()
-        )
+        """Get strategy parameters - now returns defaults since params are managed in main window."""
+        # Strategy parameters are now managed in the main window compact editor
+        # Return defaults for backwards compatibility
+        return SellerParams()
     
     def get_backtest_params(self):
         """Get backtest parameters from UI."""

@@ -113,14 +113,13 @@ All four conditions must be true:
 ### ⚡ GPU Acceleration (Optional, Fully Optimized)
 - **18.5x speedup** for typical populations (24 individuals)
 - **32x speedup** for large populations (150+ individuals)
-- **Three-phase optimization**: Infrastructure → Batch → Fully Vectorized
+- **Unified pipeline**: features + backtest + fitness on CUDA
 - **Multi-step optimization** with progress bar (10-1000 generations)
 - **Parameter grouping**: 82% reduction in redundant calculations
 - **Linear scaling** to 500+ individuals
 - **GPU memory management** with real-time usage display
-- **Robust fallback**: Auto-degrades Phase 3 → Phase 2 → CPU
+- **Robust fallback**: Auto-switches to multi-core or CPU if CUDA unavailable
 - **Production ready**: 50 generations in ~2-8 minutes
-- Automatic CPU fallback if CUDA unavailable
 
 ### 📈 Multi-Timeframe Support
 - 1m, 3m, 5m, 10m, 15m timeframes
@@ -286,18 +285,23 @@ seller_exhaustion-1/
 │       └── strategy_editor.py     # Parameter editor ⭐
 ├── backtest/
 │   ├── engine.py                  # CPU backtest with exit toggles
-│   ├── engine_gpu.py              # GPU batch accelerator
-│   ├── metrics.py                 # Performance calculations
-│   ├── optimizer.py               # GA with TF-aware bounds
-│   └── optimizer_gpu.py           # GPU optimizer
+│   ├── engine_gpu_full.py         # Full GPU pipeline (features + backtest)
+│   ├── optimizer.py               # Legacy GA helpers (kept for compatibility)
+│   ├── optimizer_evolutionary.py  # Evolutionary optimizer (UI default)
+│   ├── optimizer_multicore.py     # Multi-core CPU acceleration
+│   ├── optimizer_adam.py          # Gradient-based optimizer variant
+│   ├── optimizer_factory.py       # Optimizer/acceleration selection helpers
+│   ├── optimizer_gpu.py           # GPU batch orchestration
+│   └── metrics.py                 # Performance calculations
 ├── indicators/
 │   ├── local.py                   # Pandas indicators
 │   ├── gpu.py                     # PyTorch indicators
 │   └── fibonacci.py               # Fib retracement calculations
 ├── strategy/
-│   ├── seller_exhaustion.py      # Strategy with Fib support
+│   ├── seller_exhaustion.py       # Strategy with Fib support
+│   ├── seller_exhaustion_gpu.py   # GPU feature builder (kept in sync with CPU)
 │   ├── params_store.py            # Parameter persistence
-│   └── timeframe_defaults.py     # ⭐ Timeframe scaling (NEW)
+│   └── timeframe_defaults.py      # ⭐ Timeframe scaling (NEW)
 ├── data/
 │   ├── polygon_client.py          # Polygon.io API client
 │   ├── provider.py                # Data provider with cache
@@ -589,11 +593,11 @@ See `CHANGELOG_DEFAULT_BEHAVIOR.md` for migration guide.
 
 ---
 
-## ⚡ GPU Acceleration (Optional, Production-Ready)
+## ⚡ GPU Acceleration (Optional, Full Pipeline)
 
-**Status**: ✅ Fully optimized with 18.5x-32x speedup
+**Status**: ✅ Full-device pipeline with 18.5x-32x speedup
 
-GPU acceleration provides **18.5x-32x speedup** for genetic algorithm optimization through a three-phase architecture.
+GPU acceleration now runs feature engineering, backtesting, and fitness scoring end-to-end on CUDA via `batch_backtest_full_gpu`. The legacy three-phase system was removed in favor of a single high-utilization pipeline; CPU and multi-core execution remain available through the optimizer factory.
 
 ### Performance Results
 
@@ -605,10 +609,10 @@ GPU acceleration provides **18.5x-32x speedup** for genetic algorithm optimizati
 | 150 ind | ~9.8s | ~315s | **~32x** 🔥 | 0.065s |
 
 **Key Achievements**:
-- ✅ **82% reduction** in redundant calculations via parameter grouping
-- ✅ **Linear scaling** to 500+ individuals
-- ✅ **Production ready** with multi-step optimization UI
-- ✅ **Robust fallback** system (Phase 3 → Phase 2 → CPU)
+- ✅ Unified pipeline (features + backtest + fitness) on device
+- ✅ GPU-native feature builder matches CPU trade counts 1:1
+- ✅ Detailed timing/throughput stats for each batch
+- ✅ Automatic fallback to CPU or multi-core when CUDA unavailable
 
 ### Multi-Step Optimization UI
 
@@ -634,24 +638,12 @@ poetry run python cli.py ui
 # Result: 50 generations in ~2-8 minutes (vs 42 minutes on CPU)
 ```
 
-### Three-Phase Architecture
+### Pipeline Highlights
 
-**Phase 1: Infrastructure** (✅ Complete)
-- GPU manager with memory monitoring
-- Multi-step optimize button
-- Progress bar with ETA
-- Cancel functionality
-
-**Phase 2: Batch GPU Engine** (✅ Complete)
-- Batch indicator calculations
-- Parameter grouping (82% reduction)
-- 2x speedup baseline
-
-**Phase 3: Fully Vectorized** (✅ Complete)
-- Pure tensor operations (no Python loops)
-- Vectorized entry/exit detection
-- 18.5x speedup achieved
-- 32x for large populations
+- Batch-evaluates entire populations with one CUDA call (`batch_backtest_full_gpu`)
+- Uses `strategy/seller_exhaustion_gpu.py` to keep features in lockstep with CPU logic
+- Reports feature/build/backtest timing and utilization for diagnostics
+- Shares result handling with CPU GA, so outputs remain deterministic
 
 ### Check CUDA Availability
 ```bash
@@ -693,12 +685,7 @@ Check your driver: `nvidia-smi`
 - **Overnight Run** (500 generations): ~82 minutes (vs 44 hours on CPU)
 
 ### Automatic Fallback
-The optimizer uses a robust three-tier fallback system:
-1. Try **Phase 3** (Fully Vectorized) - Best performance
-2. Fallback to **Phase 2** (Batch GPU) if errors - Still fast
-3. Fallback to **CPU** if GPU unavailable - Always works
-
-No configuration needed - it just works!
+The optimizer attempts the full GPU pipeline first. If CUDA is unavailable—or a batch run fails—it transparently switches to multi-core (when configured) or sequential CPU evaluation. No manual configuration required.
 
 ---
 

@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ADA Seller-Exhaustion Trading Agent")
+        self.setWindowTitle("Seller-Exhaustion Strategy Optimizer")
         self.setGeometry(100, 100, 1600, 1000)
         
         # Data and settings
@@ -93,8 +93,7 @@ class MainWindow(QMainWindow):
         # Connect stats panel to param editor
         self.stats_panel.set_param_editor(self.param_editor)
         
-        # Connect param editor's strategy editor button to open dialog
-        self.param_editor.strategy_editor_btn.clicked.connect(self.show_strategy_editor)
+        # Strategy editor button removed - use toolbar button instead
         
         # Connect optimization signals
         self.stats_panel.optimization_step_complete.connect(self.on_optimization_step_complete)
@@ -260,9 +259,8 @@ class MainWindow(QMainWindow):
         try:
             self.chart_view.show_action_progress("Building features...")
             
-            # Get strategy params from settings
-            params = self.settings_dialog.get_strategy_params()
-            bt_params = self.settings_dialog.get_backtest_params()
+            # Get strategy params from compact editor (main window)
+            params, bt_params, _ = self.param_editor.get_params()
             
             # Determine timeframe from settings
             tf_mult, tf_unit = self.settings_dialog.get_timeframe()
@@ -523,7 +521,7 @@ class MainWindow(QMainWindow):
         """Handle strategy parameter loading from editor."""
         # Update settings dialog if it exists
         if self.settings_dialog:
-            self.settings_dialog.set_strategy_params(seller_params)
+            # Strategy params now managed in main window compact editor
             self.settings_dialog.set_backtest_params(backtest_params)
         
         # Update param editor
@@ -539,7 +537,7 @@ class MainWindow(QMainWindow):
     def on_strategy_params_saved(self, seller_params, backtest_params):
         """Persist saved parameters and re-run strategy automatically."""
         if self.settings_dialog:
-            self.settings_dialog.set_strategy_params(seller_params)
+            # Strategy params now managed in main window compact editor
             self.settings_dialog.set_backtest_params(backtest_params)
         if hasattr(self, 'stats_panel'):
             self.stats_panel.load_params_from_settings(seller_params, backtest_params)
@@ -958,7 +956,41 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Save state when window is closed."""
         self.save_window_state()
+        self.save_parameters_state()
         event.accept()
+    
+    def save_parameters_state(self):
+        """Save current parameters from compact editor to .env for persistence."""
+        from config.settings import SettingsManager
+        
+        try:
+            # Get current parameters from compact editor
+            seller_params, bt_params, fitness_config = self.param_editor.get_params()
+            
+            # Convert to settings dict for .env
+            # Note: These are in bar counts (already converted by get_params)
+            settings_dict = {
+                # Strategy parameters (in bars for this timeframe)
+                'strategy_ema_fast': seller_params.ema_fast,
+                'strategy_ema_slow': seller_params.ema_slow,
+                'strategy_z_window': seller_params.z_window,
+                'strategy_vol_z': seller_params.vol_z,
+                'strategy_tr_z': seller_params.tr_z,
+                'strategy_cloc_min': seller_params.cloc_min,
+                'strategy_atr_window': seller_params.atr_window,
+                
+                # Backtest parameters
+                'backtest_atr_stop_mult': bt_params.atr_stop_mult,
+                'backtest_reward_r': bt_params.reward_r,
+                'backtest_max_hold': bt_params.max_hold,
+                'backtest_fee_bp': bt_params.fee_bp,
+                'backtest_slippage_bp': bt_params.slippage_bp,
+            }
+            
+            SettingsManager.save_to_env(settings_dict)
+            print("✓ Parameters saved to .env")
+        except Exception as e:
+            print(f"Warning: Could not save parameters state: {e}")
     
     async def initialize(self):
         """Async initialization after window is shown."""
@@ -995,8 +1027,40 @@ class MainWindow(QMainWindow):
             self.current_tf = Timeframe.m15
             self.chart_view.set_timeframe(self.current_tf)
         
+        # Load saved parameters from .env into compact editor
+        self.load_parameters_state()
+        
         # Try to auto-load cached data
         await self.try_load_cached_data()
+    
+    def load_parameters_state(self):
+        """Load saved parameters from .env into compact editor."""
+        try:
+            # Create parameter objects from saved settings
+            seller_params = SellerParams(
+                ema_fast=settings.strategy_ema_fast,
+                ema_slow=settings.strategy_ema_slow,
+                z_window=settings.strategy_z_window,
+                vol_z=settings.strategy_vol_z,
+                tr_z=settings.strategy_tr_z,
+                cloc_min=settings.strategy_cloc_min,
+                atr_window=settings.strategy_atr_window,
+            )
+            
+            backtest_params = BacktestParams(
+                atr_stop_mult=settings.backtest_atr_stop_mult,
+                reward_r=settings.backtest_reward_r,
+                max_hold=settings.backtest_max_hold,
+                fee_bp=settings.backtest_fee_bp,
+                slippage_bp=settings.backtest_slippage_bp,
+            )
+            
+            # Load into compact editor (will convert bars to minutes for display)
+            self.param_editor.set_params(seller_params, backtest_params)
+            print("✓ Parameters loaded from .env")
+        except Exception as e:
+            print(f"Warning: Could not load parameters state: {e}")
+            # Parameters will remain at defaults if loading fails
 
 
 def main():

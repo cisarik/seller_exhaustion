@@ -4,26 +4,32 @@ from typing import Dict, Any
 from core.models import BacktestParams
 
 
+# Valid Fibonacci retracement levels (immutable)
+VALID_FIB_LEVELS = [0.382, 0.500, 0.618, 0.786, 1.000]
+
+# Mapping from Fib level to column name
+FIB_LEVEL_TO_COL = {
+    0.382: "fib_0382",
+    0.500: "fib_0500",
+    0.618: "fib_0618",
+    0.786: "fib_0786",
+    1.000: "fib_1000",
+}
+
+
 def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
     """
-    Run event-driven backtest on DataFrame with exhaustion signals.
+    Run event-driven backtest with PURE Fibonacci exits.
     
-    Entry: t+1 open after signal (seller exhaustion bottom)
+    Entry: t+1 open after exhaustion signal
+    Exit: ONLY when Fibonacci target level is hit
     
-    Default exit: FIRST Fibonacci level hit
-    Optional exits (must be enabled):
-    - Stop-loss: signal_low - atr_stop_mult * ATR (if use_stop_loss=True)
-    - Traditional TP: entry + reward_r * risk (if use_traditional_tp=True)
-    - Time-based: max_hold bars (if use_time_exit=True)
-    
-    If NO exits are enabled, position stays open until end of data.
+    No stop-loss, no traditional TP, no time exits.
+    If Fibonacci target never hit, position never closes.
     """
     d = df.dropna(subset=["atr"]).copy()
     trades = []
     in_pos = False
-    
-    # Fibonacci level columns to check
-    fib_cols = ["fib_0382", "fib_0500", "fib_0618", "fib_0786", "fib_1000"]
     
     for i in range(len(d.index) - 1):
         t = d.index[i]
@@ -32,21 +38,17 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
         nxt_row = d.loc[nxt]
         
         if not in_pos and bool(row.get("exhaustion", False)):
+            # Entry at next bar open
             entry = float(nxt_row["open"])
             
-            # Calculate stop (even if not used, needed for risk calculation)
-            stop = float(row["low"] - p.atr_stop_mult * row["atr"]) if p.use_stop_loss else 0.0
-            risk = max(1e-8, entry - stop) if p.use_stop_loss else entry * 0.01  # 1% risk if no stop
+            # Get Fibonacci target price for this trade
+            fib_target_price = None
+            target_col = FIB_LEVEL_TO_COL.get(p.fib_target_level)
+            if target_col and target_col in row and not pd.isna(row[target_col]):
+                fib_target_price = float(row[target_col])
             
-            # Determine take profit target (for traditional TP if enabled)
-            tp = entry + p.reward_r * risk if p.use_traditional_tp else 0.0
-            
-            # Store Fib levels for this trade (if Fib exits enabled)
-            fib_levels = {}
-            if p.use_fib_exits:
-                for col in fib_cols:
-                    if col in row and not pd.isna(row[col]):
-                        fib_levels[col] = float(row[col])
+            # Simple 1% risk assumption for R-multiple calculation
+            risk = entry * 0.01
             
             bars = 0
             in_pos = True
@@ -54,45 +56,16 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
             
         elif in_pos:
             bars += 1
-            op = float(nxt_row["open"])
-            lo = float(nxt_row["low"])
             hi = float(nxt_row["high"])
-            cl = float(nxt_row["close"])
             
             exit_price = None
             reason = None
             
-            # Check exit conditions in order of priority
-            # 1. Stop loss (if enabled)
-            if p.use_stop_loss:
-                if op <= stop:
-                    exit_price = op
-                    reason = "stop_gap"
-                elif lo <= stop:
-                    exit_price = stop
-                    reason = "stop"
-            
-            # 2. Fibonacci exits (if enabled and not stopped out)
-            if exit_price is None and p.use_fib_exits and fib_levels:
-                # Check each Fib level in order
-                for fib_col in fib_cols:
-                    if fib_col in fib_levels:
-                        fib_price = fib_levels[fib_col]
-                        if hi >= fib_price:
-                            exit_price = fib_price
-                            fib_pct = int(fib_col.split("_")[1]) / 10.0
-                            reason = f"fib_{fib_pct:.1f}"
-                            break
-            
-            # 3. Traditional take profit (if enabled and not exited yet)
-            if exit_price is None and p.use_traditional_tp and tp > 0 and hi >= tp:
-                exit_price = tp
-                reason = "tp"
-            
-            # 4. Time-based exit (if enabled and not exited yet)
-            if exit_price is None and p.use_time_exit and bars >= p.max_hold:
-                exit_price = cl
-                reason = "time"
+            # ONLY exit condition: Fibonacci target hit
+            if fib_target_price is not None and hi >= fib_target_price:
+                exit_price = fib_target_price
+                fib_pct = p.fib_target_level * 100
+                reason = f"FIB_{fib_pct:.1f}"
             
             if exit_price is not None:
                 # Calculate fees and slippage
@@ -105,8 +78,6 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
                     "exit_ts": str(nxt),
                     "entry": entry,
                     "exit": exit_price,
-                    "stop": stop,
-                    "tp": tp,
                     "pnl": pnl,
                     "R": R,
                     "reason": reason,

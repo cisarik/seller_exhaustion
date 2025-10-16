@@ -21,20 +21,27 @@ from backtest.engine import run_backtest
 from strategy.seller_exhaustion import build_features
 
 
+# Valid Fibonacci target levels (discrete choices)
+VALID_FIB_LEVELS = [0.382, 0.500, 0.618, 0.786, 1.000]
+
 # Time-based bounds (in minutes) - universal across timeframes
 TIME_BOUNDS = {
+    # Entry signal parameters (time-based)
     'ema_fast_minutes': (720, 2880),      # 12h - 48h
     'ema_slow_minutes': (5040, 20160),    # 3.5d - 14d
     'z_window_minutes': (5040, 20160),    # 3.5d - 14d
     'atr_window_minutes': (720, 2880),    # 12h - 48h
-    'max_hold_minutes': (720, 2880),      # 12h - 48h
+    
+    # Fibonacci exit parameters (time-based)
+    'fib_swing_lookback_minutes': (720, 2880),    # 12h - 48h
+    'fib_swing_lookahead_minutes': (15, 120),     # 15min - 2h
     
     # Universal thresholds (not time-dependent)
     'vol_z': (1.0, 3.5),
     'tr_z': (0.8, 2.0),
     'cloc_min': (0.4, 0.8),
-    'atr_stop_mult': (0.3, 1.5),
-    'reward_r': (1.5, 4.0),
+    
+    # Transaction costs
     'fee_bp': (2.0, 10.0),
     'slippage_bp': (2.0, 10.0),
 }
@@ -80,17 +87,20 @@ def get_param_bounds_for_timeframe(tf: Timeframe) -> Dict[str, Tuple[float, floa
         minutes_to_bars(TIME_BOUNDS['atr_window_minutes'][0], tf),
         minutes_to_bars(TIME_BOUNDS['atr_window_minutes'][1], tf)
     )
-    bounds['max_hold'] = (
-        minutes_to_bars(TIME_BOUNDS['max_hold_minutes'][0], tf),
-        minutes_to_bars(TIME_BOUNDS['max_hold_minutes'][1], tf)
+    # Fibonacci parameters (time-based)
+    bounds['fib_swing_lookback'] = (
+        minutes_to_bars(TIME_BOUNDS['fib_swing_lookback_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['fib_swing_lookback_minutes'][1], tf)
+    )
+    bounds['fib_swing_lookahead'] = (
+        minutes_to_bars(TIME_BOUNDS['fib_swing_lookahead_minutes'][0], tf),
+        minutes_to_bars(TIME_BOUNDS['fib_swing_lookahead_minutes'][1], tf)
     )
     
     # Copy universal thresholds as-is
     bounds['vol_z'] = TIME_BOUNDS['vol_z']
     bounds['tr_z'] = TIME_BOUNDS['tr_z']
     bounds['cloc_min'] = TIME_BOUNDS['cloc_min']
-    bounds['atr_stop_mult'] = TIME_BOUNDS['atr_stop_mult']
-    bounds['reward_r'] = TIME_BOUNDS['reward_r']
     bounds['fee_bp'] = TIME_BOUNDS['fee_bp']
     bounds['slippage_bp'] = TIME_BOUNDS['slippage_bp']
     
@@ -161,11 +171,13 @@ class Population:
             atr_window=random.randint(*self.bounds['atr_window']),
         )
         
-        # Random BacktestParams
+        # Random BacktestParams (ONLY Fibonacci + costs)
         backtest_params = BacktestParams(
-            atr_stop_mult=random.uniform(*self.bounds['atr_stop_mult']),
-            reward_r=random.uniform(*self.bounds['reward_r']),
-            max_hold=random.randint(*self.bounds['max_hold']),
+            # Fibonacci parameters (ONLY exit mechanism)
+            fib_swing_lookback=random.randint(*self.bounds['fib_swing_lookback']),
+            fib_swing_lookahead=random.randint(*self.bounds['fib_swing_lookahead']),
+            fib_target_level=random.choice(VALID_FIB_LEVELS),
+            # Transaction costs
             fee_bp=random.uniform(*self.bounds['fee_bp']),
             slippage_bp=random.uniform(*self.bounds['slippage_bp']),
         )
@@ -315,7 +327,8 @@ INTEGER_PARAMS = {
     'ema_slow',
     'z_window',
     'atr_window',
-    'max_hold',
+    'fib_swing_lookback',
+    'fib_swing_lookahead',
 }
 
 
@@ -328,6 +341,8 @@ def mutate_parameter(
     """
     Mutate a single parameter with Gaussian noise.
     
+    Special handling for fib_target_level (discrete choice from valid levels).
+    
     Args:
         value: Current parameter value
         param_name: Name of parameter (for bounds lookup)
@@ -337,6 +352,10 @@ def mutate_parameter(
     Returns:
         Mutated value clamped to bounds
     """
+    # Special case: fib_target_level is discrete
+    if param_name == 'fib_target_level':
+        return random.choice(VALID_FIB_LEVELS)
+    
     param_bounds = bounds.get(param_name) or PARAM_BOUNDS.get(param_name)
     if param_bounds is None:
         return value
@@ -397,8 +416,9 @@ def mutate_individual(
                 sigma
             )
     
-    # Mutate BacktestParams
-    for param_name in ['atr_stop_mult', 'reward_r', 'max_hold', 'fee_bp', 'slippage_bp']:
+    # Mutate BacktestParams (ONLY Fibonacci + costs)
+    for param_name in ['fib_swing_lookback', 'fib_swing_lookahead', 'fib_target_level',
+                       'fee_bp', 'slippage_bp']:
         if random.random() < mutation_rate:
             backtest_dict[param_name] = mutate_parameter(
                 backtest_dict[param_name],
@@ -447,12 +467,17 @@ def crossover(
             atr_window=int(round(a * sp1.atr_window + (1-a) * sp2.atr_window)),
         )
     
-    # Crossover BacktestParams
+    # Crossover BacktestParams (ONLY Fibonacci + costs)
     def blend_backtest_params(bp1: BacktestParams, bp2: BacktestParams, a: float) -> BacktestParams:
+        # For discrete fib_target_level, randomly pick from one parent
+        fib_target = bp1.fib_target_level if random.random() < a else bp2.fib_target_level
+        
         return BacktestParams(
-            atr_stop_mult=a * bp1.atr_stop_mult + (1-a) * bp2.atr_stop_mult,
-            reward_r=a * bp1.reward_r + (1-a) * bp2.reward_r,
-            max_hold=int(round(a * bp1.max_hold + (1-a) * bp2.max_hold)),
+            # Fibonacci parameters (ONLY exit mechanism)
+            fib_swing_lookback=int(round(a * bp1.fib_swing_lookback + (1-a) * bp2.fib_swing_lookback)),
+            fib_swing_lookahead=int(round(a * bp1.fib_swing_lookahead + (1-a) * bp2.fib_swing_lookahead)),
+            fib_target_level=fib_target,  # Discrete choice
+            # Transaction costs
             fee_bp=a * bp1.fee_bp + (1-a) * bp2.fee_bp,
             slippage_bp=a * bp1.slippage_bp + (1-a) * bp2.slippage_bp,
         )

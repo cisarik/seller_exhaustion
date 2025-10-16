@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     backtest_fee_bp: float = 5.0
     backtest_slippage_bp: float = 5.0
 
+    # Optimizer Parameters (Common)
+    optimizer_iterations: int = 50
+    
     # Genetic Algorithm Parameters
     ga_population_size: int = 24
     ga_mutation_rate: float = 0.3
@@ -63,6 +66,9 @@ class Settings(BaseSettings):
     adam_learning_rate: float = 0.01
     adam_epsilon: float = 1e-3
     adam_max_grad_norm: float = 1.0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    adam_epsilon_stability: float = 1e-8
     
     # Acceleration Settings (NEW)
     acceleration_mode: str = "multicore"  # cpu, multicore, gpu
@@ -167,6 +173,9 @@ class SettingsManager:
             f.write(f"BACKTEST_FEE_BP={existing.get('BACKTEST_FEE_BP', '5.0')}\n")
             f.write(f"BACKTEST_SLIPPAGE_BP={existing.get('BACKTEST_SLIPPAGE_BP', '5.0')}\n\n")
 
+            f.write("# Optimizer Parameters (Common)\n")
+            f.write(f"OPTIMIZER_ITERATIONS={existing.get('OPTIMIZER_ITERATIONS', '50')}\n\n")
+            
             f.write("# Genetic Algorithm Parameters\n")
             f.write(f"GA_POPULATION_SIZE={existing.get('GA_POPULATION_SIZE', '24')}\n")
             f.write(f"GA_MUTATION_RATE={existing.get('GA_MUTATION_RATE', '0.3')}\n")
@@ -178,7 +187,10 @@ class SettingsManager:
             f.write("# ADAM Optimizer Parameters\n")
             f.write(f"ADAM_LEARNING_RATE={existing.get('ADAM_LEARNING_RATE', '0.01')}\n")
             f.write(f"ADAM_EPSILON={existing.get('ADAM_EPSILON', '0.001')}\n")
-            f.write(f"ADAM_MAX_GRAD_NORM={existing.get('ADAM_MAX_GRAD_NORM', '1.0')}\n\n")
+            f.write(f"ADAM_MAX_GRAD_NORM={existing.get('ADAM_MAX_GRAD_NORM', '1.0')}\n")
+            f.write(f"ADAM_BETA1={existing.get('ADAM_BETA1', '0.9')}\n")
+            f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")
+            f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
             
             f.write("# Acceleration Settings\n")
             f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'multicore')}\n")

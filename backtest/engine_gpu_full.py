@@ -1,15 +1,20 @@
 """
-Phase 2 & 3: Full GPU Pipeline - Batch Backtest with Vectorized Exits
+Phase 2 & 3: Full GPU Pipeline - Batch Backtest with Pure Fibonacci Exits
+
+PURE FIBONACCI STRATEGY:
+1. Entry: Seller exhaustion signals only  
+2. Exit: ONLY when Fibonacci target level is hit
+3. No stop-loss, no traditional TP, no time exits
 
 CRITICAL Requirements:
 1. 100% trade count match with CPU
-2. Same exit priority: stop_gap > stop > TP > time
-3. Keep data on GPU throughout (no CPU round-trips)
-4. Target: 95-100% GPU utilization
+2. Keep data on GPU throughout (no CPU round-trips)
+3. Target: 95-100% GPU utilization
 
 Strategy:
-- Phase 2: Vectorized exit finding on GPU
-- Phase 3: Full pipeline integration with BatchGPUBacktestEngine
+- Phase 2: Vectorized Fibonacci exit finding on GPU
+- Phase 3: Full pipeline integration
+- Hybrid Fib: Compute Fib levels on CPU, check on GPU
 """
 
 import torch
@@ -24,6 +29,19 @@ from strategy.seller_exhaustion import SellerParams
 from strategy.seller_exhaustion_gpu import build_features_gpu_batch
 from indicators.gpu import get_device, to_tensor, to_numpy
 from backtest.optimizer import calculate_fitness
+
+
+# Valid Fibonacci retracement levels (same as CPU engine)
+VALID_FIB_LEVELS = [0.382, 0.500, 0.618, 0.786, 1.000]
+
+# Mapping from Fib level to column name
+FIB_LEVEL_TO_COL = {
+    0.382: "fib_0382",
+    0.500: "fib_0500",
+    0.618: "fib_0618",
+    0.786: "fib_0786",
+    1.000: "fib_1000",
+}
 
 
 def has_gpu() -> bool:
@@ -194,158 +212,61 @@ class GPUBacktestStats:
 
 def find_exits_vectorized_gpu(
     entry_indices: torch.Tensor,      # [N_trades] - bar index of entry
-    entry_prices: torch.Tensor,       # [N_trades] - entry price
-    stop_prices: torch.Tensor,        # [N_trades] - stop loss price
-    tp_prices: torch.Tensor,          # [N_trades] - take profit price
-    max_hold: int,                    # Max bars to hold
-    open_t: torch.Tensor,             # [N_bars] - open prices
-    high_t: torch.Tensor,             # [N_bars] - high prices
-    low_t: torch.Tensor,              # [N_bars] - low prices
-    close_t: torch.Tensor,            # [N_bars] - close prices
-    use_stop: bool,
-    use_tp: bool,
-    use_time_exit: bool,
+    fib_target_prices: torch.Tensor,  # [N_trades] - Fibonacci target prices
+    high_t: torch.Tensor,             # [N_bars] - high prices (ONLY high needed for Fib check)
     device: torch.device
 ) -> Dict[str, torch.Tensor]:
     """
-    Find exits for ALL trades in parallel on GPU.
+    Find Fibonacci exits for ALL trades in parallel on GPU.
     
-    CRITICAL: Exit priority must match CPU exactly:
-    1. Stop gap (open <= stop)
-    2. Stop hit (low <= stop)
-    3. TP hit (high >= tp)
-    4. Time exit (max_hold bars)
+    PURE FIBONACCI EXIT LOGIC:
+    - ONLY exit condition: Fibonacci target level hit (high >= fib_target)
+    - No stop-loss, no traditional TP, no time exits
+    - If Fib target never hit, position never closes (exit_indices = -1)
     
     Args:
         entry_indices: Entry bar indices [N_trades]
-        entry_prices: Entry prices [N_trades]
-        stop_prices: Stop loss prices [N_trades]
-        tp_prices: Take profit prices [N_trades]
-        max_hold: Maximum holding period in bars
-        open_t: Open prices for all bars [N_bars]
+        fib_target_prices: Fibonacci target prices [N_trades]
         high_t: High prices for all bars [N_bars]
-        low_t: Low prices for all bars [N_bars]
-        close_t: Close prices for all bars [N_bars]
-        use_stop: Enable stop loss exits
-        use_tp: Enable take profit exits
-        use_time_exit: Enable time-based exits
         device: PyTorch device
     
     Returns:
         Dict with:
-        - exit_indices: Exit bar indices [N_trades]
-        - exit_prices: Exit prices [N_trades]
-        - exit_reasons: Exit reason codes [N_trades]
-          (1=stop_gap, 2=stop, 3=tp, 4=time)
+        - exit_indices: Exit bar indices [N_trades] (-1 if never hit)
+        - exit_prices: Exit prices [N_trades] (fib_target if hit, 0 otherwise)
+        - exit_reasons: Exit reason code [N_trades] (1=fib, 0=never_exited)
         - bars_held: Number of bars held [N_trades]
     """
     n_trades = len(entry_indices)
-    n_bars = len(open_t)
+    n_bars = len(high_t)
     
     exit_indices = torch.full((n_trades,), -1, device=device, dtype=torch.long)
     exit_prices = torch.zeros(n_trades, device=device, dtype=torch.float32)
     exit_reasons = torch.zeros(n_trades, device=device, dtype=torch.long)
     
-    # Process each trade to find exit
-    # NOTE: This has a loop, which limits vectorization, but fully vectorizing
-    # exit detection across variable-length search windows is extremely complex.
-    # This is still much faster than CPU because:
-    # 1. GPU tensor operations are fast
-    # 2. All data already on GPU (no transfers)
-    # 3. Batch processing of metrics happens after this
-    
+    # SIMPLIFIED: Only check Fibonacci target hit
     for trade_idx in range(n_trades):
         entry_idx = entry_indices[trade_idx].item()
-        entry_price = entry_prices[trade_idx]
-        stop = stop_prices[trade_idx]
-        tp = tp_prices[trade_idx]
+        fib_target = fib_target_prices[trade_idx]
         
-        # Search window: from NEXT bar after entry to entry + max_hold
-        # CRITICAL: CPU checks exit starting from bar AFTER entry
+        if fib_target <= 0:
+            continue  # No valid target
+        
+        # Search from bar after entry to end of data
         search_start = entry_idx + 1
-        search_end = min(entry_idx + max_hold + 1, n_bars)
-        
-        if search_start >= search_end:
-            # No bars to search (edge case)
-            exit_indices[trade_idx] = entry_idx
-            exit_prices[trade_idx] = entry_price
-            exit_reasons[trade_idx] = 4  # time (immediate)
+        if search_start >= n_bars:
             continue
         
-        # Get price slices for search window
-        opens_slice = open_t[search_start:search_end]
-        highs_slice = high_t[search_start:search_end]
-        lows_slice = low_t[search_start:search_end]
-        closes_slice = close_t[search_start:search_end]
+        # Get high prices after entry
+        highs_slice = high_t[search_start:]
         
-        # Find first exit with CORRECT priority!
-        # CRITICAL: Must find the EARLIEST bar where ANY exit condition is met,
-        # then apply priority rules WITHIN that bar
-        exit_found = False
-        exit_bar_offset = None
-        exit_price = None
-        exit_reason = None
-        
-        # Find earliest bar for each exit type
-        earliest_bar = len(opens_slice)  # Beyond search window
-        
-        # Check stop_gap (open <= stop)
-        if use_stop:
-            stop_gap_mask = opens_slice <= stop
-            if stop_gap_mask.any():
-                stop_gap_offset = stop_gap_mask.nonzero()[0].item()
-                if stop_gap_offset < earliest_bar:
-                    earliest_bar = stop_gap_offset
-                    exit_bar_offset = stop_gap_offset
-                    exit_price = opens_slice[stop_gap_offset]
-                    exit_reason = 1  # stop_gap
-                    exit_found = True
-        
-        # Check stop hit (low <= stop)
-        if use_stop:
-            stop_hit_mask = lows_slice <= stop
-            if stop_hit_mask.any():
-                stop_hit_offset = stop_hit_mask.nonzero()[0].item()
-                # Stop hit only wins if it's at an EARLIER bar (not same bar)
-                # At same bar, stop_gap has priority
-                if stop_hit_offset < earliest_bar:
-                    earliest_bar = stop_hit_offset
-                    exit_bar_offset = stop_hit_offset
-                    exit_price = stop
-                    exit_reason = 2  # stop
-                    exit_found = True
-        
-        # Check TP hit (high >= tp)
-        if use_tp:
-            tp_hit_mask = highs_slice >= tp
-            if tp_hit_mask.any():
-                tp_hit_offset = tp_hit_mask.nonzero()[0].item()
-                # TP only wins if it's at an earlier bar (within same bar, stop takes priority)
-                if tp_hit_offset < earliest_bar:
-                    earliest_bar = tp_hit_offset
-                    exit_bar_offset = tp_hit_offset
-                    exit_price = tp
-                    exit_reason = 3  # tp
-                    exit_found = True
-        
-        # Time exit (if nothing else hit)
-        if not exit_found and use_time_exit:
-            exit_bar_offset = len(closes_slice) - 1
-            exit_price = closes_slice[exit_bar_offset]
-            exit_reason = 4  # time
-            exit_found = True
-        
-        # Store results
-        if exit_found:
-            exit_indices[trade_idx] = search_start + exit_bar_offset
-            exit_prices[trade_idx] = exit_price
-            exit_reasons[trade_idx] = exit_reason
-        else:
-            # No exit found - position never closes (matches CPU behavior)
-            # Mark with -1 to filter out later
-            exit_indices[trade_idx] = -1
-            exit_prices[trade_idx] = 0.0
-            exit_reasons[trade_idx] = 0
+        # Find first bar where Fib target hit
+        fib_hit_mask = highs_slice >= fib_target
+        if fib_hit_mask.any():
+            fib_hit_offset = fib_hit_mask.nonzero()[0].item()
+            exit_indices[trade_idx] = search_start + fib_hit_offset
+            exit_prices[trade_idx] = fib_target
+            exit_reasons[trade_idx] = 1  # fib exit
     
     # Calculate bars held
     bars_held = exit_indices - entry_indices
@@ -411,9 +332,10 @@ def batch_backtest_full_gpu(
     if verbose:
         print(f"\n   [Phase 1] Building features on GPU...")
     
+    # Always enable Fibonacci (pure Fib strategy)
     feats_list, feature_stats = build_features_gpu_batch(
         data, seller_params_list, tf, device=device,
-        add_fib=False,  # Fibonacci not supported in GPU yet
+        add_fib=True,  # Always True for pure Fib strategy
         verbose=False
     )
     
@@ -543,38 +465,31 @@ def batch_backtest_full_gpu(
         
         entry_prices_t = open_t[entry_indices_t]
         
-        # Get ATR and low at signal bars
-        atr_values = []
-        low_values = []
+        # Get Fibonacci targets at signal bars
+        fib_target_values = []
+        fib_col = FIB_LEVEL_TO_COL.get(bp.fib_target_level)
+        
         for sig_idx in signal_indices_t:
             sig_ts = data.index[sig_idx.item()]
             try:
-                atr_val = d.loc[sig_ts, 'atr']
-                low_val = d.loc[sig_ts, 'low']
-                atr_values.append(float(atr_val))
-                low_values.append(float(low_val))
+                if fib_col and fib_col in d.columns:
+                    fib_val = d.loc[sig_ts, fib_col]
+                    fib_target_values.append(float(fib_val) if pd.notna(fib_val) else 0.0)
+                else:
+                    fib_target_values.append(0.0)
             except KeyError:
-                atr_values.append(0.0)
-                low_values.append(0.0)
+                fib_target_values.append(0.0)
         
-        atr_t = torch.tensor(atr_values, device=device, dtype=torch.float32)
-        signal_lows_t = torch.tensor(low_values, device=device, dtype=torch.float32)
+        fib_target_prices_t = torch.tensor(fib_target_values, device=device, dtype=torch.float32)
         
-        # Calculate stop and TP
-        stop_prices_t = signal_lows_t - bp.atr_stop_mult * atr_t if bp.use_stop_loss else torch.zeros_like(entry_prices_t)
-        risks_t = entry_prices_t - stop_prices_t if bp.use_stop_loss else entry_prices_t * 0.01
-        risks_t = torch.maximum(risks_t, torch.tensor(1e-8, device=device))  # Avoid division by zero
-        tp_prices_t = entry_prices_t + bp.reward_r * risks_t if bp.use_traditional_tp else torch.zeros_like(entry_prices_t)
+        # Simple 1% risk for R calculation
+        risks_t = entry_prices_t * 0.01
         
-        # Find exits (GPU vectorized!)
+        # Find exits (PURE Fibonacci - simplified!)
         exits = find_exits_vectorized_gpu(
-            entry_indices_t, entry_prices_t,
-            stop_prices_t, tp_prices_t,
-            bp.max_hold,
-            open_t, high_t, low_t, close_t,
-            use_stop=bp.use_stop_loss,
-            use_tp=bp.use_traditional_tp,
-            use_time_exit=bp.use_time_exit,
+            entry_indices_t,
+            fib_target_prices_t,
+            high_t,
             device=device
         )
         
@@ -597,8 +512,6 @@ def batch_backtest_full_gpu(
         signal_indices_t = signal_indices_t[valid_indices]
         entry_indices_t = entry_indices_t[valid_indices]
         entry_prices_t = entry_prices_t[valid_indices]
-        stop_prices_t = stop_prices_t[valid_indices]
-        tp_prices_t = tp_prices_t[valid_indices]
         risks_t = risks_t[valid_indices]
         
         valid_exit_indices = exits['exit_indices'][valid_indices]
@@ -615,18 +528,13 @@ def batch_backtest_full_gpu(
         # Convert to CPU for final DataFrame creation
         # CRITICAL: entry_ts should be SIGNAL timestamp (like CPU), not entry bar timestamp
         trades_data = {
-            'entry_ts': [str(data.index[sig_idx.item()]) for sig_idx in signal_indices_t],  # Signal timestamp!
+            'entry_ts': [str(data.index[sig_idx.item()]) for sig_idx in signal_indices_t],
             'exit_ts': [str(data.index[idx.item()]) for idx in valid_exit_indices],
             'entry': to_numpy(entry_prices_t),
             'exit': to_numpy(exit_prices_t),
-            'stop': to_numpy(stop_prices_t),
-            'tp': to_numpy(tp_prices_t),
             'pnl': to_numpy(pnl_t),
             'R': to_numpy(R_t),
-            'reason': [
-                {1: 'stop_gap', 2: 'stop', 3: 'tp', 4: 'time'}.get(r.item(), 'unknown')
-                for r in valid_exit_reasons
-            ],
+            'reason': [f'FIB_{bp.fib_target_level * 100:.1f}' for _ in valid_exit_reasons],
             'bars_held': to_numpy(valid_bars_held)
         }
         

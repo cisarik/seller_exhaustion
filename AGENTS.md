@@ -104,11 +104,15 @@ ada-agent/
 │
 ├── backtest/                # Backtesting engine
 │   ├── __init__.py
-│   ├── engine.py           # Event-driven backtest logic (CPU)
-│   ├── engine_gpu.py       # Batch GPU accelerator (PyTorch)
-│   ├── optimizer.py        # Genetic algorithm (CPU path)
-│   ├── optimizer_gpu.py    # GPU-aware optimizer wrapper
-│   └── metrics.py          # Performance metrics calculations
+│   ├── engine.py                # Event-driven backtest logic (CPU)
+│   ├── engine_gpu_full.py       # Full GPU pipeline (features + backtest)
+│   ├── optimizer.py             # GA helpers (CPU compatibility)
+│   ├── optimizer_evolutionary.py# Evolutionary optimizer core
+│   ├── optimizer_multicore.py   # Multi-core execution backend
+│   ├── optimizer_adam.py        # ADAM optimizer option
+│   ├── optimizer_factory.py     # Optimizer/acceleration factory
+│   ├── optimizer_gpu.py         # GPU-aware optimizer wrapper
+│   └── metrics.py               # Performance metrics calculations
 │
 ├── config/                  # Configuration and settings
 │   ├── __init__.py
@@ -134,7 +138,8 @@ ada-agent/
 │
 ├── strategy/                # Trading strategies
 │   ├── __init__.py
-│   └── seller_exhaustion.py # Seller exhaustion signal logic
+│   ├── seller_exhaustion.py     # Seller exhaustion signal logic (CPU)
+│   └── seller_exhaustion_gpu.py # GPU feature builder (kept in parity)
 │
 ├── tests/                   # Unit tests
 │   ├── __init__.py
@@ -142,6 +147,16 @@ ada-agent/
 │   ├── test_indicators.py
 │   └── test_strategy.py
 │
+├── backtest/                # Backtesting & optimization
+│   ├── engine.py                # CPU backtester
+│   ├── engine_gpu_full.py       # Full GPU pipeline (features + backtest)
+│   ├── optimizer.py             # Legacy GA helpers (compatibility)
+│   ├── optimizer_evolutionary.py# Evolutionary optimizer (UI default)
+│   ├── optimizer_multicore.py   # Multi-core CPU execution
+│   ├── optimizer_adam.py        # Gradient-based optimizer alternative
+│   ├── optimizer_factory.py     # Optimizer/acceleration selection
+│   ├── optimizer_gpu.py         # GPU orchestrator
+│   └── metrics.py               # Performance calculations
 ├── cli.py                   # Typer CLI with fetch/backtest/ui commands
 ├── pyproject.toml           # Poetry dependencies
 ├── Makefile                 # Convenience commands
@@ -471,7 +486,7 @@ zscore(series, window) -> pd.Series
 - Loops are kept minimal; where iterative logic exists (e.g., EMA), consider migrating to `torch.scan` for further speedups.
 
 **Usage**:
-- `backtest/engine_gpu.py` and `optimizer_gpu.py` import these helpers to keep all heavy lifting on device.
+- `backtest/engine_gpu_full.py` and `optimizer_gpu.py` import these helpers to keep all heavy lifting on device.
 - Safe to call even without CUDA; ensures developers can test GPU pipeline on CPU-only machines.
 
 **Testing**:
@@ -681,6 +696,25 @@ This module ensures **temporal consistency** across timeframes. Without it, mult
 
 ---
 
+### 8b. `strategy/seller_exhaustion_gpu.py`
+
+**Purpose**: GPU-native feature builder that mirrors the CPU implementation for batched evaluations.
+
+**Highlights**:
+- Accepts batched OHLCV tensors and per-individual `SellerParams`, emitting the same columns as `build_features()` using torch operations.
+- Shares helper routines with `engine_gpu_full.py` and guards parity via `_find_exit_bar_cpu()` checks.
+- Designed to keep all heavy lifting on the device—no pandas round trips once tensors are prepared.
+
+**Usage**:
+- Called from `batch_backtest_full_gpu()` so feature engineering, backtesting, and fitness scoring stay on device.
+- Falls back to CPU tensors automatically when CUDA is unavailable, making it safe for development laptops.
+
+**Extending**:
+- When adding new indicators or thresholds, update both CPU and GPU builders together and extend parity tests.
+- Prefer vectorized tensor math over Python loops; leverage broadcasting to keep performance high.
+
+---
+
 ### 9. `backtest/engine.py`
 
 **Purpose**: Event-driven backtest simulation.
@@ -764,20 +798,20 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> dict:
 
 ---
 
-### 10. `backtest/engine_gpu.py`
+### 10. `backtest/engine_gpu_full.py`
 
-**Purpose**: Accelerate batch backtests across populations using PyTorch tensors.
+**Purpose**: Run feature engineering, backtesting, and fitness prep entirely on GPU for batched populations.
 
 **Highlights**:
-- Converts incoming OHLCV frames to tensors once and reuses them for each GA evaluation step.
-- Calls GPU indicator helpers (`indicators/gpu.py`) to stay on device.
-- Supports CPU fallback automatically when CUDA is unavailable—no need for separate code paths.
-- Provides `batch_evaluate` returning fitness scores, metrics, and optional debug results for visualization.
-- Includes `get_memory_usage()` and `clear_cache()` utilities to manage VRAM pressure.
+- `batch_backtest_full_gpu()` keeps OHLCV tensors on device, invokes the GPU feature builder, and returns `GPUBacktestStats`.
+- `_find_exit_bar_cpu()` filter ensures trade sequencing matches the CPU engine 1:1 despite running in parallel on GPU.
+- Aggregates metrics for each individual so the optimizer can score and log without extra conversions.
+- Exposes helper functions (`has_gpu`, `calculate_fitness_gpu_batch`) for quick capability checks and scoring.
 
 **Implementation Tips**:
-- Minimize tensor → numpy conversions; only perform when results are consumed by pandas.
-- Keep device/dtype consistent; pass explicit `device` wherever possible to avoid implicit transfers.
+- Avoid tensor ↔ pandas conversions inside the loop; perform them only when the optimizer needs to display results.
+- Keep tensors on the same device returned by `indicators.gpu.get_device()`; pass `device` through when extending APIs.
+- When adding new indicators or exits, update both CPU and GPU logic and extend the parity tests to keep outputs aligned.
 
 ---
 
@@ -1142,7 +1176,7 @@ def evolution_step(population, data, tf, fitness_config=None, ...):
         fitness, metrics = evaluate_individual(ind, data, tf, fitness_config)
 ```
 
-**GPU Support** (`backtest/optimizer_gpu.py`, `backtest/engine_gpu.py`):
+**GPU Support** (`backtest/optimizer_gpu.py`, `backtest/engine_gpu_full.py`):
 ```python
 def evolution_step_gpu(population, data, tf, fitness_config=None, ...):
     # GPU batch evaluation with fitness_config
@@ -1150,7 +1184,6 @@ def evolution_step_gpu(population, data, tf, fitness_config=None, ...):
 
 def calculate_fitness_gpu_batch(metrics_list, fitness_config=None, device=None):
     # Use same calculate_fitness() for each metrics dict
-    # Future: Vectorize fitness calculation on GPU
     fitness_scores = [calculate_fitness(m, fitness_config) for m in metrics_list]
     return torch.tensor(fitness_scores, device=device)
 ```
@@ -1549,7 +1582,7 @@ seller_params, bt_params, _ = editor.get_params()
 **Optimizer**:
 - `backtest/optimizer.py` - Updated `calculate_fitness()`, `evaluate_individual()`, `evolution_step()` (+60 lines)
 - `backtest/optimizer_gpu.py` - Updated `evolution_step_gpu()`, `GPUOptimizer.evolution_step()` (+15 lines)
-- `backtest/engine_gpu.py` - Updated `calculate_fitness_gpu_batch()` (+3 lines)
+- `backtest/engine_gpu_full.py` - Updated `calculate_fitness_gpu_batch()` (+3 lines)
 
 **UI Components**:
 - `app/widgets/compact_params.py` - Reorganized into 4 sections, added fitness controls (+180 lines)
@@ -2288,8 +2321,8 @@ local.py / gpu.py (indicators)
 seller_exhaustion.py (strategy)
     ↓
 engine.py ─┬─► metrics.py
-engine_gpu.py │
-             └─► optimizer.py / optimizer_gpu.py ──► stats_panel.py (visualization)
+engine_gpu_full.py │
+                   └─► optimizer_evolutionary.py / optimizer_gpu.py ──► stats_panel.py (visualization)
     ↓
 cli.py / main.py (presentation)
 ```
@@ -2316,7 +2349,7 @@ cli.py / main.py (presentation)
 2. Stats panel loads settings, initializes Population(seed)
    ↓
 3. Evolution step runs:
-     • GPU path → engine_gpu.batch_evaluate()/optimizer_gpu
+     • GPU path → engine_gpu_full.batch_backtest_full_gpu()/optimizer_gpu
      • CPU path → engine.run_backtest()/optimizer
    ↓
 4. Best individual metrics → stats panel plots & console logs

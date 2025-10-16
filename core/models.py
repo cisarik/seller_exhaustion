@@ -35,34 +35,19 @@ class BacktestParams(BaseModel):
     """
     Backtest execution parameters.
     
-    Default strategy:
+    Pure Fibonacci Strategy:
     - BUY: Seller exhaustion signals only
-    - SELL: First Fibonacci level hit only
-    - Stop-loss and time exits are DISABLED by default (optional)
+    - SELL: Fibonacci target level hit ONLY
+    - No stop-loss, no traditional TP, no time exits
     """
-    # Exit toggles
-    use_stop_loss: bool = False
-    use_time_exit: bool = False
-    use_fib_exits: bool = True
-    use_traditional_tp: bool = False
-    
-    # Stop-loss parameters
-    atr_stop_mult: float = 0.7
-    
-    # Traditional TP parameters
-    reward_r: float = 2.0
-    
-    # Time exit parameters
-    max_hold: int = 96
-    
-    # Fibonacci parameters
-    fib_swing_lookback: int = 96
-    fib_swing_lookahead: int = 5
-    fib_target_level: float = 0.618
+    # Fibonacci parameters (ONLY exit mechanism)
+    fib_swing_lookback: int = 96      # Bars to look back for swing high
+    fib_swing_lookahead: int = 5       # Bars ahead for swing confirmation
+    fib_target_level: float = 0.618    # Target Fib level (0.382-1.0)
     
     # Transaction costs
-    fee_bp: float = 5.0
-    slippage_bp: float = 5.0
+    fee_bp: float = 5.0      # Fees in basis points
+    slippage_bp: float = 5.0  # Slippage in basis points
 
 
 class FitnessConfig(BaseModel):

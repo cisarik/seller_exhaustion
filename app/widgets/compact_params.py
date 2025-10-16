@@ -56,7 +56,7 @@ class CompactParamsEditor(QWidget):
     
     def _update_tooltips(self):
         """Update tooltips to show time + bars for current timeframe."""
-        time_params = ['ema_fast', 'ema_slow', 'z_window', 'atr_window', 'max_hold', 'fib_lookback', 'fib_lookahead']
+        time_params = ['ema_fast', 'ema_slow', 'z_window', 'atr_window', 'fib_lookback', 'fib_lookahead']
         
         for param_name in time_params:
             if param_name in self.param_widgets:
@@ -75,11 +75,6 @@ class CompactParamsEditor(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
         
-        # Title
-        title = QLabel("Best Parameters")
-        title.setProperty("role", "title")
-        layout.addWidget(title)
-        
         # Scroll area for parameters
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -91,7 +86,7 @@ class CompactParamsEditor(QWidget):
         scroll_layout.setSpacing(8)
         
         # Strategy Parameters Group
-        strategy_group = QGroupBox("Strategy Parameters")
+        strategy_group = QGroupBox("Seller-Exhaustion Entry")
         strategy_layout = QFormLayout()
         strategy_layout.setSpacing(4)
         strategy_layout.setContentsMargins(8, 8, 8, 8)
@@ -137,26 +132,21 @@ class CompactParamsEditor(QWidget):
         scroll_layout.addWidget(strategy_group)
         
         # Exit Strategy Group (NEW - separated from backtest)
-        exit_group = QGroupBox("Exit Strategy")
+        exit_group = QGroupBox("Fibonacci Exit")
         exit_layout = QFormLayout()
         exit_layout.setSpacing(4)
         exit_layout.setContentsMargins(8, 8, 8, 8)
         
-        # Fibonacci exits toggle
+        # Fibonacci exits toggle (always enabled, checkbox removed)
         self.use_fib_check = QCheckBox("Fibonacci Exits")
         self.use_fib_check.setChecked(True)
-        self.use_fib_check.setToolTip("Exit at first Fibonacci retracement level hit")
+        self.use_fib_check.setVisible(False)  # Hidden but still exists for compatibility
         self.use_fib_check.stateChanged.connect(self._on_param_changed)
-        exit_layout.addRow("", self.use_fib_check)
         
-        # Exit strategy parameters
+        # Fibonacci exit parameters (ONLY exit mechanism)
         exit_params = [
             ('fib_lookback', 'Fib Lookback:', 720, 2880, 60, 1440, True),    # 12h-48h, default 24h
-            ('fib_lookahead', 'Fib Lookahead:', 60, 240, 15, 75, True),       # 1h-4h, default 1.25h
-            ('fib_target', 'Fib Target:', 0.382, 1.0, 0.001, 0.618, False),   # 38.2%-100%, default 61.8%
-            ('max_hold', 'Max Hold:', 720, 2880, 60, 1440, True),             # 12h-48h, default 24h
-            ('atr_stop_mult', 'Stop Mult:', 0.3, 1.5, 0.05, 0.7, False),
-            ('reward_r', 'R:R Ratio:', 1.5, 4.0, 0.1, 2.0, False),
+            ('fib_lookahead', 'Fib Lookahead:', 60, 240, 15, 75, True),      # 1h-4h, default 1.25h
         ]
         
         for param_name, label_text, min_val, max_val, step, default, is_time in exit_params:
@@ -182,6 +172,28 @@ class CompactParamsEditor(QWidget):
             
             exit_layout.addRow(label, widget)
             self.param_widgets[param_name] = widget
+        
+        # Fibonacci Target Level (Dropdown for discrete choices)
+        fib_target_label = QLabel("Fib Target:")
+        fib_target_label.setMaximumWidth(80)
+        self.param_widgets['fib_target'] = QComboBox()
+        self.param_widgets['fib_target'].setMaximumWidth(100)
+        
+        # Add valid Fibonacci levels
+        fib_levels = [
+            (0.382, "38.2%"),
+            (0.500, "50.0%"),
+            (0.618, "61.8% (Golden)"),
+            (0.786, "78.6%"),
+            (1.000, "100%"),
+        ]
+        for value, label in fib_levels:
+            self.param_widgets['fib_target'].addItem(label, value)
+        
+        # Set default to Golden Ratio (61.8%)
+        self.param_widgets['fib_target'].setCurrentIndex(2)
+        self.param_widgets['fib_target'].currentIndexChanged.connect(self._on_param_changed)
+        exit_layout.addRow(fib_target_label, self.param_widgets['fib_target'])
         
         exit_group.setLayout(exit_layout)
         scroll_layout.addWidget(exit_group)
@@ -291,20 +303,6 @@ class CompactParamsEditor(QWidget):
         
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
-        
-        # Action buttons
-        btn_layout = QVBoxLayout()
-        btn_layout.setSpacing(4)
-        
-        self.reset_btn = QPushButton("Reset Defaults")
-        self.reset_btn.clicked.connect(self.reset_to_defaults)
-        btn_layout.addWidget(self.reset_btn)
-        
-        self.strategy_editor_btn = QPushButton("📊 Strategy Editor")
-        self.strategy_editor_btn.setToolTip("Open full Strategy Editor for parameter sets")
-        btn_layout.addWidget(self.strategy_editor_btn)
-        
-        layout.addLayout(btn_layout)
     
     def _on_param_changed(self):
         """Handle parameter change and update tooltips."""
@@ -370,14 +368,11 @@ class CompactParamsEditor(QWidget):
         self.param_widgets['cloc_min'].setValue(0.6)
         self.param_widgets['atr_window'].setValue(1440)    # 24 hours
         
-        # Exit strategy defaults
+        # Fibonacci exit defaults (ONLY exit mechanism)
         self.use_fib_check.setChecked(True)
         self.param_widgets['fib_lookback'].setValue(1440)  # 24 hours
         self.param_widgets['fib_lookahead'].setValue(75)   # 1.25 hours
-        self.param_widgets['fib_target'].setValue(0.618)   # Golden ratio
-        self.param_widgets['max_hold'].setValue(1440)      # 24 hours
-        self.param_widgets['atr_stop_mult'].setValue(0.7)
-        self.param_widgets['reward_r'].setValue(2.0)
+        self.param_widgets['fib_target'].setCurrentIndex(2)  # Golden ratio (61.8%)
         
         # Transaction costs defaults
         self.param_widgets['fee_bp'].setValue(5.0)
@@ -404,13 +399,9 @@ class CompactParamsEditor(QWidget):
         )
         
         backtest_params = BacktestParams(
-            use_fib_exits=self.use_fib_check.isChecked(),
             fib_swing_lookback=int(self.param_widgets['fib_lookback'].value() / self.timeframe_minutes),
             fib_swing_lookahead=int(self.param_widgets['fib_lookahead'].value() / self.timeframe_minutes),
-            fib_target_level=self.param_widgets['fib_target'].value(),
-            max_hold=int(self.param_widgets['max_hold'].value() / self.timeframe_minutes),
-            atr_stop_mult=self.param_widgets['atr_stop_mult'].value(),
-            reward_r=self.param_widgets['reward_r'].value(),
+            fib_target_level=self.param_widgets['fib_target'].currentData(),
             fee_bp=self.param_widgets['fee_bp'].value(),
             slippage_bp=self.param_widgets['slippage_bp'].value(),
         )
@@ -447,14 +438,18 @@ class CompactParamsEditor(QWidget):
         self.param_widgets['cloc_min'].setValue(float(seller_params.cloc_min))
         self.param_widgets['atr_window'].setValue(int(seller_params.atr_window * self.timeframe_minutes))
         
-        # Update backtest params (convert bars to minutes for time-based)
-        self.use_fib_check.setChecked(backtest_params.use_fib_exits)
+        # Update Fibonacci params (convert bars to minutes)
         self.param_widgets['fib_lookback'].setValue(int(backtest_params.fib_swing_lookback * self.timeframe_minutes))
         self.param_widgets['fib_lookahead'].setValue(int(backtest_params.fib_swing_lookahead * self.timeframe_minutes))
-        self.param_widgets['fib_target'].setValue(float(backtest_params.fib_target_level))
-        self.param_widgets['max_hold'].setValue(int(backtest_params.max_hold * self.timeframe_minutes))
-        self.param_widgets['atr_stop_mult'].setValue(float(backtest_params.atr_stop_mult))
-        self.param_widgets['reward_r'].setValue(float(backtest_params.reward_r))
+        
+        # Set fib_target combobox by finding matching value
+        fib_target_combo = self.param_widgets['fib_target']
+        for i in range(fib_target_combo.count()):
+            if abs(fib_target_combo.itemData(i) - backtest_params.fib_target_level) < 0.001:
+                fib_target_combo.setCurrentIndex(i)
+                break
+        
+        # Update transaction costs
         self.param_widgets['fee_bp'].setValue(float(backtest_params.fee_bp))
         self.param_widgets['slippage_bp'].setValue(float(backtest_params.slippage_bp))
         

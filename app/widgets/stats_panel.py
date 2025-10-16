@@ -113,11 +113,6 @@ class StatsPanel(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        # Title
-        title = QLabel("Strategy Optimization")
-        title.setProperty("role", "title")
-        layout.addWidget(title)
-        
         # Metrics section
         self.metrics_group = self.create_metrics_section()
         layout.addWidget(self.metrics_group)
@@ -229,16 +224,6 @@ class StatsPanel(QWidget):
         self.acceleration_combo.currentIndexChanged.connect(self._on_acceleration_changed)
         accel_layout.addWidget(self.acceleration_combo, stretch=1)
         layout.addLayout(accel_layout)
-        
-        # Number of iterations spinner
-        iter_layout = QHBoxLayout()
-        iter_layout.addWidget(QLabel("Iterations:"))
-        self.n_iterations_spin = QSpinBox()
-        self.n_iterations_spin.setRange(10, 1000)
-        self.n_iterations_spin.setValue(50)
-        self.n_iterations_spin.setToolTip("Number of iterations for multi-step optimization")
-        iter_layout.addWidget(self.n_iterations_spin)
-        layout.addLayout(iter_layout)
         
         # Stop button and fitness preset dropdown (in one row)
         preset_stop_layout = QHBoxLayout()
@@ -500,25 +485,36 @@ class StatsPanel(QWidget):
         # Extract iteration and fitness data
         iterations = [h['iteration'] for h in history]
         best_fitness = [h.get('best_fitness', h.get('fitness', 0)) for h in history]
-        mean_fitness = [h.get('mean_fitness', 0) for h in history]
         
-        # Plot best fitness
+        # For evolutionary algorithms: mean_fitness (population average)
+        # For ADAM: current fitness (iteration-by-iteration fitness)
+        mean_fitness = [h.get('mean_fitness') for h in history]
+        current_fitness = [h.get('fitness', 0) for h in history]
+        
+        # Plot best fitness (line only, no symbols)
         self.fitness_plot.plot(
             iterations, best_fitness,
             pen=pg.mkPen('#4caf50', width=3),
-            symbol='o', symbolSize=8,
-            symbolBrush='#4caf50',
             name='Best Fitness'
         )
         
-        # Plot mean fitness (if available)
-        if any(m > 0 for m in mean_fitness):
+        # Plot second line based on optimizer type
+        # If mean_fitness exists (evolutionary), plot it
+        # Otherwise plot current fitness (ADAM)
+        if any(m is not None for m in mean_fitness):
+            # Evolutionary algorithm - plot mean fitness
+            clean_mean = [m if m is not None else 0 for m in mean_fitness]
             self.fitness_plot.plot(
-                iterations, mean_fitness,
+                iterations, clean_mean,
                 pen=pg.mkPen('#ff9800', width=2),
-                symbol='s', symbolSize=6,
-                symbolBrush='#ff9800',
-                name='Mean Fitness'
+                name='Avg Fitness'
+            )
+        elif len(current_fitness) > 0:
+            # ADAM - plot current fitness
+            self.fitness_plot.plot(
+                iterations, current_fitness,
+                pen=pg.mkPen('#ff9800', width=2),
+                name='Current Fitness'
             )
         
         # Add legend
@@ -832,7 +828,8 @@ class StatsPanel(QWidget):
         if not self._initialize_optimizer_if_needed():
             return
         
-        n_iters = self.n_iterations_spin.value()
+        from config.settings import settings
+        n_iters = settings.optimizer_iterations
         
         print(f"\n{'='*70}")
         print(f"🚀 Starting Multi-Step Optimization: {n_iters} iterations")
@@ -864,7 +861,6 @@ class StatsPanel(QWidget):
         
         self.optimize_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)  # Enable stop button during optimization
-        self.n_iterations_spin.setEnabled(False)
         self.fitness_preset_combo.setEnabled(False)
         self.optimizer_type_combo.setEnabled(False)
         self.acceleration_combo.setEnabled(False)
@@ -1086,7 +1082,6 @@ class StatsPanel(QWidget):
         self.is_optimizing = False
         self.optimize_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)  # Disable stop button after optimization
-        self.n_iterations_spin.setEnabled(True)
         self.fitness_preset_combo.setEnabled(True)
         self.optimizer_type_combo.setEnabled(True)
         self.acceleration_combo.setEnabled(True)

@@ -310,23 +310,41 @@ def evaluate_individual(
         return -1000.0, {'n': 0, 'error': str(e)}
 
 
-def mutate_parameter(value: float, param_name: str, sigma: float = 0.1) -> float:
+INTEGER_PARAMS = {
+    'ema_fast',
+    'ema_slow',
+    'z_window',
+    'atr_window',
+    'max_hold',
+}
+
+
+def mutate_parameter(
+    value: float,
+    param_name: str,
+    bounds: Dict[str, Tuple[float, float]],
+    sigma: float = 0.1
+) -> float:
     """
     Mutate a single parameter with Gaussian noise.
     
     Args:
         value: Current parameter value
         param_name: Name of parameter (for bounds lookup)
+        bounds: Parameter bounds (timeframe-aware)
         sigma: Standard deviation as fraction of parameter range
     
     Returns:
         Mutated value clamped to bounds
     """
-    if param_name not in PARAM_BOUNDS:
+    param_bounds = bounds.get(param_name) or PARAM_BOUNDS.get(param_name)
+    if param_bounds is None:
         return value
     
-    min_val, max_val = PARAM_BOUNDS[param_name]
+    min_val, max_val = param_bounds
     param_range = max_val - min_val
+    if param_range <= 0:
+        return int(round(min_val)) if param_name in INTEGER_PARAMS else float(min_val)
     
     # Gaussian noise scaled to parameter range
     noise = np.random.normal(0, sigma * param_range)
@@ -338,7 +356,7 @@ def mutate_parameter(value: float, param_name: str, sigma: float = 0.1) -> float
     new_value = np.clip(new_value, min_val, max_val)
     
     # Round if original was integer
-    if isinstance(value, int):
+    if param_name in INTEGER_PARAMS:
         new_value = int(round(new_value))
     
     return new_value
@@ -346,6 +364,7 @@ def mutate_parameter(value: float, param_name: str, sigma: float = 0.1) -> float
 
 def mutate_individual(
     individual: Individual,
+    bounds: Dict[str, Tuple[float, float]],
     mutation_rate: float = 0.3,
     sigma: float = 0.1,
     generation: int = 0
@@ -370,19 +389,21 @@ def mutate_individual(
     
     # Mutate SellerParams
     for param_name in ['ema_fast', 'ema_slow', 'z_window', 'vol_z', 'tr_z', 'cloc_min', 'atr_window']:
-        if param_name in PARAM_BOUNDS and random.random() < mutation_rate:
+        if random.random() < mutation_rate:
             seller_dict[param_name] = mutate_parameter(
                 seller_dict[param_name],
                 param_name,
+                bounds,
                 sigma
             )
     
     # Mutate BacktestParams
     for param_name in ['atr_stop_mult', 'reward_r', 'max_hold', 'fee_bp', 'slippage_bp']:
-        if param_name in PARAM_BOUNDS and random.random() < mutation_rate:
+        if random.random() < mutation_rate:
             backtest_dict[param_name] = mutate_parameter(
                 backtest_dict[param_name],
                 param_name,
+                bounds,
                 sigma
             )
     
@@ -548,9 +569,16 @@ def evolution_step(
         offspring[-1].generation = population.generation + 1
     
     # Step 4: Mutation
+    bounds = population.bounds if hasattr(population, "bounds") else PARAM_BOUNDS
     for child in offspring:
         if random.random() < mutation_probability:
-            mutated = mutate_individual(child, mutation_rate, sigma, population.generation + 1)
+            mutated = mutate_individual(
+                child,
+                bounds,
+                mutation_rate,
+                sigma,
+                population.generation + 1
+            )
             child.seller_params = mutated.seller_params
             child.backtest_params = mutated.backtest_params
             child.fitness = 0.0  # Reset fitness (needs re-evaluation)
@@ -563,10 +591,12 @@ def evolution_step(
     new_individuals = elite + offspring[:pop_size - elite_size]
     
     # Create new population
-    new_population = Population(size=pop_size)
+    new_population = Population(size=pop_size, timeframe=population.timeframe)
     new_population.individuals = new_individuals
     new_population.generation = population.generation + 1
     new_population.best_ever = population.best_ever
     new_population.history = population.history
+    new_population.bounds = population.bounds
+    new_population.timeframe = population.timeframe
     
     return new_population

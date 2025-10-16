@@ -156,9 +156,19 @@ def evolution_step_multicore(
     
     # Step 4: Mutation
     import random
+    bounds = population.bounds if hasattr(population, "bounds") else get_param_bounds_for_timeframe(tf)
     for child in offspring:
         if random.random() < mutation_probability:
-            mutate_individual(child, mutation_rate, sigma, get_param_bounds_for_timeframe(tf))
+            mutated = mutate_individual(
+                child,
+                bounds,
+                mutation_rate,
+                sigma,
+                population.generation + 1
+            )
+            child.seller_params = mutated.seller_params
+            child.backtest_params = mutated.backtest_params
+            child.fitness = 0.0
     
     # Step 5: Elitism
     n_elite = max(1, int(pop_size * elite_fraction))
@@ -168,10 +178,12 @@ def evolution_step_multicore(
     offspring[-n_elite:] = [deepcopy(ind) for ind in elite]
     
     # Create new population
-    new_population = Population(size=pop_size)
+    new_population = Population(size=pop_size, timeframe=population.timeframe)
     new_population.individuals = offspring
     new_population.generation = population.generation + 1
     new_population.best_ever = population.best_ever
     new_population.history = population.history
+    new_population.bounds = population.bounds
+    new_population.timeframe = population.timeframe
     
     return new_population

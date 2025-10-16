@@ -113,79 +113,34 @@ class DataProvider:
         force_download: bool = False,
         use_cache_only: bool = False,
     ) -> pd.DataFrame:
-        """Always fetch 1m bars, clean them, then locally resample to target timeframe.
-
-        Dôvody:
-        - konzistentné čistenie a deterministické výsledky
-        - minimalizácia problémov s Polygon agregáciami naprieč TF
-        - lepšia kontrola nad orezaním neúplných intervalov
-        """
-        tf_to_multiplier = {
-            Timeframe.m1: 1,
-            Timeframe.m3: 3,
-            Timeframe.m5: 5,
-            Timeframe.m10: 10,
-            Timeframe.m15: 15,
-            Timeframe.m60: 60,
+        """Fetch bars directly at the requested timeframe without local resampling."""
+        tf_meta: dict[Timeframe, tuple[int, str]] = {
+            Timeframe.m1: (1, "minute"),
+            Timeframe.m3: (3, "minute"),
+            Timeframe.m5: (5, "minute"),
+            Timeframe.m10: (10, "minute"),
+            Timeframe.m15: (15, "minute"),
+            Timeframe.m30: (30, "minute"),
+            Timeframe.m60: (60, "minute"),
         }
 
-        multiplier = tf_to_multiplier.get(tf, 15)
-        base_multiplier = tf_to_multiplier[Timeframe.m1]
-        base_timespan = "minute"
+        multiplier, timespan = tf_meta.get(tf, (15, "minute"))
 
-        base_estimate = estimate
-        if base_estimate is None and not use_cache_only:
-            base_estimate = self.estimate_download(
-                from_,
-                to,
-                base_multiplier,
-                base_timespan,
-            )
+        effective_estimate = estimate
+        if effective_estimate is None and not use_cache_only:
+            effective_estimate = self.estimate_download(from_, to, multiplier, timespan)
 
-        # Vždy stiahnuť 1m (s rate-limit retry už rieši PolygonClient)
-        base_df = await self.fetch_bars(
+        return await self.fetch_bars(
             ticker,
             from_,
             to,
-            base_multiplier,
-            base_timespan,
+            multiplier,
+            timespan,
             progress_callback=progress_callback,
-            estimate=base_estimate,
+            estimate=effective_estimate,
             force_download=force_download,
             use_cache_only=use_cache_only,
         )
-
-        if len(base_df) == 0:
-            if self.cache and use_cache_only and multiplier != 1:
-                fallback = self.cache.get_cached_data(ticker, from_, to, multiplier, "minute")
-                if fallback is not None:
-                    return fallback
-            return base_df
-
-        if multiplier == 1:
-            return base_df
-
-        df = base_df.copy()
-        # Resample na cieľový TF podľa OHLCV pravidiel, pravé uzatváranie
-        ohlcv = df.resample(f"{multiplier}min", label="right", closed="right").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        })
-        # Drop neúplné intervaly (chýbajúci open/close)
-        ohlcv = ohlcv.dropna(subset=["open", "high", "low", "close"])  # volume môže byť 0
-
-        # Zachovať cleaning summary z 1m
-        summary = df.attrs.get("cleaning_summary")
-        ohlcv.attrs["cleaning_summary"] = summary
-        
-        # Cache the resampled data for faster loading next time
-        if self.cache and multiplier > 1:
-            self.cache.save_cached_data(ohlcv, ticker, from_, to, multiplier, "minute")
-        
-        return ohlcv
 
     def estimate_download(
         self,

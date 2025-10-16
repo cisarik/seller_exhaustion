@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     ga_tournament_size: int = 3
     ga_mutation_probability: float = 0.9
     
+    # ADAM Optimizer Parameters
+    adam_learning_rate: float = 0.01
+    adam_epsilon: float = 1e-3
+    adam_max_grad_norm: float = 1.0
+    
+    # Acceleration Settings (NEW)
+    acceleration_mode: str = "multicore"  # cpu, multicore, gpu
+    cpu_workers: int = 7  # Number of CPU workers for multicore
+    gpu_batch_size: int = 512  # Batch size for GPU processing (increased from 150 for better utilization)
+    gpu_memory_fraction: float = 0.85  # Fraction of GPU memory to use
+    
     # Chart Indicator Display
     chart_ema_fast: bool = True
     chart_ema_slow: bool = True
@@ -163,6 +174,17 @@ class SettingsManager:
             f.write(f"GA_ELITE_FRACTION={existing.get('GA_ELITE_FRACTION', '0.1')}\n")
             f.write(f"GA_TOURNAMENT_SIZE={existing.get('GA_TOURNAMENT_SIZE', '3')}\n")
             f.write(f"GA_MUTATION_PROBABILITY={existing.get('GA_MUTATION_PROBABILITY', '0.9')}\n\n")
+            
+            f.write("# ADAM Optimizer Parameters\n")
+            f.write(f"ADAM_LEARNING_RATE={existing.get('ADAM_LEARNING_RATE', '0.01')}\n")
+            f.write(f"ADAM_EPSILON={existing.get('ADAM_EPSILON', '0.001')}\n")
+            f.write(f"ADAM_MAX_GRAD_NORM={existing.get('ADAM_MAX_GRAD_NORM', '1.0')}\n\n")
+            
+            f.write("# Acceleration Settings\n")
+            f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'multicore')}\n")
+            f.write(f"CPU_WORKERS={existing.get('CPU_WORKERS', '7')}\n")
+            f.write(f"GPU_BATCH_SIZE={existing.get('GPU_BATCH_SIZE', '512')}\n")
+            f.write(f"GPU_MEMORY_FRACTION={existing.get('GPU_MEMORY_FRACTION', '0.85')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

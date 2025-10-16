@@ -158,9 +158,16 @@ def evolution_step_gpu(
         offspring[-1].generation = population.generation + 1
     
     # Step 4: Mutation
+    bounds = population.bounds if hasattr(population, "bounds") else PARAM_BOUNDS
     for child in offspring:
         if np.random.random() < mutation_probability:
-            mutated = mutate_individual(child, mutation_rate, sigma, population.generation + 1)
+            mutated = mutate_individual(
+                child,
+                bounds,
+                mutation_rate,
+                sigma,
+                population.generation + 1
+            )
             child.seller_params = mutated.seller_params
             child.backtest_params = mutated.backtest_params
             child.fitness = 0.0  # Reset fitness (needs re-evaluation)
@@ -173,11 +180,13 @@ def evolution_step_gpu(
     new_individuals = elite + offspring[:pop_size - elite_size]
     
     # Create new population
-    new_population = Population(size=pop_size)
+    new_population = Population(size=pop_size, timeframe=population.timeframe)
     new_population.individuals = new_individuals
     new_population.generation = population.generation + 1
     new_population.best_ever = population.best_ever
     new_population.history = population.history
+    new_population.bounds = population.bounds
+    new_population.timeframe = population.timeframe
     
     # Clear GPU cache for next iteration
     accelerator.clear_cache()

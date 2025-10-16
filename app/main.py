@@ -839,8 +839,24 @@ class MainWindow(QMainWindow):
             to = settings.last_date_to or "2025-12-31"
             
             # Derive current_tf from settings.timeframe (integer minutes)
-            tf_map = {1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10, 15: Timeframe.m15, 30: Timeframe.m30, 60: Timeframe.m60}
-            self.current_tf = tf_map.get(settings.timeframe, Timeframe.m15)
+            tf_map = {
+                1: Timeframe.m1,
+                3: Timeframe.m3,
+                5: Timeframe.m5,
+                10: Timeframe.m10,
+                15: Timeframe.m15,
+                30: Timeframe.m30,
+                60: Timeframe.m60,
+            }
+            raw_tf = settings.timeframe
+            tf_numeric = None
+            if isinstance(raw_tf, (int, float)):
+                tf_numeric = int(raw_tf)
+            elif isinstance(raw_tf, str):
+                digits_only = "".join(ch for ch in raw_tf if ch.isdigit())
+                if digits_only:
+                    tf_numeric = int(digits_only)
+            self.current_tf = tf_map.get(tf_numeric, Timeframe.m15)
             self.chart_view.set_timeframe(self.current_tf)
             self.param_editor.set_timeframe(self.current_tf)
             self.current_ticker = ticker
@@ -878,8 +894,15 @@ class MainWindow(QMainWindow):
             self.progress.setVisible(True)
             self.progress.setRange(0, 0)
 
-            # Load EXACT timeframe data (no fallback to wrong timeframe)
-            df = self.cache.get_cached_data(ticker, from_, to, target_multiplier, target_timespan)
+            # Load EXACT timeframe data (no fallback to wrong timeframe) in a worker thread
+            df = await asyncio.to_thread(
+                self.cache.get_cached_data,
+                ticker,
+                from_,
+                to,
+                target_multiplier,
+                target_timespan,
+            )
 
             if df is None or len(df) == 0:
                 self.statusBar().showMessage(
@@ -887,8 +910,8 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            # Build features for chart display only
-            feats = build_features(df, seller_params, self.current_tf)
+            # Build features for chart display only (CPU heavy → run off the UI thread)
+            feats = await asyncio.to_thread(build_features, df, seller_params, self.current_tf)
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
             self.chart_view.set_indicator_config(self._indicator_config_from_settings())

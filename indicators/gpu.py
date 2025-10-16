@@ -105,8 +105,8 @@ def atr_gpu(high: torch.Tensor, low: torch.Tensor, close: torch.Tensor, window: 
     # True range is max of three values
     tr = torch.maximum(high_low, torch.maximum(high_close, low_close))
     
-    # ATR is EMA of true range
-    return ema_gpu(tr, window)
+    # ATR is SMA of true range (CRITICAL: CPU uses rolling.mean(), not EMA!)
+    return sma_gpu(tr, window)
 
 
 def rsi_gpu(close: torch.Tensor, window: int = 14) -> torch.Tensor:

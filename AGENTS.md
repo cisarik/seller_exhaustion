@@ -1013,7 +1013,7 @@ FIB_COLORS = {
 **Workflow**:
 1. `Initialize Population` seeds GA with current UI params and persisted population size.
 2. `Step` executes one generation—handles button state, logs console output, updates metrics.
-3. `Apply Best Parameters` writes best individual's fields back into UI controls for quick iteration.
+3. Best parameters **automatically applied** to UI controls immediately when found (no manual button needed).
 
 **Safety Checks**:
 - Warns if population size changed in settings but GA wasn't reinitialized.
@@ -2151,7 +2151,7 @@ asyncio.create_task(live_trading_loop())
 3. Back in the main window, ensure data is loaded (run a backtest once to populate the stats panel).
 4. Click **Initialize Population** in the stats panel; confirm the console log shows the configured population/parameters.
 5. Press **Step** repeatedly (or script future multi-step runs) to evolve the population. Watch fitness charts and acceleration status (CPU/GPU).
-6. When satisfied, click **Apply Best Parameters** to push the winning individual back to the settings widgets, then re-run the backtest to validate.
+6. Best parameters **automatically apply** to the "Best Parameters" panel as optimization progresses. Backtest results update automatically.
 
 ---
 
@@ -2321,7 +2321,7 @@ cli.py / main.py (presentation)
    ↓
 4. Best individual metrics → stats panel plots & console logs
    ↓
-5. Apply Best Parameters writes results back into UI + settings if saved
+5. Parameters **auto-apply** to "Best Parameters" panel (no manual button needed)
 ```
 
 ### Data Flow: Strategy Export (NEW v2.1)
@@ -2661,11 +2661,11 @@ def import_strategy_config(self):
 #### Example 1: Export After Optimization
 
 ```python
-# After running GA optimization and applying best parameters
+# After running GA optimization (parameters auto-apply)
 poetry run python cli.py ui
 # → Run 50 generations
-# → Click "Apply Best Parameters"
-# → Run final backtest
+# → Parameters automatically applied to "Best Parameters" panel
+# → Backtest results automatically displayed
 # → Click "💾 Export Strategy"
 # → Save as strategy_15m_opt_gen50.json
 

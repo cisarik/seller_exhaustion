@@ -299,16 +299,10 @@ class CandleChartWidget(QWidget):
                 )
                 self.plot_widget.addItem(scatter)
         
-        # Mark trade entries, exits, and Fibonacci retracements
+        # Mark trade entries as BALLS (entry point, sized by PnL)
         if backtest_result and len(backtest_result['trades']) > 0:
             trades = backtest_result['trades']
             
-            # Draw Fibonacci retracements FIRST (so they're behind markers)
-            if self.indicator_config.get('fib_retracements', True) and self.selected_trade_idx is not None:
-                print(f"\n🎯 Attempting to render Fibonacci for selected trade #{self.selected_trade_idx + 1}")
-                self.render_fibonacci_retracement_for_trade(self.feats, trades, self.selected_trade_idx)
-            
-            # Render trade markers as BALLS (entry point, sized by PnL)
             if self.indicator_config.get('entries', True):
                 self.render_trade_balls(trades, original_df)
         
@@ -404,245 +398,7 @@ class CandleChartWidget(QWidget):
         
         selected_str = f" (#{self.selected_trade_idx + 1} highlighted)" if self.selected_trade_idx is not None else ""
         print(f"✓ Rendered {len(ball_data)} trade balls{selected_str}")
-    
-    def render_fibonacci_retracement_for_trade(self, df: pd.DataFrame, trades: pd.DataFrame, trade_idx: int):
-        """
-        Render Fibonacci retracement levels for a SELECTED trade.
-        
-        This matches the style from fib.png:
-        - Find actual swing high from historical data
-        - Draw diagonal dashed line from swing low to swing high
-        - Draw horizontal Fibonacci levels with labels
-        - Highlight 61.8% Golden Ratio
-        - Show entry and exit markers
-        
-        Args:
-            df: Full DataFrame with OHLC data
-            trades: DataFrame of all trades
-            trade_idx: Index of the trade to visualize (0-based)
-        """
-        print(f"\n🔍 DEBUG: render_fibonacci_retracement_for_trade called")
-        print(f"   trade_idx: {trade_idx}")
-        print(f"   self.feats is None: {self.feats is None}")
-        
-        if self.feats is None:
-            print("⚠ self.feats is None - cannot render Fibonacci")
-            return
-            
-        print(f"   self.feats columns: {list(self.feats.columns)}")
-        print(f"   'fib_swing_high' in columns: {'fib_swing_high' in self.feats.columns}")
-        
-        if 'fib_swing_high' not in self.feats.columns:
-            print("⚠ No Fibonacci data available in features (fib_swing_high column missing)")
-            return
-        
-        if trade_idx < 0 or trade_idx >= len(trades):
-            print(f"⚠ Invalid trade index: {trade_idx}")
-            return
-        
-        try:
-            trade = trades.iloc[trade_idx]
-            entry_ts = pd.Timestamp(trade['entry_ts'])
-            exit_ts = pd.Timestamp(trade['exit_ts'])
-            
-            print(f"🔍 DEBUG: Rendering Fib for trade #{trade_idx + 1}")
-            print(f"   Entry: {entry_ts}, Exit: {exit_ts}")
-            
-            # Find the signal bar (one bar before entry)
-            # Get timeframe minutes
-            tf_minutes = {'m1': 1, 'm3': 3, 'm5': 5, 'm10': 10, 'm15': 15, 'm30': 30, 'm60': 60}
-            minutes = tf_minutes.get(self.tf.value, 15)
-            signal_ts = entry_ts - pd.Timedelta(minutes=minutes)
-            
-            print(f"   Signal bar: {signal_ts} (TF: {self.tf.value}, {minutes}min)")
-            
-            # Get Fib data from the signal bar in feats
-            if signal_ts not in self.feats.index:
-                print(f"⚠ Signal timestamp {signal_ts} not found in features")
-                print(f"   Features index range: {self.feats.index[0]} to {self.feats.index[-1]}")
-                return
-            
-            signal_bar = self.feats.loc[signal_ts]
-            
-            print(f"   Signal bar columns: {list(signal_bar.index)}")
-            print(f"   Has fib_swing_high: {'fib_swing_high' in signal_bar.index}")
-            
-            # Check if this signal has Fib levels
-            fib_swing_high_value = signal_bar.get('fib_swing_high')
-            print(f"   fib_swing_high value: {fib_swing_high_value}")
-            
-            if pd.isna(fib_swing_high_value):
-                print(f"⚠ No Fibonacci levels calculated for trade #{trade_idx + 1}")
-                print(f"   Signal bar low: {signal_bar.get('low')}")
-                print(f"   This means find_swing_high returned None for this signal")
-                print(f"   Available Fib columns in feats: {[c for c in self.feats.columns if 'fib' in c]}")
-                
-                # Count how many signals have Fib data
-                signals_with_fib = self.feats[self.feats['fib_swing_high'].notna()].shape[0]
-                total_signals = self.feats[self.feats.get('exhaustion', False) == True].shape[0]
-                print(f"   Signals with Fib data: {signals_with_fib}/{total_signals}")
-                return
-            
-            swing_high_price = signal_bar['fib_swing_high']
-            swing_low_price = signal_bar['low']
-            entry_price = trade['entry']
-            exit_price = trade['exit']
-            
-            # Find the actual swing high timestamp by searching backwards in data
-            swing_high_ts = None
-            lookback_bars = 96  # Default lookback from strategy
-            
-            signal_idx = self.feats.index.get_loc(signal_ts)
-            for i in range(max(0, signal_idx - lookback_bars), signal_idx):
-                if abs(self.feats.iloc[i]['high'] - swing_high_price) < 0.0001:
-                    swing_high_ts = self.feats.index[i]
-                    break
-            
-            if swing_high_ts is None:
-                # Fallback: approximate as 50% back in lookback period
-                approx_bars_back = lookback_bars // 2
-                swing_high_ts = signal_ts - pd.Timedelta(minutes=minutes * approx_bars_back)
-            
-            # Convert timestamps to epoch seconds for plotting
-            swing_high_x = int(swing_high_ts.value // 1_000_000_000)
-            entry_x = int(entry_ts.value // 1_000_000_000)
-            exit_x = int(exit_ts.value // 1_000_000_000)
-            signal_x = int(signal_ts.value // 1_000_000_000)
-            
-            # === 1. Mark Swing High (Star) ===
-            swing_high_scatter = pg.ScatterPlotItem(
-                x=[swing_high_x], y=[swing_high_price],
-                pen=pg.mkPen('#FFFFFF', width=2),
-                brush=pg.mkBrush('#FFD700'),
-                size=22, symbol='star'
-            )
-            self.plot_widget.addItem(swing_high_scatter)
-            
-            # === 2. Draw Diagonal Range Line (Swing Low to Swing High) ===
-            # Dashed line showing the full retracement range
-            range_line = pg.PlotDataItem(
-                x=[signal_x, swing_high_x],
-                y=[swing_low_price, swing_high_price],
-                pen=pg.mkPen('#888888', width=2, style=Qt.DashLine)
-            )
-            self.plot_widget.addItem(range_line)
-            
-            # === 3. Draw Horizontal Fibonacci Levels ===
-            # Only include levels that are actually calculated by the strategy
-            fib_config = {
-                0.382: {'col': 'fib_0382', 'color': '#2196F3', 'label': '38.2%'},
-                0.500: {'col': 'fib_0500', 'color': '#00BCD4', 'label': '50.0%'},
-                0.618: {'col': 'fib_0618', 'color': '#FFD700', 'label': '61.8% ⭐'},  # Golden
-                0.786: {'col': 'fib_0786', 'color': '#FF9800', 'label': '78.6%'},
-                1.000: {'col': 'fib_1000', 'color': '#F44336', 'label': '100%'},
-            }
-            
-            for fib_ratio, config in fib_config.items():
-                # Check if this level is enabled in config
-                fib_col = config['col']
-                if not self.indicator_config.get(fib_col, True):
-                    continue
-                
-                # Get Fib price from signal bar
-                fib_price = signal_bar.get(fib_col)
-                
-                if pd.isna(fib_price):
-                    continue
-                
-                color = config['color']
-                label_text = config['label']
-                
-                # Golden Ratio gets special styling
-                if fib_ratio == 0.618:
-                    width = 3
-                    alpha = 220
-                else:
-                    width = 2
-                    alpha = 180
-                
-                # Draw horizontal line across chart view
-                fib_line = InfiniteLine(
-                    pos=fib_price,
-                    angle=0,
-                    pen=pg.mkPen(color, width=width),
-                    movable=False
-                )
-                self.plot_widget.addItem(fib_line)
-                
-                # Add label on the left side
-                fib_label = TextItem(
-                    text=f"{label_text} ({fib_price:.4f})",
-                    color=color,
-                    anchor=(0, 0.5)
-                )
-                # Position label to the left of the swing high
-                label_x = swing_high_x - 1800  # Offset to the left
-                fib_label.setPos(label_x, fib_price)
-                self.plot_widget.addItem(fib_label)
-            
-            # === 4. Mark Entry and Exit Prices ===
-            # Entry marker (horizontal line at entry)
-            entry_line = InfiniteLine(
-                pos=entry_price,
-                angle=0,
-                pen=pg.mkPen('#4CAF50', width=2, style=Qt.DotLine),
-                movable=False
-            )
-            self.plot_widget.addItem(entry_line)
-            
-            entry_label = TextItem(
-                text=f"Entry: ${entry_price:.4f}",
-                color='#4CAF50',
-                anchor=(1, 0.5)
-            )
-            entry_label.setPos(entry_x - 300, entry_price)
-            self.plot_widget.addItem(entry_label)
-            
-            # Exit marker (horizontal line at exit)
-            exit_color = '#4CAF50' if trade['pnl'] > 0 else '#F44336'
-            exit_line = InfiniteLine(
-                pos=exit_price,
-                angle=0,
-                pen=pg.mkPen(exit_color, width=3, style=Qt.SolidLine),
-                movable=False
-            )
-            self.plot_widget.addItem(exit_line)
-            
-            # Determine exit reason label
-            exit_reason = trade.get('reason', '')
-            if 'fib' in exit_reason:
-                try:
-                    fib_pct = float(exit_reason.split('_')[1])
-                    exit_label_text = f"Exit: {fib_pct}% (${exit_price:.4f})"
-                except:
-                    exit_label_text = f"Exit: {exit_reason} (${exit_price:.4f})"
-            else:
-                exit_label_text = f"Exit: {exit_reason.upper()} (${exit_price:.4f})"
-            
-            exit_label = TextItem(
-                text=exit_label_text,
-                color=exit_color,
-                anchor=(1, 0.5)
-            )
-            exit_label.setPos(exit_x - 300, exit_price)
-            self.plot_widget.addItem(exit_label)
-            
-            # === 5. Add Info Box ===
-            info_text = f"Trade #{trade_idx + 1}\nPnL: ${trade['pnl']:.4f} ({trade['R']:.2f}R)"
-            info_label = TextItem(
-                text=info_text,
-                color='#FFFFFF',
-                anchor=(0, 0)
-            )
-            info_label.setPos(entry_x + 300, swing_high_price)
-            self.plot_widget.addItem(info_label)
-            
-            print(f"✓ Rendered Fibonacci retracement for Trade #{trade_idx + 1}")
-            
-        except Exception as e:
-            print(f"❌ Error rendering Fibonacci retracement for trade {trade_idx}: {e}")
-            import traceback
-            traceback.print_exc()
+
     
     def create_trades_section(self):
         """Create trade list table."""
@@ -762,34 +518,28 @@ class CandleChartWidget(QWidget):
             self.trades_table.setItem(i, 8, reason_item)
     
     def on_trade_selected(self):
-        """Handle trade selection from table - show Fibonacci retracement for selected trade."""
+        """Handle trade selection from table - highlight selected trade ball."""
         selected_rows = self.trades_table.selectedIndexes()
         
-        print(f"🔍 DEBUG: on_trade_selected called, selected_rows={len(selected_rows)}")
-        
         if not selected_rows:
-            # No selection - clear Fibonacci display
-            print("   No trade selected, clearing Fib display")
+            # No selection - clear highlight
             self.selected_trade_idx = None
-            # Re-render without Fib
-            if self.feats is not None:
-                self.render_candles(self.feats, self.backtest_result)
-            return
-        
-        # Get the row index (first column of selected row)
-        row_idx = selected_rows[0].row()
-        self.selected_trade_idx = row_idx
-        
-        print(f"✓ Selected Trade #{row_idx + 1} (index={row_idx})")
-        print(f"   self.selected_trade_idx = {self.selected_trade_idx}")
-        print(f"   self.feats is not None: {self.feats is not None}")
-        print(f"   self.backtest_result is not None: {self.backtest_result is not None}")
-        
-        # Re-render chart with Fibonacci for this trade
-        if self.feats is not None:
-            self.render_candles(self.feats, self.backtest_result)
         else:
-            print("⚠ Cannot render: self.feats is None")
+            # Get the row index (first column of selected row)
+            row_idx = selected_rows[0].row()
+            self.selected_trade_idx = row_idx
+        
+        # Re-render balls only (much faster than full chart re-render)
+        if self.backtest_result and 'trades' in self.backtest_result:
+            trades = self.backtest_result['trades']
+            if len(trades) > 0 and self.feats is not None:
+                original_df = self.feats[['open', 'high', 'low', 'close', 'volume']].copy()
+                # Remove old trade balls
+                items_to_remove = [item for item in self.plot_widget.items() if isinstance(item, pg.ScatterPlotItem)]
+                for item in items_to_remove:
+                    self.plot_widget.removeItem(item)
+                # Re-render with new selection
+                self.render_trade_balls(trades, original_df)
     
     def export_trades(self):
         """Export trades to CSV file."""

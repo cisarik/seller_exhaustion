@@ -14,6 +14,10 @@ from backtest.optimizer import Population, Individual, evolution_step
 from backtest.engine import run_backtest
 import config.settings as config_settings
 
+# Multi-core CPU optimizer (guaranteed correct)
+from backtest.optimizer_multicore import evolution_step_multicore
+import multiprocessing
+
 # GPU acceleration imports (optional)
 try:
     from backtest.optimizer_gpu import GPUOptimizer, has_gpu
@@ -42,7 +46,8 @@ class StatsPanel(QWidget):
         self.trades_df = None
         self.metrics = None
         self.population = None
-        self.current_data = None
+        self.current_data = None  # Features dataframe (with indicators and signals)
+        self.raw_data = None  # Raw OHLCV data (for rebuilding features)
         self.current_tf = None
         self.param_editor = None  # Will be set by main window
         
@@ -50,19 +55,28 @@ class StatsPanel(QWidget):
         self.is_optimizing = False
         self.stop_requested = False
         
-        # GPU optimizer (if available)
+        # Multi-core CPU optimizer (guaranteed correct, good speedup)
+        self.use_multicore = True
+        self.n_workers = multiprocessing.cpu_count()
+        print(f"✓ Multi-core optimizer initialized ({self.n_workers} workers)")
+        
+        # GPU optimizer (DISABLED due to trade count bugs)
+        # TODO: Fix GPU batch engine to match CPU backtest logic exactly
         self.gpu_optimizer = None
         self.use_gpu = False
-        if GPU_AVAILABLE and GPUOptimizer:
-            try:
-                self.gpu_optimizer = GPUOptimizer()
-                self.use_gpu = self.gpu_optimizer.has_gpu
-            except Exception as e:
-                print(f"⚠ Could not initialize GPU optimizer: {e}")
-                self.use_gpu = False
+        # if GPU_AVAILABLE and GPUOptimizer:
+        #     try:
+        #         self.gpu_optimizer = GPUOptimizer()
+        #         self.use_gpu = self.gpu_optimizer.has_gpu
+        #     except Exception as e:
+        #         print(f"⚠ Could not initialize GPU optimizer: {e}")
+        #         self.use_gpu = False
         
         # Temporary storage for thread results
         self.temp_backtest_result = None
+        
+        # Track previous best fitness to detect improvements
+        self.prev_best_fitness = None
         
         self.init_ui()
         
@@ -199,28 +213,16 @@ class StatsPanel(QWidget):
         status_layout.addWidget(self.best_fitness_label, 1, 1)
         
         status_layout.addWidget(QLabel("Population:"), 2, 0)
-        self.pop_label = QLabel("Not initialized")
+        self.pop_label = QLabel("Ready to optimize")
         status_layout.addWidget(self.pop_label, 2, 1)
         
         status_layout.addWidget(QLabel("Acceleration:"), 3, 0)
-        self.accel_label = QLabel("CPU" if not GPU_AVAILABLE else f"GPU ({'CUDA' if self.use_gpu else 'Not available'})")
-        self.accel_label.setStyleSheet("font-weight: bold; color: #4caf50;" if self.use_gpu else "")
+        accel_text = f"Multi-Core CPU ({self.n_workers} workers)" if self.use_multicore else "Single-Core CPU"
+        self.accel_label = QLabel(accel_text)
+        self.accel_label.setStyleSheet("font-weight: bold; color: #4caf50;" if self.use_multicore else "")
         status_layout.addWidget(self.accel_label, 3, 1)
         
         layout.addLayout(status_layout)
-        
-        # Control buttons
-        btn_layout = QHBoxLayout()
-        
-        self.init_pop_btn = QPushButton("Initialize Population")
-        self.init_pop_btn.clicked.connect(self.initialize_population)
-        btn_layout.addWidget(self.init_pop_btn)
-        
-        self.step_btn = QPushButton("Step (1 Gen)")
-        self.step_btn.setObjectName("primaryButton")
-        self.step_btn.clicked.connect(self.run_optimization_step)
-        self.step_btn.setEnabled(False)
-        btn_layout.addWidget(self.step_btn)
         
         # Number of generations spinner
         gen_layout = QHBoxLayout()
@@ -232,38 +234,56 @@ class StatsPanel(QWidget):
         gen_layout.addWidget(self.n_generations_spin)
         layout.addLayout(gen_layout)
         
-        # Optimize and stop buttons
-        opt_btn_layout = QHBoxLayout()
-        self.optimize_btn = QPushButton("🚀 Optimize")
-        self.optimize_btn.setObjectName("primaryButton")
-        self.optimize_btn.setToolTip("Run multiple generations with GPU acceleration")
-        self.optimize_btn.setEnabled(False)
-        self.optimize_btn.clicked.connect(self.run_multi_step_optimize)
-        opt_btn_layout.addWidget(self.optimize_btn)
+        # Stop button and fitness preset dropdown (in one row)
+        preset_stop_layout = QHBoxLayout()
         
+        # Stop button on the left
         self.stop_btn = QPushButton("⏹ Stop")
         self.stop_btn.setToolTip("Stop ongoing optimization (keeps progress)")
-        self.stop_btn.setVisible(False)
+        self.stop_btn.setEnabled(False)  # Disabled until optimization starts
         self.stop_btn.clicked.connect(self.stop_optimization)
-        opt_btn_layout.addWidget(self.stop_btn)
+        preset_stop_layout.addWidget(self.stop_btn, stretch=1)
         
-        layout.addLayout(opt_btn_layout)
+        # Fitness preset combo on the right (without label)
+        self.fitness_preset_combo = self._create_fitness_preset_combo()
+        self.fitness_preset_combo.currentIndexChanged.connect(self._on_fitness_preset_changed)
+        preset_stop_layout.addWidget(self.fitness_preset_combo, stretch=2)
         
-        layout.addLayout(btn_layout)
+        layout.addLayout(preset_stop_layout)
         
-        # Apply best button
-        apply_layout = QHBoxLayout()
-        apply_layout.addStretch()
+        # Optimize button at the bottom
+        self.optimize_btn = QPushButton("🚀 Optimize")
+        self.optimize_btn.setObjectName("primaryButton")
+        self.optimize_btn.setToolTip("Run evolutionary optimization (auto-initializes population)")
+        self.optimize_btn.clicked.connect(self.run_multi_step_optimize)
+        layout.addWidget(self.optimize_btn)
         
-        self.apply_best_btn = QPushButton("Apply Best Parameters")
-        self.apply_best_btn.clicked.connect(self.apply_best_parameters)
-        self.apply_best_btn.setEnabled(False)
-        apply_layout.addWidget(self.apply_best_btn)
-        
-        layout.addLayout(apply_layout)
+        # Note: Parameters are auto-applied when a better solution is found during optimization
         
         group.setLayout(layout)
         return group
+    
+    def _create_fitness_preset_combo(self):
+        """Create fitness preset dropdown combo box."""
+        from PySide6.QtWidgets import QComboBox
+        
+        combo = QComboBox()
+        combo.addItem("⚖️ Balanced", "balanced")
+        combo.addItem("🚀 High Frequency", "high_frequency")
+        combo.addItem("🛡️ Conservative", "conservative")
+        combo.addItem("💰 Profit Focused", "profit_focused")
+        combo.addItem("✏️ Custom", "custom")
+        combo.setToolTip("Select fitness function preset - controls weight values in Best Parameters panel")
+        combo.setCurrentIndex(0)  # Default to Balanced
+        
+        return combo
+    
+    def _on_fitness_preset_changed(self, index):
+        """Handle fitness preset dropdown change - update param editor."""
+        if self.param_editor:
+            preset_name = self.fitness_preset_combo.currentData()
+            self.param_editor.load_fitness_preset(preset_name)
+            print(f"✓ Fitness preset changed to: {preset_name}")
     
     def update_stats(self, backtest_result):
         """Update all statistics displays with backtest results."""
@@ -420,11 +440,27 @@ class StatsPanel(QWidget):
         # Add legend
         self.fitness_plot.addLegend()
     
-    def set_current_data(self, data, tf):
-        """Store current data and timeframe for optimization."""
+    def set_current_data(self, data, tf, raw_data=None):
+        """
+        Store current data and timeframe for optimization.
+        
+        Args:
+            data: Features dataframe (with indicators and signals)
+            tf: Timeframe enum
+            raw_data: Optional raw OHLCV dataframe. If None, will extract from data.
+        """
         self.current_data = data
         self.current_tf = tf
-        self.init_pop_btn.setEnabled(True)
+        
+        # Store raw OHLCV data for rebuilding features during optimization
+        if raw_data is not None:
+            self.raw_data = raw_data
+        else:
+            # Extract raw OHLCV from features dataframe
+            # Note: This may have different length due to dropped NaN rows
+            self.raw_data = data[['open', 'high', 'low', 'close', 'volume']].copy()
+        
+        # Optimization button is always enabled when data is loaded
     
     def get_current_params(self):
         """Get current parameters from external editor.
@@ -433,7 +469,15 @@ class StatsPanel(QWidget):
             Tuple of (SellerParams, BacktestParams, FitnessConfig)
         """
         if self.param_editor:
-            return self.param_editor.get_params()
+            # Get params from editor - fitness preset is already reflected in the weights
+            seller_params, backtest_params, fitness_config = self.param_editor.get_params()
+            
+            # Update the preset field based on our dropdown selection
+            if hasattr(self, 'fitness_preset_combo'):
+                preset_name = self.fitness_preset_combo.currentData()
+                fitness_config.preset = preset_name
+            
+            return seller_params, backtest_params, fitness_config
         else:
             # Fallback to defaults if no editor connected
             from core.models import FitnessConfig
@@ -444,11 +488,19 @@ class StatsPanel(QWidget):
         if self.param_editor:
             self.param_editor.set_params(individual.seller_params, individual.backtest_params)
     
-    def initialize_population(self):
-        """Initialize population with current parameters as seed."""
+    def _initialize_population_if_needed(self):
+        """Initialize population with current parameters as seed (called automatically)."""
         if self.current_data is None:
-            print("Error: No data loaded. Please run backtest first.")
-            return
+            print("Error: No data loaded.")
+            return False
+        
+        # If population already exists and has the right size, reuse it
+        ga_cfg = self._get_ga_settings()
+        pop_size = ga_cfg['population_size']
+        
+        if self.population is not None and self.population.size == pop_size:
+            print(f"✓ Reusing existing population (size={pop_size}, gen={self.population.generation})")
+            return True
         
         # Get current params from UI
         seller_params, backtest_params, _ = self.get_current_params()
@@ -460,15 +512,14 @@ class StatsPanel(QWidget):
         )
         
         # Initialize population with seed
-        ga_cfg = self._get_ga_settings()
-        pop_size = ga_cfg['population_size']
         self.population = Population(size=pop_size, seed_individual=seed)
+        
+        # Reset best fitness tracking
+        self.prev_best_fitness = None
         
         # Update UI
         self.gen_label.setText(str(self.population.generation))
-        self.pop_label.setText(f"{pop_size} individuals (initialized)")
-        self.step_btn.setEnabled(True)
-        self.optimize_btn.setEnabled(True)  # Enable multi-step optimize
+        self.pop_label.setText(f"{pop_size} individuals")
         
         print(
             "✓ Population initialized with "
@@ -479,9 +530,11 @@ class StatsPanel(QWidget):
             f"tournament_size={ga_cfg['tournament_size']} | "
             f"mutation_probability={ga_cfg['mutation_probability']:.3f}"
         )
+        
+        return True
     
     def run_optimization_step(self):
-        """Run one generation of evolution asynchronously."""
+        """Run one generation of evolution asynchronously (internal method)."""
         if self.population is None:
             print("Error: Population not initialized")
             return
@@ -490,9 +543,7 @@ class StatsPanel(QWidget):
             print("Error: No data loaded")
             return
         
-        # Disable buttons during execution
-        self.step_btn.setEnabled(False)
-        self.step_btn.setText("Running...")
+        # Disable optimize button during execution
         self.optimize_btn.setEnabled(False)
         
         # Emit progress signal
@@ -514,30 +565,35 @@ class StatsPanel(QWidget):
                 # Get fitness configuration from parameter editor
                 _, _, fitness_config = self.get_current_params()
                 
-                # Run evolution step (GPU if available, else CPU)
+                # Run evolution step (multi-core if available, else single-core)
                 print(f"\n{'='*60}")
-                print(f"Running Evolution Step {'[GPU]' if self.use_gpu else '[CPU]'}...")
+                mode = f"Multi-Core CPU ({self.n_workers} workers)" if self.use_multicore else "Single-Core CPU"
+                print(f"Running Evolution Step [{mode}]...")
                 print(f"Fitness Preset: {fitness_config.preset}")
                 print(f"{'='*60}")
                 
-                if self.use_gpu and self.gpu_optimizer:
-                    # GPU-accelerated evolution
-                    self.population = self.gpu_optimizer.evolution_step(
+                # CRITICAL: Pass RAW data, not features!
+                data_for_optimizer = self.raw_data if self.raw_data is not None else self.current_data[['open', 'high', 'low', 'close', 'volume']]
+                
+                if self.use_multicore:
+                    # Multi-core CPU (correct + fast)
+                    self.population = evolution_step_multicore(
                         self.population,
-                        self.current_data,
+                        data_for_optimizer,  # Pass raw OHLCV, not features!
                         self.current_tf,
                         fitness_config=fitness_config,
                         mutation_rate=ga_cfg['mutation_rate'],
                         sigma=ga_cfg['sigma'],
                         elite_fraction=ga_cfg['elite_fraction'],
                         tournament_size=ga_cfg['tournament_size'],
-                        mutation_probability=ga_cfg['mutation_probability']
+                        mutation_probability=ga_cfg['mutation_probability'],
+                        n_workers=self.n_workers
                     )
                 else:
-                    # CPU fallback
+                    # Single-core CPU fallback
                     self.population = evolution_step(
                         self.population,
-                        self.current_data,
+                        data_for_optimizer,  # Pass raw OHLCV, not features!
                         self.current_tf,
                         fitness_config=fitness_config,
                         mutation_rate=ga_cfg['mutation_rate'],
@@ -565,14 +621,16 @@ class StatsPanel(QWidget):
                     # Run backtest with best individual to visualize strategy
                     print(f"\n📊 Running backtest with best parameters...")
                     try:
-                        # Build features with best individual's params
-                        raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
-                        feats = build_features(raw_data, best.seller_params, self.current_tf)
-                        
-                        # Run backtest
-                        backtest_result = run_backtest(feats, best.backtest_params)
-                        
-                        print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
+                        if self.raw_data is None:
+                            print("⚠ No raw data available, skipping backtest")
+                        else:
+                            # Build features with best individual's params from RAW data
+                            feats = build_features(self.raw_data, best.seller_params, self.current_tf)
+                            
+                            # Run backtest
+                            backtest_result = run_backtest(feats, best.backtest_params)
+                            
+                            print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
                         
                     except Exception as e:
                         print(f"Error running backtest for visualization: {e}")
@@ -594,19 +652,7 @@ class StatsPanel(QWidget):
                 traceback.print_exc()
                 self.progress_updated.emit(0, 1, f"❌ Error: {str(e)}")
             finally:
-                # Re-enable buttons using thread-safe method
-                QMetaObject.invokeMethod(
-                    self.step_btn,
-                    "setEnabled",
-                    Qt.QueuedConnection,
-                    Q_ARG(bool, True)
-                )
-                QMetaObject.invokeMethod(
-                    self.step_btn,
-                    "setText",
-                    Qt.QueuedConnection,
-                    Q_ARG(str, "Step (1 Gen)")
-                )
+                # Re-enable optimize button using thread-safe method
                 QMetaObject.invokeMethod(
                     self.optimize_btn,
                     "setEnabled",
@@ -635,7 +681,10 @@ class StatsPanel(QWidget):
             if self.population.best_ever:
                 best = self.population.best_ever
                 self.best_fitness_label.setText(f"{best.fitness:.4f}")
-                self.apply_best_btn.setEnabled(True)
+                
+                # AUTO-APPLY: Update param editor immediately with best parameters
+                print(f"✓ Auto-applying best parameters from generation {best.generation}")
+                self.set_params_from_individual(best)
                 
                 # Update stats display with backtest results if available
                 if self.temp_backtest_result:
@@ -735,18 +784,19 @@ class StatsPanel(QWidget):
         """
         Run multiple optimization steps asynchronously.
         
+        Automatically initializes population if needed.
         Shows progress and allows stopping to keep current best.
         """
-        if self.population is None:
-            print("Error: Population not initialized")
-            return
-        
         if self.current_data is None:
-            print("Error: No data loaded")
+            print("Error: No data loaded. Please download data first.")
             return
         
         if self.is_optimizing:
             print("Already optimizing...")
+            return
+        
+        # Auto-initialize population if needed
+        if not self._initialize_population_if_needed():
             return
         
         n_gens = self.n_generations_spin.value()
@@ -769,14 +819,19 @@ class StatsPanel(QWidget):
         except:
             pass
         
+        # Reset best fitness tracking for this optimization run
+        self.prev_best_fitness = None
+        if self.population.best_ever:
+            self.prev_best_fitness = self.population.best_ever.fitness
+        
         # Update UI state
         self.is_optimizing = True
         self.stop_requested = False
         
-        self.step_btn.setEnabled(False)
         self.optimize_btn.setEnabled(False)
-        self.stop_btn.setVisible(True)
+        self.stop_btn.setEnabled(True)  # Enable stop button during optimization
         self.n_generations_spin.setEnabled(False)
+        self.fitness_preset_combo.setEnabled(False)
         
         # Emit initial progress
         self.progress_updated.emit(0, n_gens, "Initializing optimization...")
@@ -821,24 +876,29 @@ class StatsPanel(QWidget):
                     # Get fitness configuration from parameter editor
                     _, _, fitness_config = self.get_current_params()
                     
-                    if self.use_gpu and self.gpu_optimizer:
-                        # GPU-accelerated evolution
-                        self.population = self.gpu_optimizer.evolution_step(
+                    # CRITICAL FIX: Pass raw_data (OHLCV only), not features!
+                    # Optimizer MUST build features with each individual's parameters
+                    data_for_optimizer = self.raw_data if self.raw_data is not None else self.current_data[['open', 'high', 'low', 'close', 'volume']]
+                    
+                    if self.use_multicore:
+                        # Multi-core CPU (correct + fast)
+                        self.population = evolution_step_multicore(
                             self.population,
-                            self.current_data,
+                            data_for_optimizer,  # Pass raw OHLCV, NOT features!
                             self.current_tf,
                             fitness_config=fitness_config,
                             mutation_rate=ga_cfg['mutation_rate'],
                             sigma=ga_cfg['sigma'],
                             elite_fraction=ga_cfg['elite_fraction'],
                             tournament_size=ga_cfg['tournament_size'],
-                            mutation_probability=ga_cfg['mutation_probability']
+                            mutation_probability=ga_cfg['mutation_probability'],
+                            n_workers=self.n_workers
                         )
                     else:
-                        # CPU fallback
+                        # Single-core CPU fallback
                         self.population = evolution_step(
                             self.population,
-                            self.current_data,
+                            data_for_optimizer,  # Pass raw OHLCV, NOT features!
                             self.current_tf,
                             fitness_config=fitness_config,
                             mutation_rate=ga_cfg['mutation_rate'],
@@ -848,11 +908,55 @@ class StatsPanel(QWidget):
                             mutation_probability=ga_cfg['mutation_probability']
                         )
                     
+                    # Check if we have a new best individual
+                    new_best_found = False
+                    if self.population.best_ever:
+                        current_best_fitness = self.population.best_ever.fitness
+                        if self.prev_best_fitness is None or current_best_fitness > self.prev_best_fitness:
+                            new_best_found = True
+                            self.prev_best_fitness = current_best_fitness
+                            
+                            # Run backtest with new best individual to visualize
+                            print(f"\n🎯 NEW BEST found in generation {gen+1}!")
+                            print(f"   Fitness: {current_best_fitness:.4f}")
+                            
+                            best = self.population.best_ever
+                            if best.metrics:
+                                print(f"   Trades: {best.metrics.get('n', 0)}")
+                                print(f"   Win Rate: {best.metrics.get('win_rate', 0):.2%}")
+                                print(f"   Avg R: {best.metrics.get('avg_R', 0):.2f}")
+                                print(f"   Total PnL: ${best.metrics.get('total_pnl', 0):.4f}")
+                            
+                            # Run backtest for visualization using RAW data
+                            print(f"\n📊 Running backtest with new best parameters...")
+                            
+                            try:
+                                if self.raw_data is None:
+                                    print("⚠ No raw data available, skipping visualization backtest")
+                                    self.temp_backtest_result = None
+                                else:
+                                    # Rebuild features from raw OHLCV data with new parameters
+                                    feats = build_features(self.raw_data, best.seller_params, self.current_tf)
+                                    backtest_result = run_backtest(feats, best.backtest_params)
+                                    
+                                    print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
+                                    
+                                    # Store for UI update
+                                    self.temp_backtest_result = backtest_result
+                                
+                            except Exception as e:
+                                print(f"Error running backtest: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                self.temp_backtest_result = None
+                    
                     # Update UI (from main thread)
+                    # Pass whether this is a new best to the UI updater
                     QMetaObject.invokeMethod(
                         self,
-                        "_update_after_generation",
-                        Qt.QueuedConnection
+                        "_update_after_multi_step_generation",
+                        Qt.QueuedConnection,
+                        Q_ARG(bool, new_best_found)
                     )
                     
                 except Exception as e:
@@ -904,43 +1008,106 @@ class StatsPanel(QWidget):
             # Update fitness plot
             self.update_fitness_plot()
             
-            # Update best fitness
+            # Update best fitness and auto-apply parameters
             if self.population.best_ever:
-                self.best_fitness_label.setText(f"{self.population.best_ever.fitness:.4f}")
-                self.apply_best_btn.setEnabled(True)
+                best = self.population.best_ever
+                self.best_fitness_label.setText(f"{best.fitness:.4f}")
+                
+                # AUTO-APPLY: Update param editor immediately with best parameters
+                self.set_params_from_individual(best)
         except Exception as e:
             print(f"Error updating UI: {e}")
+    
+    @Slot(bool)
+    def _update_after_multi_step_generation(self, new_best_found: bool):
+        """
+        Update UI after each generation during multi-step optimization.
+        
+        Args:
+            new_best_found: True if a new best individual was found this generation
+        """
+        try:
+            if self.population is None:
+                return
+            
+            # Always update generation label and fitness plot
+            self.gen_label.setText(str(self.population.generation))
+            self.update_fitness_plot()
+            
+            # Update population stats
+            stats = self.population.get_stats()
+            self.pop_label.setText(
+                f"Gen {self.population.generation} | "
+                f"Pop: {self.population.size} | "
+                f"Mean: {stats['mean_fitness']:.2f} | "
+                f"Best: {stats['max_fitness']:.2f}"
+            )
+            
+            # If new best found, update all displays and chart
+            if new_best_found and self.population.best_ever:
+                best = self.population.best_ever
+                self.best_fitness_label.setText(f"{best.fitness:.4f}")
+                
+                # AUTO-APPLY: Update param editor immediately with best parameters
+                print(f"✓ Auto-applying new best parameters from generation {best.generation}")
+                self.set_params_from_individual(best)
+                
+                # Update stats display with backtest results if available
+                if self.temp_backtest_result:
+                    self.trades_df = self.temp_backtest_result['trades']
+                    self.metrics = self.temp_backtest_result['metrics']
+                    
+                    # Update metrics display
+                    self.update_metrics()
+                    
+                    # Update equity curve
+                    self.update_equity_curve()
+                    
+                    # Emit signal with backtest results for chart update
+                    print(f"✓ Updating chart with new best strategy...")
+                    self.optimization_step_complete.emit(best, self.temp_backtest_result)
+                else:
+                    print(f"⚠ No backtest result available for new best")
+            
+        except Exception as e:
+            print(f"Error updating UI after multi-step generation: {e}")
+            import traceback
+            traceback.print_exc()
     
     @Slot()
     def _restore_ui_after_optimize(self):
         """Restore UI state after optimization completes (called from main thread)."""
         self.is_optimizing = False
-        self.step_btn.setEnabled(True)
         self.optimize_btn.setEnabled(True)
-        self.stop_btn.setVisible(False)
+        self.stop_btn.setEnabled(False)  # Disable stop button after optimization
         self.n_generations_spin.setEnabled(True)
+        self.fitness_preset_combo.setEnabled(True)
         
         # Run final backtest with best individual
         if self.population.best_ever:
             try:
                 best = self.population.best_ever
-                raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
-                feats = build_features(raw_data, best.seller_params, self.current_tf)
-                backtest_result = run_backtest(feats, best.backtest_params)
                 
-                self.trades_df = backtest_result['trades']
-                self.metrics = backtest_result['metrics']
-                self.update_metrics()
-                self.update_equity_curve()
-                
-                # Emit signal for chart visualization
-                self.optimization_step_complete.emit(best, backtest_result)
-                
-                # Auto-save best parameters to .env
-                print("\n" + "="*70)
-                print("💾 Auto-saving best parameters...")
-                print("="*70)
-                self.apply_best_parameters(auto_save=True)
+                if self.raw_data is None:
+                    print("⚠ No raw data available, skipping final backtest")
+                else:
+                    # Build features from RAW data with best parameters
+                    feats = build_features(self.raw_data, best.seller_params, self.current_tf)
+                    backtest_result = run_backtest(feats, best.backtest_params)
+                    
+                    self.trades_df = backtest_result['trades']
+                    self.metrics = backtest_result['metrics']
+                    self.update_metrics()
+                    self.update_equity_curve()
+                    
+                    # Emit signal for chart visualization
+                    self.optimization_step_complete.emit(best, backtest_result)
+                    
+                    # Auto-save best parameters to .env
+                    print("\n" + "="*70)
+                    print("💾 Auto-saving best parameters...")
+                    print("="*70)
+                    self.apply_best_parameters(auto_save=True)
                 
             except Exception as e:
                 print(f"Error running final backtest: {e}")

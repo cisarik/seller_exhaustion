@@ -58,7 +58,8 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1600, 1000)
         
         # Data and settings
-        self.current_data = None
+        self.current_data = None  # Features dataframe (with indicators and signals)
+        self.raw_data = None  # Raw OHLCV data (for rebuilding features)
         self.current_tf = Timeframe.m15
         self.settings_dialog = None
         self.strategy_editor = None
@@ -302,8 +303,9 @@ class MainWindow(QMainWindow):
             # Render chart
             self.chart_view.render_candles(feats)
             
-            # Store data
+            # Store data (both features and raw)
             self.current_data = feats
+            self.raw_data = df  # Store raw OHLCV for rebuilding features
             self.current_tf = tf
             self.current_ticker = "X:ADAUSD"
             if len(feats) > 0:
@@ -315,8 +317,8 @@ class MainWindow(QMainWindow):
             # Load parameters into param editor
             self.param_editor.set_params(params, bt_params)
             
-            # Pass data to stats panel for optimization
-            self.stats_panel.set_current_data(feats, tf)
+            # Pass data to stats panel for optimization (both features and raw)
+            self.stats_panel.set_current_data(feats, tf, raw_data=df)
             
             # Enable backtest button
             self.backtest_action.setEnabled(True)
@@ -372,13 +374,22 @@ class MainWindow(QMainWindow):
             # Note: fitness_config (3rd value) not used for single backtest
             seller_params, bt_params, _ = self.param_editor.get_params()
             
-            # Rebuild features with current params
-            feats = build_features(self.current_data[['open', 'high', 'low', 'close', 'volume']], 
-                                   seller_params, self.current_tf)
+            # Rebuild features with current params from RAW data
+            if self.raw_data is None:
+                # Fallback: extract from current_data (may have dropped rows)
+                print("⚠ No raw data available, using features dataframe")
+                raw = self.current_data[['open', 'high', 'low', 'close', 'volume']]
+            else:
+                raw = self.raw_data
+            
+            feats = build_features(raw, seller_params, self.current_tf)
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
+            
+            # Update stats panel with new features (keep same raw data)
+            self.stats_panel.set_current_data(feats, self.current_tf, raw_data=self.raw_data)
             
             # Run backtest (in executor to avoid blocking)
             result = await asyncio.get_event_loop().run_in_executor(
@@ -470,8 +481,6 @@ class MainWindow(QMainWindow):
     
     def on_optimization_step_complete(self, best_individual, backtest_result):
         """Handle optimization step completion and update chart."""
-        print(f"\n🎯 Displaying winning strategy on chart...")
-        
         if backtest_result is None:
             print("⚠ No backtest result to display")
             return
@@ -822,7 +831,7 @@ class MainWindow(QMainWindow):
             print(f"Warning: Could not restore window state: {e}")
     
     async def try_load_cached_data(self):
-        """Try to load cached data from last session, prioritizing current settings."""
+        """Try to load cached data from last session - CANDLESTICKS ONLY (no trades)."""
         try:
             # Always use current settings for timeframe and date range
             ticker = settings.last_ticker or "X:ADAUSD"
@@ -836,7 +845,7 @@ class MainWindow(QMainWindow):
             self.param_editor.set_timeframe(self.current_tf)
             self.current_ticker = ticker
             
-            # Load strategy parameters from settings (always use current values)
+            # Load strategy parameters from settings
             seller_params = SellerParams(
                 ema_fast=settings.strategy_ema_fast,
                 ema_slow=settings.strategy_ema_slow,
@@ -856,69 +865,66 @@ class MainWindow(QMainWindow):
             
             target_multiplier, target_timespan = TIMEFRAME_META.get(self.current_tf, (15, "minute"))
             
-            base_available = self.cache.has_cached_data(ticker, from_, to, 1, "minute")
+            # STRICT: Only load cache if it matches EXACT timeframe
             target_available = self.cache.has_cached_data(ticker, from_, to, target_multiplier, target_timespan)
 
-            if base_available or target_available:
-                self.statusBar().showMessage("Restoring cached data…")
-            else:
-                self.statusBar().showMessage("Checking for cached data…")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
-
-            df = await self.data_provider.fetch(
-                ticker,
-                self.current_tf,
-                from_,
-                to,
-                use_cache_only=True,
-            )
-
-            if (df is None or len(df) == 0) and target_available:
-                df = self.cache.get_cached_data(ticker, from_, to, target_multiplier, target_timespan)
-
-            if df is None or len(df) == 0:
+            if not target_available:
                 self.statusBar().showMessage(
-                    "Cached data unavailable - Click Settings to download data"
+                    f"No cached data for {self.current_tf.value} - Click Settings to download"
                 )
                 return
 
+            self.statusBar().showMessage(f"Loading cached {self.current_tf.value} data...")
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+
+            # Load EXACT timeframe data (no fallback to wrong timeframe)
+            df = self.cache.get_cached_data(ticker, from_, to, target_multiplier, target_timespan)
+
+            if df is None or len(df) == 0:
+                self.statusBar().showMessage(
+                    f"Cached data unavailable for {self.current_tf.value} - Click Settings to download"
+                )
+                return
+
+            # Build features for chart display only
             feats = build_features(df, seller_params, self.current_tf)
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
             self.chart_view.set_indicator_config(self._indicator_config_from_settings())
-            self.chart_view.render_candles(feats)
+            
+            # Render candlesticks WITHOUT trades (no backtest on startup)
+            self.chart_view.render_candles(feats, backtest_result=None)
 
+            # Store data (both features and raw)
             self.current_data = feats
+            self.raw_data = df  # Store raw OHLCV for rebuilding features
             self.current_range = self._infer_date_range(feats)
 
+            # Load parameters into param editor
             self.param_editor.set_params(seller_params, bt_params)
-            self.stats_panel.set_current_data(feats, self.current_tf)
+            
+            # Pass data to stats panel (WITH raw_data for optimization)
+            self.stats_panel.set_current_data(feats, self.current_tf, raw_data=df)
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, run_backtest, feats, bt_params)
-
-            self.stats_panel.update_stats(result)
-            self.chart_view.set_backtest_result(result)
-
-            self._persist_session(seller_params, bt_params, result)
+            # Enable backtest button but DON'T run backtest automatically
             self.backtest_action.setEnabled(True)
 
-            metrics = result["metrics"]
             signals = int(feats["exhaustion"].sum())
             date_range = f"{self.current_range[0]} to {self.current_range[1]}"
             self.statusBar().showMessage(
-                f"✓ Restored {len(feats)} bars ({date_range}) | "
-                f"{signals} signals | {metrics['n']} trades | Win {metrics['win_rate']:.1%}"
+                f"✓ Loaded {len(feats)} bars ({date_range}, {self.current_tf.value}) | "
+                f"{signals} signals | Click 'Run Backtest' to see trades"
             )
 
             self.chart_view.info_label.setText(
                 f"📊 {ticker} {self.current_tf.value} | "
                 f"Date range: {date_range}\n"
-                f"Signals: {signals} | Trades: {metrics['n']}"
+                f"Signals: {signals} | Click 'Run Backtest' for trades"
             )
 
-            print(f"✓ Auto-loaded cached data: {len(feats)} bars, {signals} signals, {metrics['n']} trades")
+            print(f"✓ Auto-loaded cached data: {len(feats)} bars ({self.current_tf.value}), {signals} signals")
+            print(f"   Chart ready - Run backtest to see trades")
             
         except Exception as e:
             print(f"⚠ Could not auto-load cached data: {e}")

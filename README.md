@@ -163,9 +163,8 @@ poetry run python cli.py ui
 
 # 5. Optimize (optional):
 #    - Stats Panel → Initialize Population
-#    - Click Step repeatedly
-#    - Apply Best Parameters
-#    - Save in Strategy Editor
+#    - Click Step repeatedly (parameters auto-apply)
+#    - Save in Strategy Editor if satisfied
 ```
 
 ---

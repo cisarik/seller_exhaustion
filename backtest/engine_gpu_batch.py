@@ -344,20 +344,22 @@ class BatchGPUBacktestEngine:
         Returns:
             List of raw backtest results (trades as tensors)
         """
-        # Try fully vectorized engine first (Phase 3)
-        try:
-            from backtest.engine_gpu_vectorized import integrate_fully_vectorized_engine
-            return integrate_fully_vectorized_engine(
-                self,
-                signals,
-                indicators,
-                backtest_params_list
-            )
-        except Exception as e:
-            if self.config.verbose:
-                print(f"   ⚠ Fully vectorized engine failed, using hybrid: {e}")
+        # DISABLED: Fully vectorized engine has bugs causing trade count mismatches
+        # Force use of hybrid approach which matches CPU logic
+        if False:  # Disable fully vectorized engine
+            try:
+                from backtest.engine_gpu_vectorized import integrate_fully_vectorized_engine
+                return integrate_fully_vectorized_engine(
+                    self,
+                    signals,
+                    indicators,
+                    backtest_params_list
+                )
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"   ⚠ Fully vectorized engine failed, using hybrid: {e}")
         
-        # Fallback to hybrid approach (Phase 2)
+        # Use hybrid approach (matches CPU backtest logic)
         n_individuals = signals.shape[0]
         results = []
         

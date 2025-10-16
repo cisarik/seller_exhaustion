@@ -180,6 +180,11 @@ class DataProvider:
         # Zachovať cleaning summary z 1m
         summary = df.attrs.get("cleaning_summary")
         ohlcv.attrs["cleaning_summary"] = summary
+        
+        # Cache the resampled data for faster loading next time
+        if self.cache and multiplier > 1:
+            self.cache.save_cached_data(ohlcv, ticker, from_, to, multiplier, "minute")
+        
         return ohlcv
 
     def estimate_download(

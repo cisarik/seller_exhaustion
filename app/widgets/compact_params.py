@@ -76,7 +76,7 @@ class CompactParamsEditor(QWidget):
         layout.setSpacing(5)
         
         # Title
-        title = QLabel("Parameter Editor")
+        title = QLabel("Best Parameters")
         title.setProperty("role", "title")
         layout.addWidget(title)
         
@@ -225,17 +225,9 @@ class CompactParamsEditor(QWidget):
         fitness_layout.setSpacing(4)
         fitness_layout.setContentsMargins(8, 8, 8, 8)
         
-        # Preset selector
-        preset_label = QLabel("Preset:")
-        preset_label.setMaximumWidth(80)
-        self.fitness_preset_combo = QComboBox()
-        self.fitness_preset_combo.addItem("⚖️ Balanced", "balanced")
-        self.fitness_preset_combo.addItem("🚀 High Frequency", "high_frequency")
-        self.fitness_preset_combo.addItem("🛡️ Conservative", "conservative")
-        self.fitness_preset_combo.addItem("💰 Profit Focused", "profit_focused")
-        self.fitness_preset_combo.addItem("✏️ Custom", "custom")
-        self.fitness_preset_combo.currentIndexChanged.connect(self._on_fitness_preset_changed)
-        fitness_layout.addRow(preset_label, self.fitness_preset_combo)
+        # Note: Preset selector is in Evolutionary Optimization section
+        # This section only shows the weight values that can be adjusted
+        # Preset selection controls these values from stats_panel
         
         # Weights section
         weights_label = QLabel("<b>Weights:</b>")
@@ -319,12 +311,16 @@ class CompactParamsEditor(QWidget):
         self._update_tooltips()
         self.params_changed.emit()
     
-    def _on_fitness_preset_changed(self, index):
-        """Handle fitness preset selection."""
-        preset_name = self.fitness_preset_combo.currentData()
+    def load_fitness_preset(self, preset_name: str):
+        """
+        Load fitness preset configuration and update UI.
+        Called externally from stats_panel when preset dropdown changes.
         
+        Args:
+            preset_name: Name of preset (balanced, high_frequency, conservative, profit_focused, custom)
+        """
         if preset_name == "custom":
-            # Enable manual editing
+            # Don't override custom values
             return
         
         # Load preset configuration
@@ -358,16 +354,9 @@ class CompactParamsEditor(QWidget):
         self._on_param_changed()
     
     def _on_fitness_changed(self):
-        """Handle fitness weight change - mark as custom."""
-        # If user manually changes weights, switch to custom
-        if self.fitness_preset_combo.currentData() != "custom":
-            self.fitness_preset_combo.blockSignals(True)
-            for i in range(self.fitness_preset_combo.count()):
-                if self.fitness_preset_combo.itemData(i) == "custom":
-                    self.fitness_preset_combo.setCurrentIndex(i)
-                    break
-            self.fitness_preset_combo.blockSignals(False)
-        
+        """Handle fitness weight changes."""
+        # Note: Preset combo is in stats_panel, not here
+        # Manual weight changes don't need to switch preset
         self._on_param_changed()
     
     def reset_to_defaults(self):
@@ -395,8 +384,7 @@ class CompactParamsEditor(QWidget):
         self.param_widgets['slippage_bp'].setValue(5.0)
         
         # Fitness function defaults (Balanced preset)
-        self.fitness_preset_combo.setCurrentIndex(0)  # Balanced
-        self._on_fitness_preset_changed(0)
+        self.load_fitness_preset("balanced")
     
     def get_params(self):
         """Get current parameters, converting time-based values to bars.
@@ -428,8 +416,9 @@ class CompactParamsEditor(QWidget):
         )
         
         # Get fitness configuration
+        # Note: Preset name is controlled by stats_panel dropdown
         fitness_config = FitnessConfig(
-            preset=self.fitness_preset_combo.currentData(),
+            preset="custom",  # Actual preset is managed by stats_panel
             trade_count_weight=self.trade_count_weight_spin.value(),
             win_rate_weight=self.win_rate_weight_spin.value(),
             avg_r_weight=self.avg_r_weight_spin.value(),
@@ -471,13 +460,7 @@ class CompactParamsEditor(QWidget):
         
         # Update fitness configuration if provided
         if fitness_config:
-            # Find and set preset
-            for i in range(self.fitness_preset_combo.count()):
-                if self.fitness_preset_combo.itemData(i) == fitness_config.preset:
-                    self.fitness_preset_combo.blockSignals(True)
-                    self.fitness_preset_combo.setCurrentIndex(i)
-                    self.fitness_preset_combo.blockSignals(False)
-                    break
+            # Note: Preset combo is in stats_panel, we only set weight values
             
             # Set weights
             self.trade_count_weight_spin.setValue(fitness_config.trade_count_weight)

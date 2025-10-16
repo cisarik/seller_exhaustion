@@ -345,7 +345,7 @@ class AdamOptimizer(BaseOptimizer):
         """
         Compute gradient using GPU batch backtesting.
         
-        Batches ALL parameter perturbations (current + 12 perturbed) in ONE GPU call.
+        Batches ALL parameter perturbations (current + N perturbed) in ONE GPU call.
         This provides 8-13x speedup over sequential CPU evaluation.
         
         Args:
@@ -357,11 +357,12 @@ class AdamOptimizer(BaseOptimizer):
             (gradient_array, current_fitness, current_metrics)
         """
         import torch
-        from backtest.engine_gpu_batch import BatchGPUBacktestEngine, BatchBacktestConfig
+        from backtest.engine_gpu_full import batch_backtest_full_gpu
         from backtest.optimizer import calculate_fitness
         
+        n_param_sets = len(self.param_names) + 1
         print(f"\n🚀 GPU Batch Gradient Computation")
-        print(f"   Batching {len(self.param_names) + 1} evaluations (current + {len(self.param_names)} perturbations)")
+        print(f"   Batching {n_param_sets} evaluations (current + {len(self.param_names)} perturbations)")
         
         # Get current parameters
         current_vector = self.params_tensor.detach().cpu().numpy()
@@ -370,8 +371,10 @@ class AdamOptimizer(BaseOptimizer):
         seller_params_list = []
         backtest_params_list = []
         
+        n_param_sets = len(self.param_names) + 1  # current + perturbed for each param
+        
         if progress_callback:
-            progress_callback(0, 1, "Preparing GPU batch (13 parameter sets)...")
+            progress_callback(0, 1, f"Preparing GPU batch ({n_param_sets} parameter sets)...")
         
         # Current parameters (for f_current)
         seller_curr, backtest_curr = self._vector_to_params(current_vector)
@@ -386,29 +389,21 @@ class AdamOptimizer(BaseOptimizer):
             seller_params_list.append(seller_p)
             backtest_params_list.append(backtest_p)
         
-        # Step 2: Batch evaluate ALL on GPU (13 backtests in parallel!)
+        # Step 2: Batch evaluate ALL on GPU (N+1 backtests in parallel!)
         try:
             if progress_callback:
                 progress_callback(0, 1, f"Running GPU batch ({len(seller_params_list)} backtests)...")
             
-            # Read GPU settings from config
-            from config.settings import settings as config_settings
-            gpu_batch_size = getattr(config_settings, 'gpu_batch_size', 512)
-            gpu_memory = getattr(config_settings, 'gpu_memory_fraction', 0.85)
-            
-            batch_config = BatchBacktestConfig(
-                batch_size=gpu_batch_size,
-                safety_margin=gpu_memory,
-                verbose=True
-            )
-            
-            batch_engine = BatchGPUBacktestEngine(data, config=batch_config)
-            results = batch_engine.batch_backtest(
+            # Use full GPU pipeline
+            results, stats = batch_backtest_full_gpu(
+                data,
                 seller_params_list,
                 backtest_params_list,
-                self.timeframe
+                self.timeframe,
+                fitness_config=fitness_config,
+                device=None,  # Auto-detect
+                verbose=False
             )
-            batch_engine.clear_cache()
             
             if progress_callback:
                 progress_callback(1, 1, "GPU batch complete! Computing gradients...")

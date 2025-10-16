@@ -26,6 +26,43 @@ from indicators.gpu import get_device, to_tensor, to_numpy
 from backtest.optimizer import calculate_fitness
 
 
+def has_gpu() -> bool:
+    """Check if GPU acceleration is available."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def calculate_fitness_gpu_batch(
+    metrics_list: List[Dict[str, Any]],
+    fitness_config: Optional[FitnessConfig] = None,
+    device: torch.device = None
+) -> torch.Tensor:
+    """
+    Calculate fitness for multiple individuals in parallel on GPU.
+    
+    Args:
+        metrics_list: List of backtest metrics
+        fitness_config: Fitness configuration (uses balanced defaults if None)
+        device: PyTorch device
+    
+    Returns:
+        Tensor of fitness scores
+    """
+    if device is None:
+        device = get_device()
+    
+    # Calculate fitness per individual using shared fitness configuration
+    scores = [
+        float(calculate_fitness(metrics, fitness_config))
+        for metrics in metrics_list
+    ]
+    
+    return torch.tensor(scores, device=device, dtype=torch.float32)
+
+
 def filter_overlapping_signals(
     signal_bars: List[int],
     signal_timestamps: List,

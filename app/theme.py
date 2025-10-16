@@ -19,6 +19,7 @@ QLineEdit:hover, QTextEdit:hover, QComboBox:hover { border-color:#4caf50; backgr
 QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border-color:#4caf50; background:#0a0a0a; }
 QComboBox QAbstractItemView { background:#000; color:#e8f5e9; selection-background-color:#295c33; }
 QLabel[role="title"] { font-size:18px; font-weight:bold; color:#e8f5e9; padding:8px 0px; }
+QWidget[role="statusbar"] { background:#000; border-top:1px solid #2f5c39; }
 QLabel[role="statusbar"] { color:#4caf50; font-size:14px; font-weight:bold; padding:12px 16px; background:#000; border-top:1px solid #2f5c39; }
 QLabel[variant="warn"] { background:#3d2a0f; color:#ffd54f; padding:10px; border:2px solid #ff9800; border-radius:6px; font-weight:bold; }
 """

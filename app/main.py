@@ -108,12 +108,8 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(splitter)
         
-        # Status bar with progress
-        self.progress = QProgressBar()
-        self.progress.setMaximumWidth(300)
-        self.progress.setVisible(False)
-        self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("Initializing...")
+        # Hide the main window's status bar (we use the custom black status bar in chart view)
+        self.statusBar().hide()
 
     def _indicator_config_from_settings(self) -> dict[str, bool]:
         """Return chart indicator configuration based on saved settings."""
@@ -262,9 +258,7 @@ class MainWindow(QMainWindow):
     def on_data_downloaded(self, df):
         """Handle data download completion."""
         try:
-            self.statusBar().showMessage("Building features...")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
+            self.chart_view.show_action_progress("Building features...")
             
             # Get strategy params from settings
             params = self.settings_dialog.get_strategy_params()
@@ -325,7 +319,7 @@ class MainWindow(QMainWindow):
             
             # Update status
             signals = feats['exhaustion'].sum()
-            self.statusBar().showMessage(
+            self.chart_view.status_label.setText(
                 f"✓ Loaded {len(feats)} bars | {signals} signals detected | Ready to backtest"
             )
             
@@ -341,16 +335,17 @@ class MainWindow(QMainWindow):
                 "Error",
                 f"Failed to process data:\n{str(e)}"
             )
-            self.statusBar().showMessage(f"Error: {str(e)}")
+            self.chart_view.status_label.setText(f"Error: {str(e)}")
         
         finally:
-            self.progress.setVisible(False)
+            self.chart_view.hide_action_progress()
     
     def on_params_changed(self):
         """Handle parameter changes from the compact editor."""
         # Just mark that params changed - backtest will use latest values when run
         if self.current_data is not None:
-            self.statusBar().showMessage("Parameters changed - run backtest to see effects", 2000)
+            self.chart_view.status_label.setText("Parameters changed - run backtest to see effects")
+            QTimer.singleShot(2000, lambda: self.chart_view.status_label.setText("Ready"))
     
     async def run_backtest(self):
         """Run backtest on current data."""
@@ -364,9 +359,6 @@ class MainWindow(QMainWindow):
         
         success = False
         try:
-            self.statusBar().showMessage("Running backtest...")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
             self.backtest_action.setEnabled(False)
             self.chart_view.show_action_progress("Running backtest…")
             
@@ -436,12 +428,11 @@ class MainWindow(QMainWindow):
                 "Backtest Error",
                 f"Failed to run backtest:\n{str(e)}"
             )
-            self.statusBar().showMessage(f"Error: {str(e)}")
+            self.chart_view.status_label.setText(f"Error: {str(e)}")
             import traceback
             traceback.print_exc()
 
         finally:
-            self.progress.setVisible(False)
             self.backtest_action.setEnabled(True)
             final_msg = "Ready" if success else "Backtest failed"
             self.chart_view.hide_action_progress(final_msg)
@@ -453,12 +444,13 @@ class MainWindow(QMainWindow):
         self.chart_view.update_trade_table(None)
         if self.current_data is not None:
             self.chart_view.render_candles(self.current_data)
-        self.statusBar().showMessage("Results cleared")
+        self.chart_view.status_label.setText("Results cleared")
         clear_session_snapshot()
     
     def update_progress(self, current: int, total: int, message: str):
         """
         Update progress bar with optimization progress.
+        Uses the chart view's status bar progress.
         
         Args:
             current: Current generation number
@@ -466,18 +458,22 @@ class MainWindow(QMainWindow):
             message: Status message
         """
         if total > 0:
-            self.progress.setVisible(True)
-            self.progress.setMaximum(total)
-            self.progress.setValue(current)
             percentage = (current / total * 100) if total > 0 else 0
-            self.statusBar().showMessage(f"{message} ({percentage:.0f}%)")
+            
+            # Update chart view progress bar
+            self.chart_view.action_progress.setVisible(True)
+            self.chart_view.action_progress.setRange(0, total)
+            self.chart_view.action_progress.setValue(current)
+            
+            # Update chart view status label
+            self.chart_view.status_label.setText(f"{message} ({percentage:.0f}%)")
+            
+            # Hide progress when complete
+            if current >= total:
+                QTimer.singleShot(2000, lambda: self.chart_view.action_progress.setVisible(False))
         else:
-            self.progress.setVisible(False)
-            self.statusBar().showMessage(message)
-        
-        # Hide progress bar after completion
-        if current >= total and total > 0:
-            QTimer.singleShot(3000, lambda: self.progress.setVisible(False))
+            self.chart_view.action_progress.setVisible(False)
+            self.chart_view.status_label.setText(message)
     
     def on_optimization_step_complete(self, best_individual, backtest_result):
         """Handle optimization step completion and update chart."""
@@ -891,8 +887,7 @@ class MainWindow(QMainWindow):
                 return
 
             self.statusBar().showMessage(f"Loading cached {self.current_tf.value} data...")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)
+            self.chart_view.show_action_progress(f"Loading cached {self.current_tf.value} data...")
 
             # Load EXACT timeframe data (no fallback to wrong timeframe) in a worker thread
             df = await asyncio.to_thread(
@@ -958,7 +953,7 @@ class MainWindow(QMainWindow):
             )
         
         finally:
-            self.progress.setVisible(False)
+            self.chart_view.hide_action_progress()
     
     def closeEvent(self, event):
         """Save state when window is closed."""

@@ -5,7 +5,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, 
     QSplitter, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QGroupBox, QFileDialog
+    QHeaderView, QGroupBox, QFileDialog, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor
@@ -129,20 +129,6 @@ class CandleChartWidget(QWidget):
     def initUI(self):
         layout = QVBoxLayout(self)
         
-        # Status bar
-        status_layout = QHBoxLayout()
-        self.status_label = QLabel("Ready")
-        self.status_label.setProperty("role", "statusbar")
-        status_layout.addWidget(self.status_label)
-        
-        # Progress bar replaces old timeframe selector area
-        self.action_progress = QProgressBar()
-        self.action_progress.setVisible(False)
-        self.action_progress.setMaximumWidth(220)
-        status_layout.addWidget(self.action_progress)
-        
-        layout.addLayout(status_layout)
-        
         # Vertical splitter for chart and trade history
         splitter = QSplitter(Qt.Vertical)
         
@@ -174,6 +160,43 @@ class CandleChartWidget(QWidget):
         splitter.setSizes([700, 300])
         
         layout.addWidget(splitter)
+        
+        # Status bar at the bottom (after trade history)
+        # Create a container widget for the entire status bar with black background
+        status_container = QWidget()
+        status_container.setProperty("role", "statusbar")  # Apply black background styling to container
+        
+        status_layout = QHBoxLayout(status_container)
+        status_layout.setContentsMargins(16, 12, 16, 12)  # Match padding from theme
+        status_layout.setSpacing(8)
+        
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("background: transparent; color: #4caf50; font-size: 14px; font-weight: bold; padding: 0;")
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        status_layout.addWidget(self.status_label, stretch=1)
+        
+        # Progress bar for actions - aligned to the right
+        self.action_progress = QProgressBar()
+        self.action_progress.setVisible(False)
+        self.action_progress.setFixedWidth(220)
+        self.action_progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #000000;
+                border: 1px solid #2f5c39;
+                color: #4caf50;
+                text-align: center;
+                border-radius: 3px;
+                min-height: 18px;
+                max-height: 18px;
+            }
+            QProgressBar::chunk {
+                background-color: #4caf50;
+                border-radius: 2px;
+            }
+        """)
+        status_layout.addWidget(self.action_progress)
+        
+        layout.addWidget(status_container)
     
     def set_timeframe(self, timeframe: Timeframe):
         """Set active timeframe (read-only in main chart)."""
@@ -432,17 +455,6 @@ class CandleChartWidget(QWidget):
         
         layout.addWidget(self.trades_table)
         
-        # Export button
-        export_layout = QHBoxLayout()
-        export_layout.addStretch()
-        
-        self.export_btn = QPushButton("Export Trades to CSV")
-        self.export_btn.clicked.connect(self.export_trades)
-        self.export_btn.setEnabled(False)
-        export_layout.addWidget(self.export_btn)
-        
-        layout.addLayout(export_layout)
-        
         group.setLayout(layout)
         return group
     
@@ -451,11 +463,9 @@ class CandleChartWidget(QWidget):
         self.trades_table.setRowCount(0)
         
         if trades_df is None or len(trades_df) == 0:
-            self.export_btn.setEnabled(False)
             return
         
         self.trades_table.setRowCount(len(trades_df))
-        self.export_btn.setEnabled(True)
         
         for i, (idx, trade) in enumerate(trades_df.iterrows()):
             # Trade number

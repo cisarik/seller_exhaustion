@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QPushButton,
-    QFileDialog, QScrollArea, QSpinBox, QDoubleSpinBox
+    QFileDialog, QScrollArea, QSpinBox, QDoubleSpinBox, QProgressBar
 )
 from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG, Slot
 from PySide6.QtGui import QColor
@@ -100,10 +100,6 @@ class StatsPanel(QWidget):
             # Reset best fitness tracking
             self.prev_best_fitness = None
             
-            # Update UI
-            self.gen_label.setText("0")
-            self.status_label.setText(f"{self.optimizer.get_optimizer_name()} initialized")
-            
             print(f"✓ Optimizer initialized: {self.optimizer.get_optimizer_name()} with {self.optimizer.get_acceleration_mode()}")
             
             return True
@@ -193,9 +189,9 @@ class StatsPanel(QWidget):
         
         layout.addWidget(self.equity_plot)
         
-        # Fitness evolution plot
-        fitness_label = QLabel("<b>Fitness Evolution (Best Individual)</b>")
-        layout.addWidget(fitness_label)
+        # Fitness evolution plot (no label - Performance Tracking section header is above)
+        # fitness_label = QLabel("")
+        # layout.addWidget(fitness_label)
         
         self.fitness_plot = pg.PlotWidget()
         self.fitness_plot.setBackground('#0f1a12')
@@ -233,25 +229,6 @@ class StatsPanel(QWidget):
         self.acceleration_combo.currentIndexChanged.connect(self._on_acceleration_changed)
         accel_layout.addWidget(self.acceleration_combo, stretch=1)
         layout.addLayout(accel_layout)
-        
-        # Status display
-        status_layout = QGridLayout()
-        
-        status_layout.addWidget(QLabel("Iteration:"), 0, 0)
-        self.gen_label = QLabel("0")
-        self.gen_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        status_layout.addWidget(self.gen_label, 0, 1)
-        
-        status_layout.addWidget(QLabel("Best Fitness:"), 1, 0)
-        self.best_fitness_label = QLabel("--")
-        self.best_fitness_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #4caf50;")
-        status_layout.addWidget(self.best_fitness_label, 1, 1)
-        
-        status_layout.addWidget(QLabel("Status:"), 2, 0)
-        self.status_label = QLabel("Ready to optimize")
-        status_layout.addWidget(self.status_label, 2, 1)
-        
-        layout.addLayout(status_layout)
         
         # Number of iterations spinner
         iter_layout = QHBoxLayout()
@@ -353,9 +330,6 @@ class StatsPanel(QWidget):
         
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
-        self.gen_label.setText("0")
-        self.best_fitness_label.setText("--")
-        self.status_label.setText("Ready to optimize")
         
         print(f"✓ Optimizer type changed to: {get_optimizer_display_name(optimizer_type)}")
     
@@ -365,7 +339,6 @@ class StatsPanel(QWidget):
         
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
-        self.status_label.setText("Ready to optimize")
         
         print(f"✓ Acceleration changed to: {self.acceleration_combo.currentText()}")
     
@@ -719,19 +692,14 @@ class StatsPanel(QWidget):
             stats = self.optimizer.get_stats()
             iteration = stats.get('iteration', stats.get('generation', 0))
             
-            # Update iteration label
-            self.gen_label.setText(str(iteration))
-            
             # Update fitness evolution plot
             self.update_fitness_plot()
             
             # Get best parameters
             best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
             
-            # Update best fitness display
+            # Create best individual if found
             if best_seller is not None:
-                self.best_fitness_label.setText(f"{best_fitness:.4f}")
-                
                 # Create temporary Individual for compatibility
                 best_individual = Individual(
                     seller_params=best_seller,
@@ -757,20 +725,7 @@ class StatsPanel(QWidget):
                     # Emit signal with backtest results for chart update
                     self.optimization_step_complete.emit(best_individual, self.temp_backtest_result)
             
-            # Update status with optimizer-specific info
-            if 'mean_fitness' in stats:
-                # Evolutionary optimizer (has population stats)
-                self.status_label.setText(
-                    f"Iter {iteration} | "
-                    f"Mean: {stats.get('mean_fitness', 0):.2f} | "
-                    f"Best: {stats.get('max_fitness', best_fitness):.2f}"
-                )
-            else:
-                # Other optimizers (ADAM, etc.)
-                self.status_label.setText(
-                    f"Iter {iteration} | "
-                    f"Best: {best_fitness:.2f}"
-                )
+            # Status is now shown in chart view's progress bar via signals (no local status label)
             
         except Exception as e:
             print(f"Error updating UI after iteration: {e}")
@@ -1083,30 +1038,14 @@ class StatsPanel(QWidget):
             stats = self.optimizer.get_stats()
             iteration = stats.get('iteration', stats.get('generation', 0))
             
-            # Always update iteration label and fitness plot
-            self.gen_label.setText(str(iteration))
+            # Always update fitness plot
             self.update_fitness_plot()
             
-            # Update status with optimizer-specific info
+            # Status is now shown in chart view's progress bar via signals (no local status label)
             best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
-            if 'mean_fitness' in stats:
-                # Evolutionary optimizer (has population stats)
-                self.status_label.setText(
-                    f"Iter {iteration} | "
-                    f"Mean: {stats.get('mean_fitness', 0):.2f} | "
-                    f"Best: {best_fitness:.2f}"
-                )
-            else:
-                # Other optimizers
-                self.status_label.setText(
-                    f"Iter {iteration} | "
-                    f"Best: {best_fitness:.2f}"
-                )
             
             # If new best found, update all displays and chart
             if new_best_found and best_seller is not None:
-                self.best_fitness_label.setText(f"{best_fitness:.4f}")
-                
                 # Create Individual for compatibility
                 best_individual = Individual(
                     seller_params=best_seller,

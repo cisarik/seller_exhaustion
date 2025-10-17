@@ -55,10 +55,7 @@ class SettingsDialog(QDialog):
         # Tab widget for different settings sections
         tabs = QTabWidget()
         
-        # Data Download Tab
-        tabs.addTab(self.create_data_tab(), "Data Download")
-        
-        # Indicator Selection Tab
+        # Indicator Selection Tab (moved to first position)
         tabs.addTab(self.create_indicators_tab(), "Chart Indicators")
         
         # Backtest Parameters Tab
@@ -88,117 +85,7 @@ class SettingsDialog(QDialog):
         
         layout.addLayout(button_layout)
     
-    def create_data_tab(self):
-        """Create data download tab with timeframe selector."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # Timeframe Selection Group
-        tf_group = QGroupBox("Timeframe Selection")
-        tf_layout = QFormLayout()
-        
-        self.timeframe_combo = QComboBox()
-        for key, (mult, unit, label) in TIMEFRAMES.items():
-            self.timeframe_combo.addItem(f"{label} ({key})", key)
-        self.timeframe_combo.setCurrentText("15 minutes (15m)")
-        
-        # Connect timeframe change to auto-adjust parameters
-        self.timeframe_combo.currentIndexChanged.connect(self.on_timeframe_changed)
-        
-        tf_layout.addRow("Timeframe:", self.timeframe_combo)
-        
-        # Auto-adjust checkbox
-        self.auto_adjust_params = QCheckBox("Auto-adjust strategy parameters for timeframe")
-        self.auto_adjust_params.setChecked(True)
-        self.auto_adjust_params.setToolTip(
-            "When enabled, automatically adjusts EMA, Z-Score, and ATR windows\n"
-            "to maintain consistent time periods across different timeframes.\n"
-            "Example: 24h lookback = 96 bars on 15m, but 1440 bars on 1m."
-        )
-        tf_layout.addRow("", self.auto_adjust_params)
-        
-        info_label = QLabel(
-            "💡 Tip: Shorter timeframes (1m-5m) generate more signals but may be noisier.\n"
-            "Recommended: Start with 15m or 1h for balanced signal quality.\n\n"
-            "⚠️ IMPORTANT: Strategy parameters MUST scale with timeframe!\n"
-            "Use auto-adjust or manually configure time-based parameters."
-        )
-        info_label.setWordWrap(True)
-        info_label.setProperty("variant", "secondary")
-        tf_layout.addRow(info_label)
-        
-        tf_group.setLayout(tf_layout)
-        layout.addWidget(tf_group)
-        
-        # Data Download Group
-        download_group = QGroupBox("Download Historical Data")
-        download_layout = QFormLayout()
-        
-        # Ticker (fixed to ADA)
-        ticker_label = QLabel("X:ADAUSD (Cardano)")
-        ticker_label.setProperty("variant", "secondary")
-        download_layout.addRow("Ticker:", ticker_label)
-        
-        # Date range
-        self.date_from = QDateEdit()
-        self.date_from.setCalendarPopup(True)
-        self.date_from.setDate(QDate(2024, 1, 1))
-        self.date_from.setDisplayFormat("yyyy-MM-dd")
-        download_layout.addRow("From Date:", self.date_from)
-        
-        self.date_to = QDateEdit()
-        self.date_to.setCalendarPopup(True)
-        self.date_to.setDate(QDate.currentDate())
-        self.date_to.setDisplayFormat("yyyy-MM-dd")
-        download_layout.addRow("To Date:", self.date_to)
-        
-        # API Key status
-        api_key_status = QLabel()
-        if settings.polygon_api_key:
-            api_key_status.setText("✓ API Key Configured")
-            api_key_status.setStyleSheet("color: #4caf50;")
-        else:
-            api_key_status.setText("✗ API Key Missing (check .env)")
-            api_key_status.setStyleSheet("color: #f44336;")
-        download_layout.addRow("Status:", api_key_status)
-        
-        download_group.setLayout(download_layout)
-        layout.addWidget(download_group)
-        
-        # Progress section
-        progress_group = QGroupBox("Download Progress")
-        progress_layout = QVBoxLayout()
-        
-        self.progress_label = QLabel("Ready to download")
-        progress_layout.addWidget(self.progress_label)
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        progress_layout.addWidget(self.progress_bar)
-        
-        progress_group.setLayout(progress_layout)
-        layout.addWidget(progress_group)
-        
-        # Download button
-        self.download_btn = QPushButton("📥 Download Data")
-        self.download_btn.setObjectName("primaryButton")
-        self.download_btn.clicked.connect(lambda: asyncio.create_task(self.download_data()))
-        layout.addWidget(self.download_btn)
-        
-        # Info label
-        info = QLabel(
-            "💡 Tip: Download at least 7 days of data for proper indicator calculation.\n"
-            "Free tier: 5 API calls/minute. Large date ranges may take a few minutes.\n"
-            "Settings are auto-saved when you download data or click 'Save Settings'."
-        )
-        info.setWordWrap(True)
-        info.setProperty("variant", "secondary")
-        layout.addWidget(info)
-        
-        layout.addStretch()
-        return widget
-    
+
     def create_indicators_tab(self):
         """Create indicator selection tab."""
         widget = QWidget()
@@ -260,49 +147,6 @@ class SettingsDialog(QDialog):
         )
         indicators_layout.addWidget(self.show_entries)
         
-        # Remove the old "Sell Orders" checkbox - it's no longer used
-        # (exits are now shown as part of the trade balls)
-        
-        # Fibonacci Retracements Section
-        indicators_layout.addWidget(QLabel("\nFibonacci Retracements (click trade to view):"))
-        
-        self.show_fib_retracements = QCheckBox("📊 Show Fibonacci Retracements")
-        self.show_fib_retracements.setChecked(True)
-        self.show_fib_retracements.setToolTip(
-            "Show Fibonacci retracement levels for selected trade:\n"
-            "- Swing high marker (⭐ star)\n"
-            "- Rainbow-colored levels\n"
-            "- Golden Ratio (61.8%) highlighted\n"
-            "- Click on a trade in Trade History to view its Fib levels"
-        )
-        indicators_layout.addWidget(self.show_fib_retracements)
-        
-        # Individual Fib Level Controls (indented)
-        fib_levels_layout = QVBoxLayout()
-        fib_levels_layout.setContentsMargins(30, 0, 0, 0)  # Indent
-        
-        self.show_fib_0382 = QCheckBox("38.2% (Blue)")
-        self.show_fib_0382.setChecked(True)
-        fib_levels_layout.addWidget(self.show_fib_0382)
-        
-        self.show_fib_0500 = QCheckBox("50.0% (Cyan)")
-        self.show_fib_0500.setChecked(True)
-        fib_levels_layout.addWidget(self.show_fib_0500)
-        
-        self.show_fib_0618 = QCheckBox("61.8% ⭐ Golden Ratio (Gold)")
-        self.show_fib_0618.setChecked(True)
-        fib_levels_layout.addWidget(self.show_fib_0618)
-        
-        self.show_fib_0786 = QCheckBox("78.6% (Orange)")
-        self.show_fib_0786.setChecked(True)
-        fib_levels_layout.addWidget(self.show_fib_0786)
-        
-        self.show_fib_1000 = QCheckBox("100% (Red)")
-        self.show_fib_1000.setChecked(True)
-        fib_levels_layout.addWidget(self.show_fib_1000)
-        
-        indicators_layout.addLayout(fib_levels_layout)
-        
         group.setLayout(indicators_layout)
         layout.addWidget(group)
         
@@ -318,26 +162,26 @@ class SettingsDialog(QDialog):
         form_layout = QFormLayout()
         
         # ATR stop multiplier
-        self.atr_stop_mult = QDoubleSpinBox()
-        self.atr_stop_mult.setRange(0.1, 5.0)
-        self.atr_stop_mult.setValue(0.7)
-        self.atr_stop_mult.setSingleStep(0.1)
-        form_layout.addRow("ATR Stop Multiplier:", self.atr_stop_mult)
+        # self.atr_stop_mult = QDoubleSpinBox()
+        # self.atr_stop_mult.setRange(0.1, 5.0)
+        # self.atr_stop_mult.setValue(0.7)
+        # self.atr_stop_mult.setSingleStep(0.1)
+        # form_layout.addRow("ATR Stop Multiplier:", self.atr_stop_mult)
         
         # Reward to risk
-        self.reward_r = QDoubleSpinBox()
-        self.reward_r.setRange(0.5, 20.0)
-        self.reward_r.setValue(2.0)
-        self.reward_r.setSingleStep(0.1)
-        self.reward_r.setSuffix(" R")
-        form_layout.addRow("Reward:Risk Ratio:", self.reward_r)
+        # self.reward_r = QDoubleSpinBox()
+        # self.reward_r.setRange(0.5, 20.0)
+        # self.reward_r.setValue(2.0)
+        # self.reward_r.setSingleStep(0.1)
+        # self.reward_r.setSuffix(" R")
+        # form_layout.addRow("Reward:Risk Ratio:", self.reward_r)
         
         # Max hold
-        self.max_hold = QSpinBox()
-        self.max_hold.setRange(10, 1000)
-        self.max_hold.setValue(96)
-        self.max_hold.setSuffix(" bars")
-        form_layout.addRow("Max Hold Period:", self.max_hold)
+        # self.max_hold = QSpinBox()
+        # self.max_hold.setRange(10, 1000)
+        # self.max_hold.setValue(96)
+        # self.max_hold.setSuffix(" bars")
+        # form_layout.addRow("Max Hold Period:", self.max_hold)
         
         # Fees
         self.fee_bp = QDoubleSpinBox()
@@ -530,32 +374,7 @@ class SettingsDialog(QDialog):
     
     def load_from_settings(self):
         """Load UI values from saved settings."""
-        self._loading_settings = True  # Prevent auto-adjust during load
-        
-        # Timeframe
-        tf_key = f"{settings.timeframe}{settings.timeframe_unit[0]}"  # e.g., "15m"
-        for i in range(self.timeframe_combo.count()):
-            if self.timeframe_combo.itemData(i) == tf_key:
-                self.timeframe_combo.setCurrentIndex(i)
-                break
-        
-        # Data download
-        try:
-            from_parts = settings.last_date_from.split('-')
-            self.date_from.setDate(QDate(int(from_parts[0]), int(from_parts[1]), int(from_parts[2])))
-        except:
-            pass
-        
-        try:
-            to_parts = settings.last_date_to.split('-')
-            self.date_to.setDate(QDate(int(to_parts[0]), int(to_parts[1]), int(to_parts[2])))
-        except:
-            pass
-        
         # Backtest parameters
-        self.atr_stop_mult.setValue(settings.backtest_atr_stop_mult)
-        self.reward_r.setValue(settings.backtest_reward_r)
-        self.max_hold.setValue(settings.backtest_max_hold)
         self.fee_bp.setValue(settings.backtest_fee_bp)
         self.slippage_bp.setValue(settings.backtest_slippage_bp)
 
@@ -587,7 +406,6 @@ class SettingsDialog(QDialog):
         self.show_volume.setChecked(settings.chart_volume)
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
-        # show_exits removed - now integrated into show_entries (trade balls)
         
         # Acceleration settings (NEW)
         accel_mode = getattr(settings, 'acceleration_mode', 'multicore')
@@ -599,90 +417,8 @@ class SettingsDialog(QDialog):
         self.cpu_workers.setValue(getattr(settings, 'cpu_workers', self.cpu_workers.value()))
         self.gpu_batch_size.setValue(getattr(settings, 'gpu_batch_size', 512))  # Default 512 for better GPU utilization
         self.gpu_memory_fraction.setValue(getattr(settings, 'gpu_memory_fraction', 0.85))
-        
-        self._loading_settings = False  # Re-enable auto-adjust
     
-    def on_timeframe_changed(self, index):
-        """Handle timeframe change and optionally auto-adjust parameters."""
-        if self._loading_settings:
-            return  # Skip during initial load
-        
-        if not self.auto_adjust_params.isChecked():
-            return  # User disabled auto-adjust
-        
-        # Get selected timeframe
-        tf_key = self.timeframe_combo.currentData()
-        mult, unit, label = TIMEFRAMES[tf_key]
-        
-        # Map to Timeframe enum
-        tf_map = {
-            "1m": Timeframe.m1,
-            "3m": Timeframe.m3,
-            "5m": Timeframe.m5,
-            "10m": Timeframe.m10,
-            "15m": Timeframe.m15,
-            "30m": Timeframe.m30,
-            "60m": Timeframe.m60,
-            "1h": Timeframe.m60,
-        }
-        tf = tf_map.get(tf_key, Timeframe.m15)
-        
-        # Get defaults for this timeframe
-        try:
-            config = get_defaults_for_timeframe(tf)
-            bar_counts = config.get_bar_counts()
-            
-            # Ask user for confirmation (only for backtest params now)
-            reply = QMessageBox.question(
-                self,
-                "Auto-Adjust Parameters",
-                f"<h3>Adjust parameters for {label} timeframe?</h3>"
-                f"<p>Current timeframe requires different parameter values to maintain "
-                f"consistent time periods.</p>"
-                f"<h4>Proposed adjustments:</h4>"
-                f"<table>"
-                f"<tr><td><b>Max Hold:</b></td><td>{self.max_hold.value()} bars → {bar_counts['max_hold_bars']} bars</td><td>({config.max_hold_minutes//60} hours)</td></tr>"
-                f"</table>"
-                f"<p><b>Note:</b> Strategy parameters are now managed in the main window.</p>"
-                f"<p><b>Click Yes</b> to apply backtest adjustments.<br>"
-                f"<b>Click No</b> to keep current values.</p>",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            
-            if reply == QMessageBox.Yes:
-                # Apply backtest adjustments only
-                self.max_hold.setValue(bar_counts['max_hold_bars'])
-                
-                # Also adjust costs if significantly different
-                if config.fee_bp != self.fee_bp.value() or config.slippage_bp != self.slippage_bp.value():
-                    self.fee_bp.setValue(config.fee_bp)
-                    self.slippage_bp.setValue(config.slippage_bp)
-                
-                QMessageBox.information(
-                    self,
-                    "Parameters Adjusted",
-                    f"✓ Backtest parameters adjusted for {label} timeframe.\n\n"
-                    f"Strategy parameters are managed in the main window.\n"
-                    f"Remember to save settings before closing!"
-                )
-            else:
-                QMessageBox.warning(
-                    self,
-                    "Parameters Not Adjusted",
-                    "⚠️ Using inappropriate parameters for this timeframe may lead to:\n"
-                    "- Poor signal quality\n"
-                    "- Inconsistent backtest results\n"
-                    "- Failed optimizations\n\n"
-                    "Consider using time-based parameters or enabling auto-adjust.\n"
-                    "See TIMEFRAME_SCALING_GUIDE.md for details."
-                )
-        
-        except Exception as e:
-            print(f"Error auto-adjusting parameters: {e}")
-            import traceback
-            traceback.print_exc()
-    
+
     def create_acceleration_tab(self):
         """Create acceleration settings tab."""
         widget = QWidget()
@@ -858,24 +594,8 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         """Save all settings to .env file."""
         try:
-            # Get timeframe
-            tf_key = self.timeframe_combo.currentData()
-            mult, unit, _ = TIMEFRAMES[tf_key]
-            
             settings_dict = {
-                # Timeframe
-                'timeframe': str(mult),
-                'timeframe_unit': unit,
-                
-                # Last download
-                'last_ticker': 'X:ADAUSD',
-                'last_date_from': self.date_from.date().toString("yyyy-MM-dd"),
-                'last_date_to': self.date_to.date().toString("yyyy-MM-dd"),
-                
                 # Backtest
-                'backtest_atr_stop_mult': self.atr_stop_mult.value(),
-                'backtest_reward_r': self.reward_r.value(),
-                'backtest_max_hold': self.max_hold.value(),
                 'backtest_fee_bp': self.fee_bp.value(),
                 'backtest_slippage_bp': self.slippage_bp.value(),
                 
@@ -935,156 +655,7 @@ class SettingsDialog(QDialog):
                 f"Failed to save settings:\n{str(e)}"
             )
     
-    async def download_data(self):
-        """Download data from Polygon.io with progress updates."""
-        try:
-            # Validate API key
-            if not settings.polygon_api_key:
-                QMessageBox.warning(
-                    self,
-                    "API Key Missing",
-                    "Please set POLYGON_API_KEY in your .env file"
-                )
-                return
-            
-            # Get dates
-            from_date = self.date_from.date().toString("yyyy-MM-dd")
-            to_date = self.date_to.date().toString("yyyy-MM-dd")
-            
-            # Get timeframe
-            tf_key = self.timeframe_combo.currentData()
-            mult, unit, label = TIMEFRAMES[tf_key]
 
-            tf_map = {
-                1: Timeframe.m1,
-                3: Timeframe.m3,
-                5: Timeframe.m5,
-                10: Timeframe.m10,
-                15: Timeframe.m15,
-                30: Timeframe.m30,
-                60: Timeframe.m60,
-            }
-            tf_enum = tf_map.get(mult)
-            if tf_enum is None:
-                QMessageBox.warning(
-                    self,
-                    "Unsupported Timeframe",
-                    "Selected timeframe is not yet supported in the main application.\n"
-                    "Defaulting to 15-minute timeframe for this download."
-                )
-                tf_enum = Timeframe.m15
-                mult = 15
-                unit = "minute"
-                label = "15 minutes"
-            
-            # Update UI
-            self.download_btn.setEnabled(False)
-            self.progress_bar.setRange(0, 1)
-            self.progress_bar.setValue(0)
-            
-            # Create provider
-            if not self.dp:
-                self.dp = DataProvider()
-
-            # Estimate download effort for the requested timeframe
-            download_estimate = self.dp.estimate_download(from_date, to_date, mult, unit)
-
-            def format_bars(current: int, total: int | None) -> str:
-                if total and total > 0:
-                    return f"{current:,}/{total:,}"
-                return f"{current:,}"
-
-            self.progress_bar.setRange(0, max(download_estimate.pages, 1))
-            self.progress_bar.setValue(0)
-            est_time_text = self.format_duration(download_estimate.seconds_total)
-            self.progress_label.setText(
-                "Free tier: 5 API calls/min.\n"
-                f"Downloading ADA data ({label}) {from_date} → {to_date}.\n"
-                f"Estimated {download_estimate.pages} request(s) (~{est_time_text})."
-            )
-
-            async def on_progress(progress):
-                total_pages = max(progress.total_pages, 1)
-                if self.progress_bar.maximum() != total_pages:
-                    self.progress_bar.setRange(0, total_pages)
-
-                if progress.page == 0:
-                    return
-
-                self.progress_bar.setValue(progress.page)
-
-                remaining_text = (
-                    f"≈ {self.format_duration(progress.seconds_remaining)} remaining"
-                    if progress.seconds_remaining > 0
-                    else "Finalizing..."
-                )
-
-                bars_text = format_bars(
-                    progress.items_received,
-                    progress.estimated_total_items,
-                )
-
-                self.progress_label.setText(
-                    f"Request {progress.page}/{total_pages} complete "
-                    f"| Bars fetched: {bars_text} | {remaining_text}"
-                )
-            
-            # Fetch data directly at requested timeframe (force fresh data)
-            df = await self.dp.fetch(
-                "X:ADAUSD",
-                tf_enum,
-                from_date,
-                to_date,
-                progress_callback=on_progress,
-                estimate=download_estimate,
-                force_download=True,
-            )
-            self.progress_bar.setValue(self.progress_bar.maximum())
-            
-            if len(df) == 0:
-                self.progress_label.setText("⚠ No data received. Check date range and API key.")
-                QMessageBox.warning(
-                    self,
-                    "No Data",
-                    "No data was returned. Please check:\n"
-                    "- Date range is valid\n"
-                    "- API key is correct\n"
-                    "- You haven't exceeded API quota"
-                )
-            else:
-                self.downloaded_data = df
-                self.progress_label.setText(
-                    f"✓ Downloaded {len(df)} bars ({label}) | "
-                    f"Range: {df.index[0]} to {df.index[-1]}"
-                )
-                self.progress_bar.setRange(0, 100)
-                self.progress_bar.setValue(100)
-                
-                # Auto-save settings after successful download
-                self.save_settings()
-                
-                # Emit signal
-                self.data_downloaded.emit(df)
-                
-                QMessageBox.information(
-                    self,
-                    "Download Complete",
-                    f"Successfully downloaded {len(df)} {label} bars\n"
-                    f"Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}\n\n"
-                    f"Settings have been auto-saved."
-                )
-        
-        except Exception as e:
-            self.progress_label.setText(f"✗ Error: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Download Error",
-                f"Failed to download data:\n{str(e)}"
-            )
-        
-        finally:
-            self.download_btn.setEnabled(True)
-    
     @staticmethod
     def format_duration(seconds: float) -> str:
         """Format seconds into a compact human-readable string."""
@@ -1108,17 +679,17 @@ class SettingsDialog(QDialog):
 
     def reset_backtest_params(self):
         """Reset backtest parameters to defaults."""
-        self.atr_stop_mult.setValue(0.7)
-        self.reward_r.setValue(2.0)
-        self.max_hold.setValue(96)
+        # self.atr_stop_mult.setValue(0.7)
+        # self.reward_r.setValue(2.0)
+        # self.max_hold.setValue(96)
         self.fee_bp.setValue(5.0)
         self.slippage_bp.setValue(5.0)
     
     def set_backtest_params(self, params: BacktestParams):
         """Update backtest tab controls from BacktestParams."""
-        self.atr_stop_mult.setValue(float(params.atr_stop_mult))
-        self.reward_r.setValue(float(params.reward_r))
-        self.max_hold.setValue(int(params.max_hold))
+        # self.atr_stop_mult.setValue(float(params.atr_stop_mult))
+        # self.reward_r.setValue(float(params.reward_r))
+        # self.max_hold.setValue(int(params.max_hold))
         self.fee_bp.setValue(float(params.fee_bp))
         self.slippage_bp.setValue(float(params.slippage_bp))
 
@@ -1141,10 +712,12 @@ class SettingsDialog(QDialog):
         self.adam_epsilon_stability.setValue(1e-8)
     
     def get_timeframe(self):
-        """Get selected timeframe as (multiplier, unit) tuple."""
-        tf_key = self.timeframe_combo.currentData()
-        mult, unit, _ = TIMEFRAMES[tf_key]
-        return mult, unit
+        """Get selected timeframe as (multiplier, unit) tuple.
+        
+        Note: Timeframe is now managed in the main window.
+        Returns default 15m for backwards compatibility.
+        """
+        return 15, "minute"
     
     def get_strategy_params(self):
         """Get strategy parameters - now returns defaults since params are managed in main window."""
@@ -1155,9 +728,9 @@ class SettingsDialog(QDialog):
     def get_backtest_params(self):
         """Get backtest parameters from UI."""
         return BacktestParams(
-            atr_stop_mult=self.atr_stop_mult.value(),
-            reward_r=self.reward_r.value(),
-            max_hold=self.max_hold.value(),
+            # atr_stop_mult=self.atr_stop_mult.value(),
+            # reward_r=self.reward_r.value(),
+            # max_hold=self.max_hold.value(),
             fee_bp=self.fee_bp.value(),
             slippage_bp=self.slippage_bp.value()
         )
@@ -1173,13 +746,6 @@ class SettingsDialog(QDialog):
             'volume': self.show_volume.isChecked(),
             'signals': self.show_signals.isChecked(),
             'entries': self.show_entries.isChecked(),
-            # 'exits' not used anymore - trade balls show both entry and exit
-            'fib_retracements': self.show_fib_retracements.isChecked(),
-            'fib_0382': self.show_fib_0382.isChecked(),
-            'fib_0500': self.show_fib_0500.isChecked(),
-            'fib_0618': self.show_fib_0618.isChecked(),
-            'fib_0786': self.show_fib_0786.isChecked(),
-            'fib_1000': self.show_fib_1000.isChecked(),
         }
     
     async def cleanup(self):

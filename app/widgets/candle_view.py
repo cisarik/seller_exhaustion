@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Optional
 import pandas as pd
 import numpy as np
@@ -8,13 +9,17 @@ from PySide6.QtWidgets import (
     QHeaderView, QGroupBox, QFileDialog, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QBrush
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 from pyqtgraph import InfiniteLine, TextItem
 from strategy.seller_exhaustion import SellerParams, build_features
 from indicators.local import sma, rsi, macd
 from core.models import Timeframe
+from core.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 # Fibonacci level colors (rainbow gradient)
@@ -46,14 +51,16 @@ class CandlestickItem(pg.GraphicsObject):
             diffs = np.diff(self.x_values)
             step = float(np.median(diffs)) if len(diffs) > 0 else 1.0
             w = step * 0.8
-            
-            # DEBUG: Print spacing info
-            print(f"\n🕯️ CandlestickItem spacing:")
-            print(f"   Number of candles: {len(self.x_values)}")
-            print(f"   Median spacing: {step} seconds ({step/60:.1f} minutes)")
-            print(f"   Candle width: {w} seconds ({w/60:.1f} minutes)")
-            print(f"   First 3 x_values: {self.x_values[:3]}")
-            print(f"   First 3 diffs: {diffs[:3]}")
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Candlestick spacing | candles=%d | median_step=%.3f s | width=%.3f s | first_x=%s | first_diffs=%s",
+                    len(self.x_values),
+                    step,
+                    w,
+                    list(self.x_values[:3]),
+                    list(diffs[:3]),
+                )
         else:
             w = 0.6
 
@@ -143,21 +150,70 @@ class CandleChartWidget(QWidget):
         self.plot_widget.setBackground('#0f1a12')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Price', color='#e8f5e9')
-        self.plot_widget.setLabel('bottom', 'Time', color='#e8f5e9')
+        self.plot_widget.setLabel('bottom', '', color='#e8f5e9')  # No label on x-axis
         chart_layout.addWidget(self.plot_widget)
-        
-        # Info label
-        self.info_label = QLabel("Load data to begin")
-        chart_layout.addWidget(self.info_label)
         
         splitter.addWidget(chart_widget)
         
-        # Bottom: Trade history table
-        self.trades_group = self.create_trades_section()
-        splitter.addWidget(self.trades_group)
+        # Bottom: Trade History Table
+        trades_widget = QWidget()
+        trades_layout = QVBoxLayout(trades_widget)
+        trades_layout.setContentsMargins(0, 0, 0, 0)
+        trades_layout.setSpacing(0)
         
-        # Set initial sizes (chart gets 70%, trade history gets 30%)
-        splitter.setSizes([700, 300])
+        self.trade_table = QTableWidget()
+        self.trade_table.setColumnCount(6)
+        self.trade_table.setHorizontalHeaderLabels(
+            ["Entry", "Exit", "Entry", "Exit", "PnL", "R"]
+        )
+        # Make table selectable by row (for trade detail feature)
+        self.trade_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.trade_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.trade_table.itemSelectionChanged.connect(self._on_trade_selected)
+        
+        # Set tooltips for headers
+        header_tooltips = {
+            0: "Entry time (date + time) - click row for trade detail",
+            1: "Exit time (date + time) - click row for trade detail",
+            2: "Entry price (contract price)",
+            3: "Exit price (contract price)",
+            4: "Profit/Loss in contract units (negative = loss)",
+            5: "R-Multiple: Risk:Reward ratio (1R = risked amount, 2R = 2x risked amount)"
+        }
+        for col, tooltip in header_tooltips.items():
+            self.trade_table.horizontalHeaderItem(col).setToolTip(tooltip)
+        
+        self.trade_table.setMaximumHeight(200)
+        self.trade_table.horizontalHeader().setStretchLastSection(True)
+        self.trade_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0f1a12;
+                color: #e8f5e9;
+                border: 1px solid #2f5c39;
+            }
+            QTableWidget::item {
+                padding: 4px;
+            }
+            QHeaderView::section {
+                background-color: #000000;
+                color: #4caf50;
+                padding: 4px;
+                border: 1px solid #2f5c39;
+                font-weight: bold;
+            }
+        """)
+        
+        # Set column widths - Entry and Exit time columns need to be wider for full datetime display
+        self.trade_table.setColumnWidth(0, 160)  # Entry time column - "2025-01-17 13:12"
+        self.trade_table.setColumnWidth(1, 160)  # Exit time column - "2025-01-17 13:12"
+        self.trade_table.setColumnWidth(2, 90)   # Entry price
+        self.trade_table.setColumnWidth(3, 90)   # Exit price
+        self.trade_table.setColumnWidth(4, 90)   # PnL
+        self.trade_table.setColumnWidth(5, 70)   # R
+        
+        trades_layout.addWidget(self.trade_table)
+        
+        splitter.addWidget(trades_widget)
         
         layout.addWidget(splitter)
         
@@ -225,14 +281,10 @@ class CandleChartWidget(QWidget):
     def set_backtest_result(self, result):
         """Set backtest results and re-render with trade markers."""
         self.backtest_result = result
-        if self.feats is not None:
-            self.render_candles(self.feats, result)
-        
-        # Update trade table
         if result and 'trades' in result:
             self.update_trade_table(result['trades'])
-        else:
-            self.update_trade_table(None)
+        if self.feats is not None:
+            self.render_candles(self.feats, result)
     
     def render_candles(self, df: pd.DataFrame, backtest_result=None):
         """Render candlesticks, indicators, and trade markers."""
@@ -242,21 +294,25 @@ class CandleChartWidget(QWidget):
         self.feats = df
         
         # DEBUG: Print data info
-        print(f"\n📊 Rendering chart:")
-        print(f"   Total bars: {len(df)}")
-        print(f"   Date range: {df.index[0]} to {df.index[-1]}")
-        print(f"   Timeframe: {self.tf.value}")
-        print(f"   Columns: {list(df.columns)}")
+        logger.debug(
+            "Render chart | bars=%d | range=%s -> %s | timeframe=%s | columns=%s",
+            len(df),
+            df.index[0],
+            df.index[-1],
+            self.tf.value,
+            list(df.columns),
+        )
         
         # Check actual spacing between bars
-        if len(df) > 1:
+        if len(df) > 1 and logger.isEnabledFor(logging.DEBUG):
             time_diffs = df.index.to_series().diff()[1:6]  # First 5 differences
-            print(f"   First 5 time deltas:")
-            for i, td in enumerate(time_diffs):
-                print(f"     {i+1}: {td} ({td.total_seconds()/60:.0f} minutes)")
+            formatted_diffs = [
+                f"{td} ({td.total_seconds()/60:.0f} minutes)" for td in time_diffs
+            ]
+            logger.debug("First 5 time deltas: %s", formatted_diffs)
             
             median_minutes = df.index.to_series().diff().median().total_seconds() / 60
-            print(f"   Median bar spacing: {median_minutes:.0f} minutes")
+            logger.debug("Median bar spacing: %.0f minutes", median_minutes)
         
         # Sample if too many candles (for performance)
         # DISABLED: User wants to see all data
@@ -273,8 +329,14 @@ class CandleChartWidget(QWidget):
         epoch_seconds = (df.index.view('int64') // 1_000_000_000).astype(np.int64)
         self._epoch_seconds = epoch_seconds
         
-        print(f"   First epoch second: {epoch_seconds[0]} ({pd.Timestamp(epoch_seconds[0], unit='s', tz='UTC')})")
-        print(f"   Last epoch second: {epoch_seconds[-1]} ({pd.Timestamp(epoch_seconds[-1], unit='s', tz='UTC')})")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Epoch range: %s (%s) -> %s (%s)",
+                epoch_seconds[0],
+                pd.Timestamp(epoch_seconds[0], unit='s', tz='UTC'),
+                epoch_seconds[-1],
+                pd.Timestamp(epoch_seconds[-1], unit='s', tz='UTC'),
+            )
 
         # Create candlestick item drawn in epoch-seconds X coordinates for proper DateAxis labeling
         candles = CandlestickItem(df[['open', 'high', 'low', 'close']], x_values=epoch_seconds)
@@ -333,12 +395,94 @@ class CandleChartWidget(QWidget):
         if not hasattr(self.plot_widget.plotItem, 'legend') or self.plot_widget.plotItem.legend is None:
             self.plot_widget.addLegend()
     
+    def update_trade_table(self, trades: Optional[pd.DataFrame]):
+        """Update trade history table with backtest results."""
+        self.trade_table.setRowCount(0)
+        self.selected_trade_idx = None  # Reset selection
+        
+        if trades is None or len(trades) == 0:
+            return
+        
+        self.trade_table.setRowCount(len(trades))
+        
+        for i, (idx, trade) in enumerate(trades.iterrows()):
+            # Entry Time - full datetime format: "2025-01-17 13:12"
+            entry_time = pd.Timestamp(trade['entry_ts']).strftime('%Y-%m-%d %H:%M') if 'entry_ts' in trade else ""
+            self.trade_table.setItem(i, 0, QTableWidgetItem(entry_time))
+            
+            # Exit Time - full datetime format: "2025-01-17 13:12"
+            exit_time = pd.Timestamp(trade['exit_ts']).strftime('%Y-%m-%d %H:%M') if 'exit_ts' in trade else ""
+            self.trade_table.setItem(i, 1, QTableWidgetItem(exit_time))
+            
+            # Entry Price
+            entry_price = f"{trade.get('entry', 0):.4f}"
+            self.trade_table.setItem(i, 2, QTableWidgetItem(entry_price))
+            
+            # Exit Price
+            exit_price = f"{trade.get('exit', 0):.4f}"
+            self.trade_table.setItem(i, 3, QTableWidgetItem(exit_price))
+            
+            # PnL (color-coded)
+            pnl = trade.get('pnl', 0)
+            pnl_text = f"{pnl:.6f}"
+            pnl_item = QTableWidgetItem(pnl_text)
+            
+            if pnl > 0:
+                pnl_item.setForeground(QBrush(QColor('#4caf50')))  # Green
+            elif pnl < 0:
+                pnl_item.setForeground(QBrush(QColor('#f44336')))  # Red
+            else:
+                pnl_item.setForeground(QBrush(QColor('#ffeb3b')))  # Yellow
+            
+            self.trade_table.setItem(i, 4, pnl_item)
+            
+            # R-Multiple
+            r_multiple = f"{trade.get('R', 0):.2f}"
+            self.trade_table.setItem(i, 5, QTableWidgetItem(r_multiple))
+    
+    def _on_trade_selected(self):
+        """Handle trade row selection - update chart with trade detail markers."""
+        selected_rows = self.trade_table.selectionModel().selectedRows()
+        
+        if len(selected_rows) == 0:
+            # No selection
+            self.selected_trade_idx = None
+            logger.debug("Trade detail cleared")
+        else:
+            # Get selected row index
+            row_idx = selected_rows[0].row()
+            self.selected_trade_idx = row_idx
+            
+            # Get the selected trade from backtest results
+            if self.backtest_result and 'trades' in self.backtest_result:
+                trades = self.backtest_result['trades']
+                if row_idx < len(trades):
+                    trade = trades.iloc[row_idx]
+                    entry_time = pd.Timestamp(trade['entry_ts']).strftime('%Y-%m-%d %H:%M')
+                    exit_time = pd.Timestamp(trade['exit_ts']).strftime('%Y-%m-%d %H:%M')
+                    logger.debug(
+                        "Trade detail #%d | Entry %s @ %.4f | Exit %s @ %.4f | PnL=%.6f | R=%.2f",
+                        row_idx + 1,
+                        entry_time,
+                        trade['entry'],
+                        exit_time,
+                        trade['exit'],
+                        trade['pnl'],
+                        trade['R'],
+                    )
+        
+        # Re-render chart with updated selection
+        if self.feats is not None:
+            self.render_candles(self.feats, self.backtest_result)
+    
     def render_trade_balls(self, trades: pd.DataFrame, df: pd.DataFrame):
         """
         Render trades as BALLS positioned at entry points:
         - Green balls for profitable trades (size proportional to profit)
         - Red balls for losing trades (size proportional to loss)
-        - WHITE ball for the currently selected trade
+        - SEMI-TRANSPARENT if selected (arrows rendered on top)
+        
+        For selected trade, render green UP arrow at entry and red DOWN arrow at exit.
         
         Args:
             trades: DataFrame of all trades
@@ -353,7 +497,9 @@ class CandleChartWidget(QWidget):
         # Normalize PnL to reasonable ball sizes (20-80 range)
         max_abs_pnl = max(abs(pnl_values.max()), abs(pnl_values.min()), 0.01)
         
-        ball_data = []
+        normal_balls = []  # Full opacity
+        selected_ball = None  # Semi-transparent
+        
         for i, (_, trade) in enumerate(trades.iterrows()):
             entry_ts = pd.Timestamp(trade['entry_ts'])
             
@@ -369,13 +515,8 @@ class CandleChartWidget(QWidget):
             pnl = trade['pnl']
             size = (20 + (abs(pnl) / max_abs_pnl) * 60) * 0.33  # Range: 6.6-26.4 (1/3 of original)
             
-            # Determine color
-            if i == self.selected_trade_idx:
-                # Selected trade = WHITE with black border
-                color = '#FFFFFF'
-                border_color = '#000000'
-                border_width = 3
-            elif pnl > 0:
+            # Determine color based on profit/loss
+            if pnl > 0:
                 # Profit = GREEN
                 color = '#4CAF50'
                 border_color = '#2E7D32'
@@ -386,186 +527,141 @@ class CandleChartWidget(QWidget):
                 border_color = '#C62828'
                 border_width = 2
             
-            ball_data.append({
+            ball_info = {
                 'x': entry_x,
                 'y': entry_y,
                 'size': size,
                 'color': color,
                 'border_color': border_color,
-                'border_width': border_width
-            })
+                'border_width': border_width,
+                'trade': trade
+            }
+            
+            # Separate selected trade from others
+            if i == self.selected_trade_idx:
+                selected_ball = ball_info
+            else:
+                normal_balls.append(ball_info)
         
-        if not ball_data:
-            print("⚠ No valid trade balls to render")
-            return
+        # Render normal (non-selected) balls with full opacity
+        if normal_balls:
+            x_coords = [b['x'] for b in normal_balls]
+            y_coords = [b['y'] for b in normal_balls]
+            sizes = [b['size'] for b in normal_balls]
+            
+            # Create brushes and pens for each ball
+            brushes = [pg.mkBrush(b['color']) for b in normal_balls]
+            pens = [pg.mkPen(b['border_color'], width=b['border_width']) for b in normal_balls]
+            
+            scatter = pg.ScatterPlotItem(
+                x=x_coords,
+                y=y_coords,
+                size=sizes,
+                pen=pens,
+                brush=brushes,
+                symbol='o',
+                pxMode=True  # Size in pixels
+            )
+            self.plot_widget.addItem(scatter)
         
-        # Render all balls as scatter plot
-        x_coords = [b['x'] for b in ball_data]
-        y_coords = [b['y'] for b in ball_data]
-        sizes = [b['size'] for b in ball_data]
+        # Render selected ball with SEMI-TRANSPARENT (50% opacity)
+        if selected_ball:
+            from PySide6.QtGui import QColor
+            
+            # Create semi-transparent color for selected ball (50% = 128/255)
+            selected_color = QColor(selected_ball['color'])
+            selected_color.setAlpha(128)
+            
+            selected_border = QColor(selected_ball['border_color'])
+            selected_border.setAlpha(128)
+            
+            brush = pg.mkBrush(selected_color)
+            pen = pg.mkPen(selected_border, width=selected_ball['border_width'])
+            
+            scatter = pg.ScatterPlotItem(
+                x=[selected_ball['x']],
+                y=[selected_ball['y']],
+                size=[selected_ball['size']],
+                pen=pen,
+                brush=brush,
+                symbol='o',
+                pxMode=True
+            )
+            self.plot_widget.addItem(scatter)
+            
+            # Render arrows on top of semi-transparent ball
+            self._render_trade_detail_arrows(selected_ball['trade'], df)
         
-        # Create brushes and pens for each ball
-        brushes = [pg.mkBrush(b['color']) for b in ball_data]
-        pens = [pg.mkPen(b['border_color'], width=b['border_width']) for b in ball_data]
-        
-        scatter = pg.ScatterPlotItem(
-            x=x_coords,
-            y=y_coords,
-            size=sizes,
-            pen=pens,
-            brush=brushes,
-            symbol='o',
-            pxMode=True  # Size in pixels
+        selected_str = (
+            f" (#{self.selected_trade_idx + 1} semi-transparent with arrows)"
+            if self.selected_trade_idx is not None
+            else ""
         )
-        self.plot_widget.addItem(scatter)
-        
-        selected_str = f" (#{self.selected_trade_idx + 1} highlighted)" if self.selected_trade_idx is not None else ""
-        print(f"✓ Rendered {len(ball_data)} trade balls{selected_str}")
-
+        logger.debug("Rendered %d trade balls%s", len(normal_balls) + (1 if selected_ball else 0), selected_str)
     
-    def create_trades_section(self):
-        """Create trade list table."""
-        group = QGroupBox("Trade History")
-        layout = QVBoxLayout()
+    def _render_trade_detail_arrows(self, trade: pd.Series, df: pd.DataFrame):
+        """
+        Render entry and exit arrows for selected trade:
+        - Small GREEN triangle pointing UP at entry price
+        - Small RED triangle pointing DOWN at exit price
+        - Rendered ON TOP of the chart (after balls)
         
-        self.trades_table = QTableWidget()
-        self.trades_table.setColumnCount(9)
-        self.trades_table.setHorizontalHeaderLabels([
-            "#", "Entry Time", "Exit Time", "Entry $", "Exit $",
-            "PnL $", "R-Multiple", "Bars", "Exit Reason"
-        ])
+        Args:
+            trade: Single trade row from backtest results
+            df: Full OHLCV DataFrame for timestamp lookups
+        """
+        entry_ts = pd.Timestamp(trade['entry_ts'])
+        exit_ts = pd.Timestamp(trade['exit_ts'])
         
-        # Set column resize modes
-        header = self.trades_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        entry_x = int(entry_ts.value // 1_000_000_000)
+        entry_y = trade['entry']
         
-        self.trades_table.setAlternatingRowColors(True)
-        self.trades_table.setSelectionBehavior(QTableWidget.SelectRows)
+        exit_x = int(exit_ts.value // 1_000_000_000)
+        exit_y = trade['exit']
         
-        # Connect selection signal
-        self.trades_table.itemSelectionChanged.connect(self.on_trade_selected)
-        
-        layout.addWidget(self.trades_table)
-        
-        group.setLayout(layout)
-        return group
-    
-    def update_trade_table(self, trades_df):
-        """Update trade list table."""
-        self.trades_table.setRowCount(0)
-        
-        if trades_df is None or len(trades_df) == 0:
-            return
-        
-        self.trades_table.setRowCount(len(trades_df))
-        
-        for i, (idx, trade) in enumerate(trades_df.iterrows()):
-            # Trade number
-            self.trades_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            
-            # Entry time
-            entry_time = str(trade['entry_ts'])[:19]
-            self.trades_table.setItem(i, 1, QTableWidgetItem(entry_time))
-            
-            # Exit time
-            exit_time = str(trade['exit_ts'])[:19]
-            self.trades_table.setItem(i, 2, QTableWidgetItem(exit_time))
-            
-            # Entry price
-            entry_item = QTableWidgetItem(f"{trade['entry']:.4f}")
-            entry_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.trades_table.setItem(i, 3, entry_item)
-            
-            # Exit price
-            exit_item = QTableWidgetItem(f"{trade['exit']:.4f}")
-            exit_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.trades_table.setItem(i, 4, exit_item)
-            
-            # PnL
-            pnl = trade['pnl']
-            pnl_item = QTableWidgetItem(f"{pnl:.4f}")
-            pnl_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if pnl > 0:
-                pnl_item.setForeground(QColor('#4caf50'))
-            else:
-                pnl_item.setForeground(QColor('#f44336'))
-            self.trades_table.setItem(i, 5, pnl_item)
-            
-            # R-multiple
-            r = trade['R']
-            r_item = QTableWidgetItem(f"{r:.2f}R")
-            r_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if r > 0:
-                r_item.setForeground(QColor('#4caf50'))
-            else:
-                r_item.setForeground(QColor('#f44336'))
-            self.trades_table.setItem(i, 6, r_item)
-            
-            # Bars held
-            bars = trade.get('bars_held', '--')
-            bars_item = QTableWidgetItem(str(bars))
-            bars_item.setTextAlignment(Qt.AlignCenter)
-            self.trades_table.setItem(i, 7, bars_item)
-            
-            # Exit reason
-            reason = trade['reason']
-            reason_item = QTableWidgetItem(reason.upper())
-            reason_item.setTextAlignment(Qt.AlignCenter)
-            if reason == 'tp':
-                reason_item.setForeground(QColor('#4caf50'))
-            elif reason in ['stop', 'stop_gap']:
-                reason_item.setForeground(QColor('#f44336'))
-            else:
-                reason_item.setForeground(QColor('#ff9800'))
-            self.trades_table.setItem(i, 8, reason_item)
-    
-    def on_trade_selected(self):
-        """Handle trade selection from table - highlight selected trade ball."""
-        selected_rows = self.trades_table.selectedIndexes()
-        
-        if not selected_rows:
-            # No selection - clear highlight
-            self.selected_trade_idx = None
-        else:
-            # Get the row index (first column of selected row)
-            row_idx = selected_rows[0].row()
-            self.selected_trade_idx = row_idx
-        
-        # Re-render balls only (much faster than full chart re-render)
-        if self.backtest_result and 'trades' in self.backtest_result:
-            trades = self.backtest_result['trades']
-            if len(trades) > 0 and self.feats is not None:
-                original_df = self.feats[['open', 'high', 'low', 'close', 'volume']].copy()
-                # Remove old trade balls
-                items_to_remove = [item for item in self.plot_widget.items() if isinstance(item, pg.ScatterPlotItem)]
-                for item in items_to_remove:
-                    self.plot_widget.removeItem(item)
-                # Re-render with new selection
-                self.render_trade_balls(trades, original_df)
-    
-    def export_trades(self):
-        """Export trades to CSV file."""
-        if self.backtest_result is None or len(self.backtest_result.get('trades', [])) == 0:
-            return
-        
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Trades",
-            "trades.csv",
-            "CSV Files (*.csv);;All Files (*)"
+        # Entry arrow: GREEN triangle pointing UP at entry price
+        # Using 't1' for up-pointing triangle
+        entry_scatter = pg.ScatterPlotItem(
+            x=[entry_x],
+            y=[entry_y],
+            size=35,  # Larger size for visibility
+            pen=pg.mkPen('#00FF00', width=2),  # Bright green outline
+            brush=pg.mkBrush('#00FF00'),  # Bright green fill
+            symbol='t1',  # UP triangle
+            pxMode=True,
+            zValue=1000  # Ensure it's drawn on top
         )
+        self.plot_widget.addItem(entry_scatter)
         
-        if filename:
-            try:
-                self.backtest_result['trades'].to_csv(filename, index=False)
-                print(f"✓ Exported {len(self.backtest_result['trades'])} trades to {filename}")
-            except Exception as e:
-                print(f"Error exporting trades: {e}")
+        # Exit arrow: RED triangle pointing DOWN at exit price
+        # Using 't3' for down-pointing triangle
+        exit_scatter = pg.ScatterPlotItem(
+            x=[exit_x],
+            y=[exit_y],
+            size=35,  # Larger size for visibility
+            pen=pg.mkPen('#FF0000', width=2),  # Bright red outline
+            brush=pg.mkBrush('#FF0000'),  # Bright red fill
+            symbol='t3',  # DOWN triangle
+            pxMode=True,
+            zValue=1000  # Ensure it's drawn on top
+        )
+        self.plot_widget.addItem(exit_scatter)
+        
+        # Add text labels for entry and exit times (slightly offset for visibility)
+        entry_label = TextItem(text=entry_ts.strftime('%H:%M'), color='#00FF00')
+        entry_label.setAnchor((0.5, 1))  # Below the arrow
+        entry_label.setPos(entry_x, entry_y - 0.005)
+        self.plot_widget.addItem(entry_label)
+        
+        exit_label = TextItem(text=exit_ts.strftime('%H:%M'), color='#FF0000')
+        exit_label.setAnchor((0.5, 0))  # Above the arrow
+        exit_label.setPos(exit_x, exit_y + 0.005)
+        self.plot_widget.addItem(exit_label)
+        
+        logger.debug(
+            "Rendered trade detail | Entry ↑ at %s @ %.4f | Exit ↓ at %s @ %.4f",
+            entry_ts.strftime('%Y-%m-%d %H:%M'),
+            entry_y,
+            exit_ts.strftime('%Y-%m-%d %H:%M'),
+            exit_y,
+        )

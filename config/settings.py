@@ -45,9 +45,6 @@ class Settings(BaseSettings):
     strategy_atr_window: int = 96
     
     # Backtest Parameters
-    backtest_atr_stop_mult: float = 0.7
-    backtest_reward_r: float = 2.0
-    backtest_max_hold: int = 96
     backtest_fee_bp: float = 5.0
     backtest_slippage_bp: float = 5.0
 

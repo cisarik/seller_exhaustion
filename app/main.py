@@ -13,12 +13,15 @@ try:
 except ImportError:
     HAS_QASYNC = False
 
+from core.logging_utils import configure_logging, get_logger
 from app.theme import DARK_FOREST_QSS
 from app.widgets.candle_view import CandleChartWidget
 from app.widgets.settings_dialog import SettingsDialog
 from app.widgets.stats_panel import StatsPanel
 from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
+from app.widgets.data_bar import DataBar
+from app.widgets.evolution_coach import EvolutionCoachWindow
 from strategy.seller_exhaustion import build_features, SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe
@@ -49,6 +52,9 @@ TIMEFRAME_META = {
 }
 
 
+logger = get_logger(__name__)
+
+
 class MainWindow(QMainWindow):
     """Main application window with toolbar, chart, and stats panel."""
     
@@ -63,6 +69,7 @@ class MainWindow(QMainWindow):
         self.current_tf = Timeframe.m15
         self.settings_dialog = None
         self.strategy_editor = None
+        self.evolution_coach_window: EvolutionCoachWindow | None = None
         self.data_provider = DataProvider(use_cache=True)
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
@@ -75,6 +82,18 @@ class MainWindow(QMainWindow):
         # Create toolbar
         self.create_toolbar()
         
+        # Create main central widget and layout
+        central_widget = QWidget()
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Add data bar at the top
+        self.data_bar = DataBar()
+        self.data_bar.download_requested.connect(self.on_data_bar_download_requested)
+        self.data_bar.timeframe_changed.connect(self.on_data_bar_timeframe_changed)
+        main_layout.addWidget(self.data_bar)
+        
         # Create main layout with 3-column splitter
         splitter = QSplitter(Qt.Horizontal)
         
@@ -82,13 +101,13 @@ class MainWindow(QMainWindow):
         self.chart_view = CandleChartWidget()
         splitter.addWidget(self.chart_view)
         
-        # Middle: Stats/Optimization panel
-        self.stats_panel = StatsPanel()
-        splitter.addWidget(self.stats_panel)
-        
-        # Right: Compact parameter editor
+        # Middle: Compact parameter editor (Seller-Exhaustion Entry)
         self.param_editor = CompactParamsEditor()
         splitter.addWidget(self.param_editor)
+        
+        # Right: Stats/Optimization panel (Performance Metrics with Optimize button in bottom right)
+        self.stats_panel = StatsPanel()
+        splitter.addWidget(self.stats_panel)
         
         # Connect stats panel to param editor
         self.stats_panel.set_param_editor(self.param_editor)
@@ -102,10 +121,14 @@ class MainWindow(QMainWindow):
         # Connect param changes to trigger re-calculation
         self.param_editor.params_changed.connect(self.on_params_changed)
         
-        # Set initial sizes (chart: 50%, stats: 30%, params: 20%)
-        splitter.setSizes([800, 480, 320])
+        # Set initial sizes: Chart 50%, Params 25%, Stats 25% (right panel with Optimize button bottom-right)
+        splitter.setSizes([800, 400, 400])
         
-        self.setCentralWidget(splitter)
+        # Add splitter to main layout
+        main_layout.addWidget(splitter, 1)  # Expand to fill space
+        
+        # Set the central widget
+        self.setCentralWidget(central_widget)
         
         # Hide the main window's status bar (we use the custom black status bar in chart view)
         self.statusBar().hide()
@@ -177,6 +200,12 @@ class MainWindow(QMainWindow):
         strategy_action.setToolTip("Edit strategy parameters and manage parameter sets")
         strategy_action.triggered.connect(self.show_strategy_editor)
         toolbar.addAction(strategy_action)
+
+        # Evolution Coach logs
+        coach_action = QAction("🧠 Evolution Coach", self)
+        coach_action.setToolTip("Open concise optimization logs for agent analysis")
+        coach_action.triggered.connect(self.show_evolution_coach)
+        toolbar.addAction(coach_action)
         
         toolbar.addSeparator()
         
@@ -217,6 +246,205 @@ class MainWindow(QMainWindow):
         help_action.triggered.connect(self.show_help)
         toolbar.addAction(help_action)
     
+    def on_data_bar_download_requested(self, from_date: str, to_date: str, tf_key: str):
+        """Handle download request from data bar."""
+        asyncio.create_task(self.download_data_from_bar(from_date, to_date, tf_key))
+    
+    def on_data_bar_timeframe_changed(self, tf_key: str):
+        """Handle timeframe change from data bar."""
+        # Map timeframe key to Timeframe enum
+        tf_map = {
+            "1m": Timeframe.m1,
+            "3m": Timeframe.m3,
+            "5m": Timeframe.m5,
+            "10m": Timeframe.m10,
+            "15m": Timeframe.m15,
+            "30m": Timeframe.m30,
+            "60m": Timeframe.m60,
+        }
+        
+        new_tf = tf_map.get(tf_key, Timeframe.m15)
+        if new_tf != self.current_tf:
+            self.current_tf = new_tf
+            self.chart_view.set_timeframe(new_tf)
+            self.param_editor.set_timeframe(new_tf)
+            
+            # Update status
+            self.chart_view.status_label.setText(f"Timeframe changed to {new_tf.value}")
+            
+            # Persist to settings
+            from config.settings import SettingsManager
+            tf_mult = int(tf_key.replace("m", "").replace("h", ""))
+            if "h" in tf_key:
+                tf_mult = int(tf_key.replace("h", "")) * 60
+            SettingsManager.save_to_env({"timeframe": str(tf_mult)})
+    
+    async def download_data_from_bar(self, from_date: str, to_date: str, tf_key: str):
+        """Download data from the data bar."""
+        try:
+            # Validate API key
+            if not settings.polygon_api_key:
+                QMessageBox.warning(
+                    self,
+                    "API Key Missing",
+                    "Please set POLYGON_API_KEY in your .env file"
+                )
+                return
+            
+            # Map timeframe key to enum
+            tf_map = {
+                "1m": Timeframe.m1,
+                "3m": Timeframe.m3,
+                "5m": Timeframe.m5,
+                "10m": Timeframe.m10,
+                "15m": Timeframe.m15,
+                "30m": Timeframe.m30,
+                "60m": Timeframe.m60,
+            }
+            
+            tf = tf_map.get(tf_key, Timeframe.m15)
+            mult_str = tf_key.replace("m", "").replace("h", "")
+            
+            # Get timeframe multiplier
+            if "h" in tf_key:
+                mult = int(mult_str) * 60
+                unit = "minute"
+            else:
+                mult = int(mult_str)
+                unit = "minute"
+            
+            # Update UI
+            self.data_bar.set_controls_enabled(False)
+            self.chart_view.show_action_progress(f"Downloading {tf_key} data...")
+            
+            # Create provider if needed
+            if not self.data_provider:
+                self.data_provider = DataProvider(use_cache=True)
+            
+            # Download data
+            def format_bars(current: int, total: int | None) -> str:
+                if total and total > 0:
+                    return f"{current:,}/{total:,}"
+                return f"{current:,}"
+            
+            async def on_progress(progress):
+                total_pages = max(progress.total_pages, 1)
+                percentage = (progress.page / total_pages * 100) if total_pages > 0 else 0
+                
+                if progress.page == 0:
+                    return
+                
+                remaining_text = (
+                    f"≈ {self._format_duration(progress.seconds_remaining)} remaining"
+                    if progress.seconds_remaining > 0
+                    else "Finalizing..."
+                )
+                
+                bars_text = format_bars(
+                    progress.items_received,
+                    progress.estimated_total_items,
+                )
+                
+                msg = f"Download: {percentage:.0f}% | {bars_text} bars | {remaining_text}"
+                self.chart_view.show_action_progress(msg)
+            
+            # Fetch data
+            df = await self.data_provider.fetch(
+                "X:ADAUSD",
+                tf,
+                from_date,
+                to_date,
+                progress_callback=on_progress,
+                force_download=False,
+            )
+            
+            if len(df) == 0:
+                QMessageBox.warning(
+                    self,
+                    "No Data",
+                    "No data was returned. Please check:\n"
+                    "- Date range is valid\n"
+                    "- API key is correct\n"
+                    "- You haven't exceeded API quota"
+                )
+                self.chart_view.hide_action_progress("Download failed")
+            else:
+                # Process the downloaded data
+                params, bt_params, _ = self.param_editor.get_params()
+                feats = build_features(df, params, tf)
+                
+                # Update state
+                self.current_data = feats
+                self.raw_data = df
+                self.current_tf = tf
+                self.current_ticker = "X:ADAUSD"
+                self.current_range = (str(feats.index[0].date()), str(feats.index[-1].date()))
+                
+                # Update chart
+                self.chart_view.feats = feats
+                self.chart_view.params = params
+                self.chart_view.set_indicator_config(self._indicator_config_from_settings())
+                self.chart_view.render_candles(feats)
+                
+                # Load parameters into param editor
+                self.param_editor.set_params(params, bt_params)
+                
+                # Pass data to stats panel
+                self.stats_panel.set_current_data(feats, tf, raw_data=df)
+                
+                # Enable backtest button
+                self.backtest_action.setEnabled(True)
+                
+                # Update status
+                signals = feats['exhaustion'].sum()
+                self.chart_view.status_label.setText(
+                    f"✓ Downloaded {len(feats)} bars | {signals} signals | Ready to backtest"
+                )
+                
+                # Persist settings
+                SettingsManager.save_to_env({
+                    'timeframe': str(mult),
+                    'last_date_from': from_date,
+                    'last_date_to': to_date,
+                    'last_ticker': 'X:ADAUSD',
+                })
+                
+                # Show success message
+                self.chart_view.hide_action_progress(f"✓ Downloaded {len(feats)} bars")
+        
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Download Error",
+                f"Failed to download data:\n{str(e)}"
+            )
+            self.chart_view.hide_action_progress("Download failed")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            self.data_bar.set_controls_enabled(True)
+    
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Format seconds into a compact human-readable string."""
+        if seconds <= 0:
+            return "under 1s"
+        
+        total_seconds = int(round(seconds))
+        minutes, sec = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        parts = []
+        
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if sec or not parts:
+            parts.append(f"{sec}s")
+        
+        return " ".join(parts)
+    
     def show_settings(self):
         """Show settings dialog."""
         if not self.settings_dialog:
@@ -253,7 +481,15 @@ class MainWindow(QMainWindow):
             self.strategy_editor_widget = editor
         
         self.strategy_editor.exec()
-    
+
+    def show_evolution_coach(self):
+        """Show the Evolution Coach log window."""
+        if self.evolution_coach_window is None:
+            self.evolution_coach_window = EvolutionCoachWindow(self)
+        self.evolution_coach_window.show()
+        self.evolution_coach_window.raise_()
+        self.evolution_coach_window.activateWindow()
+
     def on_data_downloaded(self, df):
         """Handle data download completion."""
         try:
@@ -319,12 +555,6 @@ class MainWindow(QMainWindow):
             signals = feats['exhaustion'].sum()
             self.chart_view.status_label.setText(
                 f"✓ Loaded {len(feats)} bars | {signals} signals detected | Ready to backtest"
-            )
-            
-            # Update info
-            self.chart_view.info_label.setText(
-                f"Date range: {feats.index[0]} to {feats.index[-1]}\n"
-                f"Signals detected: {signals}"
             )
             
         except Exception as e:
@@ -555,9 +785,6 @@ class MainWindow(QMainWindow):
                 'strategy_tr_z': seller_params.tr_z,
                 'strategy_cloc_min': seller_params.cloc_min,
                 'strategy_atr_window': seller_params.atr_window,
-                'backtest_atr_stop_mult': backtest_params.atr_stop_mult,
-                'backtest_reward_r': backtest_params.reward_r,
-                'backtest_max_hold': backtest_params.max_hold,
                 'backtest_fee_bp': backtest_params.fee_bp,
                 'backtest_slippage_bp': backtest_params.slippage_bp,
             }
@@ -771,14 +998,23 @@ class MainWindow(QMainWindow):
         from config.settings import SettingsManager
         
         try:
-            sizes = self.centralWidget().sizes()
-            settings_dict = {
-                'window_width': self.width(),
-                'window_height': self.height(),
-                'splitter_chart': sizes[0] if len(sizes) > 0 else 800,
-                'splitter_stats': sizes[1] if len(sizes) > 1 else 480,
-                'splitter_params': sizes[2] if len(sizes) > 2 else 320,
-            }
+            central_widget = self.centralWidget()
+            # The central widget is now a VBox with DataBar + splitter
+            splitter = central_widget.findChild(QSplitter)
+            if splitter:
+                sizes = splitter.sizes()
+                settings_dict = {
+                    'window_width': self.width(),
+                    'window_height': self.height(),
+                    'splitter_chart': sizes[0] if len(sizes) > 0 else 800,
+                    'splitter_params': sizes[1] if len(sizes) > 1 else 400,
+                    'splitter_stats': sizes[2] if len(sizes) > 2 else 400,
+                }
+            else:
+                settings_dict = {
+                    'window_width': self.width(),
+                    'window_height': self.height(),
+                }
             
             # Save chart view state if available
             if hasattr(self.chart_view, 'plot_widget'):
@@ -805,20 +1041,23 @@ class MainWindow(QMainWindow):
             if settings.window_width and settings.window_height:
                 self.resize(settings.window_width, settings.window_height)
             
-            # Restore 3-column splitter sizes
-            if hasattr(settings, 'splitter_chart') and hasattr(settings, 'splitter_stats') and hasattr(settings, 'splitter_params'):
-                self.centralWidget().setSizes([
+            # Restore 3-column splitter sizes (Chart, Params, Stats)
+            central_widget = self.centralWidget()
+            splitter = central_widget.findChild(QSplitter)
+            
+            if splitter and hasattr(settings, 'splitter_chart') and hasattr(settings, 'splitter_params') and hasattr(settings, 'splitter_stats'):
+                splitter.setSizes([
                     settings.splitter_chart,
-                    settings.splitter_stats,
-                    settings.splitter_params
+                    settings.splitter_params,
+                    settings.splitter_stats
                 ])
-            elif hasattr(settings, 'splitter_left') and hasattr(settings, 'splitter_right'):
+            elif splitter and hasattr(settings, 'splitter_left') and hasattr(settings, 'splitter_right'):
                 # Backwards compatibility: old 2-column layout
-                # Convert to 3-column by taking 20% from right side for params
+                # Convert to 3-column by splitting right side
                 left = settings.splitter_left
-                right = int(settings.splitter_right * 0.6)
-                params = int(settings.splitter_right * 0.4)
-                self.centralWidget().setSizes([left, right, params])
+                middle = int(settings.splitter_right * 0.5)
+                right = int(settings.splitter_right * 0.5)
+                splitter.setSizes([left, middle, right])
             
             # Note: Chart view range restored when data is loaded
         except Exception as e:
@@ -933,12 +1172,6 @@ class MainWindow(QMainWindow):
                 f"{signals} signals | Click 'Run Backtest' to see trades"
             )
 
-            self.chart_view.info_label.setText(
-                f"📊 {ticker} {self.current_tf.value} | "
-                f"Date range: {date_range}\n"
-                f"Signals: {signals} | Click 'Run Backtest' for trades"
-            )
-
             print(f"✓ Auto-loaded cached data: {len(feats)} bars ({self.current_tf.value}), {signals} signals")
             print(f"   Chart ready - Run backtest to see trades")
             
@@ -980,9 +1213,6 @@ class MainWindow(QMainWindow):
                 'strategy_atr_window': seller_params.atr_window,
                 
                 # Backtest parameters
-                'backtest_atr_stop_mult': bt_params.atr_stop_mult,
-                'backtest_reward_r': bt_params.reward_r,
-                'backtest_max_hold': bt_params.max_hold,
                 'backtest_fee_bp': bt_params.fee_bp,
                 'backtest_slippage_bp': bt_params.slippage_bp,
             }
@@ -1048,23 +1278,22 @@ class MainWindow(QMainWindow):
             )
             
             backtest_params = BacktestParams(
-                atr_stop_mult=settings.backtest_atr_stop_mult,
-                reward_r=settings.backtest_reward_r,
-                max_hold=settings.backtest_max_hold,
                 fee_bp=settings.backtest_fee_bp,
                 slippage_bp=settings.backtest_slippage_bp,
             )
             
             # Load into compact editor (will convert bars to minutes for display)
             self.param_editor.set_params(seller_params, backtest_params)
-            print("✓ Parameters loaded from .env")
+            logger.info("Parameters loaded from .env")
         except Exception as e:
-            print(f"Warning: Could not load parameters state: {e}")
+            logger.warning("Could not load parameters state: %s", e)
             # Parameters will remain at defaults if loading fails
 
 
 def main():
     """Main entry point for the UI application."""
+    configure_logging()
+
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_FOREST_QSS)
     
@@ -1080,8 +1309,8 @@ def main():
             loop.run_forever()
     else:
         # Fallback without qasync - use QTimer to run event loop
-        print("WARNING: qasync not available, async features may not work properly")
-        print("Install qasync for full functionality: poetry add qasync")
+        logger.warning("qasync not available, async features may not work properly")
+        logger.warning("Install qasync for full functionality: poetry add qasync")
         
         timer = QTimer()
         timer.start(100)

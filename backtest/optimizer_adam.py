@@ -25,6 +25,7 @@ from backtest.optimizer import (
     calculate_fitness,
     get_param_bounds_for_timeframe,
     INTEGER_PARAMS,
+    VALID_FIB_LEVELS,
 )
 from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams, Timeframe, FitnessConfig
@@ -95,7 +96,7 @@ def _evaluate_perturbed_parameter(
         idx += 1
     
     backtest_dict = {}
-    for key in ['atr_stop_mult', 'reward_r', 'max_hold', 'fee_bp', 'slippage_bp']:
+    for key in ['fib_swing_lookback', 'fib_swing_lookahead', 'fib_target_level', 'fee_bp', 'slippage_bp']:
         min_val, max_val = bounds[key]
         val = perturbed[idx] * (max_val - min_val) + min_val
         if key in INTEGER_PARAMS:
@@ -199,8 +200,8 @@ class AdamOptimizer(BaseOptimizer):
         # Parameter metadata
         self.param_names = [
             'ema_fast', 'ema_slow', 'z_window', 'vol_z', 'tr_z',
-            'cloc_min', 'atr_window', 'atr_stop_mult', 'reward_r',
-            'max_hold', 'fee_bp', 'slippage_bp'
+            'cloc_min', 'atr_window', 'fib_swing_lookback', 'fib_swing_lookahead',
+            'fib_target_level', 'fee_bp', 'slippage_bp'
         ]
         self.bounds = None
         
@@ -266,11 +267,23 @@ class AdamOptimizer(BaseOptimizer):
             vector.append(np.clip(normalized, 0, 1))
         
         # BacktestParams
-        for key in ['atr_stop_mult', 'reward_r', 'max_hold', 'fee_bp', 'slippage_bp']:
+        for key in ['fib_swing_lookback', 'fib_swing_lookahead', 'fib_target_level', 'fee_bp', 'slippage_bp']:
             val = getattr(backtest_params, key)
-            min_val, max_val = self.bounds[key]
-            span = max(max_val - min_val, 1e-9)
-            normalized = (val - min_val) / span
+            
+            # Special handling for fib_target_level (discrete choice)
+            if key == 'fib_target_level':
+                # Map discrete levels to 0-1 range (index / (n_levels - 1))
+                try:
+                    idx = VALID_FIB_LEVELS.index(val)
+                    normalized = idx / (len(VALID_FIB_LEVELS) - 1)
+                except ValueError:
+                    # Default to Golden Ratio if not found
+                    normalized = 0.5
+            else:
+                min_val, max_val = self.bounds[key]
+                span = max(max_val - min_val, 1e-9)
+                normalized = (val - min_val) / span
+            
             vector.append(np.clip(normalized, 0, 1))
         
         return np.array(vector, dtype=np.float32)
@@ -298,13 +311,20 @@ class AdamOptimizer(BaseOptimizer):
         
         # BacktestParams
         backtest_dict = {}
-        for key in ['atr_stop_mult', 'reward_r', 'max_hold', 'fee_bp', 'slippage_bp']:
-            min_val, max_val = self.bounds[key]
-            val = vector[idx] * (max_val - min_val) + min_val
-            
-            # Round integers
-            if key in INTEGER_PARAMS:
-                val = int(round(val))
+        for key in ['fib_swing_lookback', 'fib_swing_lookahead', 'fib_target_level', 'fee_bp', 'slippage_bp']:
+            # Special handling for fib_target_level (discrete choice)
+            if key == 'fib_target_level':
+                # Map 0-1 range back to discrete level
+                level_idx = int(round(vector[idx] * (len(VALID_FIB_LEVELS) - 1)))
+                level_idx = np.clip(level_idx, 0, len(VALID_FIB_LEVELS) - 1)
+                val = VALID_FIB_LEVELS[level_idx]
+            else:
+                min_val, max_val = self.bounds[key]
+                val = vector[idx] * (max_val - min_val) + min_val
+                
+                # Round integers
+                if key in INTEGER_PARAMS:
+                    val = int(round(val))
             
             backtest_dict[key] = val
             idx += 1

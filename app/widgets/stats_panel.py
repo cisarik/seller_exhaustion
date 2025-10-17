@@ -7,12 +7,15 @@ from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG, Slot
 from PySide6.QtGui import QColor
 import pandas as pd
 import pyqtgraph as pg
+from dataclasses import asdict
 
 from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams
 from backtest.optimizer import Individual
 from backtest.engine import run_backtest
 import config.settings as config_settings
+from core.logging_utils import get_logger
+from core.coach_logging import coach_log_manager
 
 # New modular optimizer system
 from backtest.optimizer_base import BaseOptimizer
@@ -24,6 +27,9 @@ from backtest.optimizer_factory import (
     get_acceleration_display_name
 )
 import multiprocessing
+
+
+logger = get_logger(__name__)
 
 
 class StatsPanel(QWidget):
@@ -63,10 +69,140 @@ class StatsPanel(QWidget):
         # Connect generation_complete signal for thread-safe UI updates
         self.generation_complete.connect(self._update_after_generation)
 
+    @staticmethod
+    def _format_dict_for_log(payload: dict) -> str:
+        """Return deterministic key-sorted string representation for logging."""
+        return ", ".join(f"{key}={payload[key]}" for key in sorted(payload))
+
+    @staticmethod
+    def _compact_seller_params(p: SellerParams) -> str:
+        return (
+            f"ema_f={p.ema_fast} ema_s={p.ema_slow} "
+            f"vol_z={p.vol_z:.2f} tr_z={p.tr_z:.2f} cloc={p.cloc_min:.2f}"
+        )
+
+    @staticmethod
+    def _compact_backtest_params(p: BacktestParams) -> str:
+        return (
+            f"fee={p.fee_bp:.1f} slip={p.slippage_bp:.1f} "
+            f"swing_lb={p.fib_swing_lookback} swing_la={p.fib_swing_lookahead} "
+            f"target={p.fib_target_level:.3f}"
+        )
+
+    @staticmethod
+    def _compact_metrics(metrics: dict) -> str:
+        if not metrics:
+            return "--"
+        trades = metrics.get("n", "--")
+
+        def _fmt_pct(value):
+            return f"{value:.2%}" if isinstance(value, (int, float)) else "--"
+
+        def _fmt_float(value, precision=2):
+            return f"{value:.{precision}f}" if isinstance(value, (int, float)) else "--"
+
+        win = _fmt_pct(metrics.get("win_rate"))
+        avg_r = _fmt_float(metrics.get("avg_R"))
+        pnl = _fmt_float(metrics.get("total_pnl"), precision=4)
+        dd_value = metrics.get("max_drawdown", metrics.get("max_dd"))
+        dd = _fmt_float(dd_value, precision=4)
+
+        return f"n={trades} win={win} avgR={avg_r} pnl={pnl} dd={dd}"
+
+    def _log_parameter_snapshot(
+        self,
+        seller_params: SellerParams,
+        backtest_params: BacktestParams,
+        prefix: str = ""
+    ) -> None:
+        """Log seller/backtest parameter values in a compact format."""
+        seller_payload = asdict(seller_params)
+        backtest_payload = (
+            backtest_params.model_dump()
+            if hasattr(backtest_params, "model_dump")
+            else dict(backtest_params)
+        )
+
+        logger.info("%sSellerParams: %s", prefix, self._format_dict_for_log(seller_payload))
+        logger.info("%sBacktestParams: %s", prefix, self._format_dict_for_log(backtest_payload))
+
+    @staticmethod
+    def _log_metrics_snapshot(metrics: dict, prefix: str = "") -> None:
+        """Log backtest metrics with consistent formatting."""
+        if not metrics:
+            return
+
+        trades = metrics.get("n") or metrics.get("total_trades")
+        win_rate = metrics.get("win_rate")
+        avg_r = metrics.get("avg_R")
+        total_pnl = metrics.get("total_pnl")
+        max_dd = metrics.get("max_drawdown") or metrics.get("max_dd")
+        sharpe = metrics.get("sharpe")
+
+        logger.info(
+            "%sMetrics | trades=%s | win_rate=%s | avg_R=%s | total_pnl=%s | max_dd=%s | sharpe=%s",
+            prefix,
+            trades if trades is not None else "--",
+            f"{win_rate:.2%}" if isinstance(win_rate, (int, float)) else "--",
+            f"{avg_r:.2f}" if isinstance(avg_r, (int, float)) else "--",
+            f"{total_pnl:.4f}" if isinstance(total_pnl, (int, float)) else "--",
+            f"{max_dd:.4f}" if isinstance(max_dd, (int, float)) else "--",
+            f"{sharpe:.2f}" if isinstance(sharpe, (int, float)) else "--",
+        )
+
+    @staticmethod
+    def _log_fitness_config(fitness_config, prefix: str = "") -> None:
+        """Log fitness configuration weights/thresholds."""
+        if fitness_config is None:
+            return
+        if hasattr(fitness_config, "model_dump"):
+            payload = fitness_config.model_dump()
+        else:
+            payload = getattr(fitness_config, "__dict__", {})
+        if not payload:
+            return
+        items = ", ".join(
+            f"{k}={payload[k]:.4f}" if isinstance(payload[k], float) else f"{k}={payload[k]}"
+            for k in sorted(payload)
+        )
+        logger.info("%sFitnessConfig: %s", prefix, items)
+
+    def _log_optimizer_config(self, prefix: str = "") -> None:
+        """Log optimizer type, acceleration, and hyperparameters."""
+        if self.optimizer is None:
+            return
+
+        try:
+            logger.info(
+                "%sOptimizer: name=%s | acceleration=%s",
+                prefix,
+                self.optimizer.get_optimizer_name(),
+                self.optimizer.get_acceleration_mode(),
+            )
+        except Exception:
+            logger.info("%sOptimizer: %s", prefix, type(self.optimizer).__name__)
+
+        config_payload = getattr(self.optimizer, "config", None)
+        if isinstance(config_payload, dict) and config_payload:
+            logger.info(
+                "%sOptimizer hyperparameters: %s",
+                prefix,
+                self._format_dict_for_log(config_payload),
+            )
+
+        population = getattr(self.optimizer, "population", None)
+        if population is not None:
+            logger.info(
+                "%sPopulation status: size=%s | generation=%s",
+                prefix,
+                getattr(population, "size", "--"),
+                getattr(population, "generation", "--"),
+            )
+
     def _initialize_optimizer_if_needed(self):
         """Initialize optimizer with current parameters as seed (called automatically)."""
         if self.current_data is None:
-            print("Error: No data loaded.")
+            logger.error("No data loaded.")
             return False
         
         # Get optimizer type and acceleration from UI
@@ -77,7 +213,11 @@ class StatsPanel(QWidget):
         if self.optimizer is not None:
             if (self.optimizer.get_optimizer_name().lower().replace(' ', '_') == optimizer_type or
                 (optimizer_type == 'evolutionary' and 'evolutionary' in self.optimizer.get_optimizer_name().lower())):
-                print(f"✓ Reusing existing optimizer ({self.optimizer.get_optimizer_name()})")
+                logger.info("Reusing existing optimizer (%s)", self.optimizer.get_optimizer_name())
+                self._log_optimizer_config(prefix="  ")
+                coach_log_manager.append(
+                    f"OPT reuse name={self.optimizer.get_optimizer_name()} accel={self.optimizer.get_acceleration_mode()}"
+                )
                 return True
         
         # Get current params from UI as seed
@@ -100,14 +240,27 @@ class StatsPanel(QWidget):
             # Reset best fitness tracking
             self.prev_best_fitness = None
             
-            print(f"✓ Optimizer initialized: {self.optimizer.get_optimizer_name()} with {self.optimizer.get_acceleration_mode()}")
+            logger.info(
+                "Optimizer initialized | type=%s | acceleration=%s",
+                self.optimizer.get_optimizer_name(),
+                self.optimizer.get_acceleration_mode(),
+            )
+            self._log_parameter_snapshot(seller_params, backtest_params, prefix="Seed ")
+            self._log_optimizer_config(prefix="  ")
+            coach_log_manager.append(
+                f"OPT init name={self.optimizer.get_optimizer_name()} accel={self.optimizer.get_acceleration_mode()}"
+            )
+            coach_log_manager.append(
+                f"SEED seller[{self._compact_seller_params(seller_params)}]"
+            )
+            coach_log_manager.append(
+                f"SEED backtest[{self._compact_backtest_params(backtest_params)}]"
+            )
             
             return True
             
         except Exception as e:
-            print(f"Error initializing optimizer: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error initializing optimizer: %s", e)
             return False
     
     def init_ui(self):
@@ -316,7 +469,7 @@ class StatsPanel(QWidget):
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
         
-        print(f"✓ Optimizer type changed to: {get_optimizer_display_name(optimizer_type)}")
+        logger.info("Optimizer type changed to: %s", get_optimizer_display_name(optimizer_type))
     
     def _on_acceleration_changed(self, index):
         """Handle acceleration change."""
@@ -325,7 +478,7 @@ class StatsPanel(QWidget):
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
         
-        print(f"✓ Acceleration changed to: {self.acceleration_combo.currentText()}")
+        logger.info("Acceleration changed to: %s", self.acceleration_combo.currentText())
     
     def _create_fitness_preset_combo(self):
         """Create fitness preset dropdown combo box."""
@@ -347,7 +500,7 @@ class StatsPanel(QWidget):
         if self.param_editor:
             preset_name = self.fitness_preset_combo.currentData()
             self.param_editor.load_fitness_preset(preset_name)
-            print(f"✓ Fitness preset changed to: {preset_name}")
+            logger.info("Fitness preset changed to: %s", preset_name)
     
     def update_stats(self, backtest_result):
         """Update all statistics displays with backtest results."""
@@ -362,7 +515,7 @@ class StatsPanel(QWidget):
             self.update_equity_curve()
             
         except Exception as e:
-            print(f"Error updating stats: {e}")
+            logger.exception("Error updating stats: %s", e)
     
     def update_metrics(self):
         """Update metric labels."""
@@ -573,11 +726,11 @@ class StatsPanel(QWidget):
     def run_optimization_step(self):
         """Run one optimization iteration asynchronously (internal method)."""
         if self.optimizer is None:
-            print("Error: Optimizer not initialized")
+            logger.error("Optimizer not initialized")
             return
         
         if self.current_data is None:
-            print("Error: No data loaded")
+            logger.error("No data loaded")
             return
         
         # Disable optimize button during execution
@@ -593,6 +746,11 @@ class StatsPanel(QWidget):
             try:
                 # Get fitness configuration from parameter editor
                 _, _, fitness_config = self.get_current_params()
+                self._log_fitness_config(fitness_config, prefix="  ")
+                self._log_optimizer_config(prefix="  ")
+                coach_log_manager.append(
+                    f"STEP begin accel={self.optimizer.get_acceleration_mode()} preset={getattr(fitness_config, 'preset', '--')}"
+                )
                 
                 # CRITICAL: Pass RAW data, not features!
                 data_for_optimizer = self.raw_data if self.raw_data is not None else self.current_data[['open', 'high', 'low', 'close', 'volume']]
@@ -632,10 +790,10 @@ class StatsPanel(QWidget):
                 backtest_result = None
                 
                 # Run backtest with best parameters to visualize strategy
-                print(f"\n📊 Running backtest with best parameters...")
+                logger.info("Running backtest with current best parameters...")
                 try:
                     if self.raw_data is None:
-                        print("⚠ No raw data available, skipping backtest")
+                        logger.warning("No raw data available, skipping backtest")
                     else:
                         # Build features with best params from RAW data
                         feats = build_features(self.raw_data, best_seller, self.current_tf)
@@ -643,12 +801,19 @@ class StatsPanel(QWidget):
                         # Run backtest
                         backtest_result = run_backtest(feats, best_backtest)
                         
-                        print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
+                        logger.info("Backtest complete: %d trades", backtest_result['metrics']['n'])
+                        self._log_metrics_snapshot(backtest_result.get('metrics', {}), prefix="  ")
+                        self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
+                        metrics_payload = backtest_result.get('metrics') if backtest_result else {}
+                        coach_log_manager.append(
+                            "STEP best "
+                            f"fitness={best_fitness:.4f} "
+                            f"{self._compact_metrics(metrics_payload)}"
+                        )
                     
                 except Exception as e:
-                    print(f"Error running backtest for visualization: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("Error running backtest for visualization: %s", e)
+                    coach_log_manager.append(f"ERROR backtest {e}")
                 
                 # Store results for main thread to process
                 self.temp_backtest_result = backtest_result
@@ -658,12 +823,12 @@ class StatsPanel(QWidget):
                 
                 # Emit progress completion
                 self.progress_updated.emit(1, 1, "✓ Optimization step complete")
+                coach_log_manager.append("STEP done")
                 
             except Exception as e:
-                print(f"Error during optimization step: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error during optimization step: %s", e)
                 self.progress_updated.emit(0, 1, f"❌ Error: {str(e)}")
+                coach_log_manager.append(f"ERROR step {e}")
             finally:
                 # Re-enable optimize button using thread-safe method
                 QMetaObject.invokeMethod(
@@ -704,7 +869,7 @@ class StatsPanel(QWidget):
                 )
                 
                 # AUTO-APPLY: Update param editor immediately with best parameters
-                print(f"✓ Auto-applying best parameters from iteration {iteration}")
+                logger.info("Auto-applying best parameters from iteration %s", iteration)
                 self.set_params_from_individual(best_individual)
                 
                 # Update stats display with backtest results if available
@@ -724,9 +889,7 @@ class StatsPanel(QWidget):
             # Status is now shown in chart view's progress bar via signals (no local status label)
             
         except Exception as e:
-            print(f"Error updating UI after iteration: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error updating UI after iteration: %s", e)
     
     def apply_best_parameters(self, auto_save: bool = False):
         """
@@ -736,12 +899,12 @@ class StatsPanel(QWidget):
             auto_save: If True, automatically save parameters to .env file
         """
         if self.optimizer is None:
-            print("No optimizer initialized")
+            logger.warning("No optimizer initialized")
             return
         
         best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
         if best_seller is None:
-            print("No best parameters to apply")
+            logger.warning("No best parameters to apply")
             return
         
         # Create Individual for compatibility
@@ -757,8 +920,12 @@ class StatsPanel(QWidget):
         stats = self.optimizer.get_stats()
         iteration = stats.get('iteration', stats.get('generation', 0))
         
-        print(f"✓ Applied best parameters from iteration {iteration}")
-        print(f"  Fitness: {best_fitness:.4f}")
+        logger.info(
+            "Applied best parameters from iteration %s | Fitness=%.4f",
+            iteration,
+            best_fitness or 0.0,
+        )
+        self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
         
         # Auto-save to .env if requested
         if auto_save:
@@ -774,9 +941,6 @@ class StatsPanel(QWidget):
                     'strategy_tr_z': float(best.seller_params.tr_z),
                     'strategy_cloc_min': float(best.seller_params.cloc_min),
                     'strategy_atr_window': int(best.seller_params.atr_window),
-                    'backtest_atr_stop_mult': float(best.backtest_params.atr_stop_mult),
-                    'backtest_reward_r': float(best.backtest_params.reward_r),
-                    'backtest_max_hold': int(best.backtest_params.max_hold),
                     'backtest_fee_bp': float(best.backtest_params.fee_bp),
                     'backtest_slippage_bp': float(best.backtest_params.slippage_bp),
                 }
@@ -784,9 +948,9 @@ class StatsPanel(QWidget):
                 SettingsManager.save_to_env(settings_dict)
                 SettingsManager.reload_settings()
                 
-                print("✓ Auto-saved best parameters to .env")
+                logger.info("Auto-saved best parameters to .env")
             except Exception as e:
-                print(f"⚠ Failed to auto-save parameters: {e}")
+                logger.exception("Failed to auto-save parameters: %s", e)
     
     def load_params_from_settings(self, seller_params, backtest_params):
         """Load parameters into external editor from settings dialog."""
@@ -817,23 +981,40 @@ class StatsPanel(QWidget):
         Shows progress and allows stopping to keep current best.
         """
         if self.current_data is None:
-            print("Error: No data loaded. Please download data first.")
+            logger.error("No data loaded. Please download data first.")
             return
         
         if self.is_optimizing:
-            print("Already optimizing...")
+            logger.warning("Optimization already in progress")
             return
         
         # Auto-initialize optimizer if needed
         if not self._initialize_optimizer_if_needed():
             return
         
+        seed_seller, seed_backtest, fitness_config = self.get_current_params()
+        self._log_parameter_snapshot(seed_seller, seed_backtest, prefix="Seed ")
+        self._log_fitness_config(fitness_config, prefix="Seed ")
+        self._log_optimizer_config(prefix="  ")
+        coach_log_manager.append(
+            f"FIT preset={getattr(fitness_config, 'preset', '--')}"
+        )
+        coach_log_manager.append(
+            f"SEED seller[{self._compact_seller_params(seed_seller)}]"
+        )
+        coach_log_manager.append(
+            f"SEED backtest[{self._compact_backtest_params(seed_backtest)}]"
+        )
+        
         from config.settings import settings
         n_iters = settings.optimizer_iterations
         
-        print(f"\n{'='*70}")
-        print(f"🚀 Starting Multi-Step Optimization: {n_iters} iterations")
-        print(f"{'='*70}")
+        logger.info("=" * 70)
+        logger.info("🚀 Starting Multi-Step Optimization: %s iterations", n_iters)
+        logger.info("=" * 70)
+        coach_log_manager.append(
+            f"RUN start iters={n_iters} accel={self.optimizer.get_acceleration_mode()}"
+        )
         
         # Show GPU recommendations
         try:
@@ -842,10 +1023,10 @@ class StatsPanel(QWidget):
             recs = gpu_mgr.get_recommendations(len(self.current_data))
             
             if recs['available']:
-                print(f"GPU: {recs['device']}")
-                print(f"VRAM: {recs['memory']['free_gb']:.2f} GB free")
-                print(f"Expected speedup: {recs['estimated_speedup']:.1f}x")
-            print()
+                logger.info("GPU: %s", recs['device'])
+                logger.info("VRAM: %.2f GB free", recs['memory']['free_gb'])
+                logger.info("Expected speedup: %.1fx", recs['estimated_speedup'])
+            logger.info("")
         except:
             pass
         
@@ -890,7 +1071,7 @@ class StatsPanel(QWidget):
             for gen in range(n_gens):
                 if self.stop_requested:
                     self.progress_updated.emit(gen, n_gens, "⏹ Stopped by user")
-                    print(f"\n⏹ Optimization stopped at generation {gen} (keeping best individual)")
+                    logger.info("⏹ Optimization stopped at generation %s (keeping best individual)", gen)
                     break
                 
                 # Update progress
@@ -921,6 +1102,25 @@ class StatsPanel(QWidget):
                         fitness_config=fitness_config,
                         stop_flag=stop_check
                     )
+                    if result.additional_info:
+                        population_stats = result.additional_info.get('population_stats')
+                        if isinstance(population_stats, dict) and population_stats:
+                            logger.info(
+                                "Population stats | generation=%s | mean_fitness=%.4f | std_fitness=%.4f | min=%.4f | max=%.4f",
+                                result.iteration,
+                                population_stats.get('mean_fitness', 0.0),
+                                population_stats.get('std_fitness', 0.0),
+                                population_stats.get('min_fitness', 0.0),
+                                population_stats.get('max_fitness', 0.0),
+                            )
+                            coach_log_manager.append(
+                                "STAT "
+                                f"gen={result.iteration} "
+                                f"mean={population_stats.get('mean_fitness', 0.0):.4f} "
+                                f"std={population_stats.get('std_fitness', 0.0):.4f} "
+                                f"min={population_stats.get('min_fitness', 0.0):.4f} "
+                                f"max={population_stats.get('max_fitness', 0.0):.4f}"
+                            )
                     
                     # Extract results
                     current_best_fitness = result.fitness
@@ -935,34 +1135,42 @@ class StatsPanel(QWidget):
                         self.prev_best_fitness = current_best_fitness
                         
                         # Run backtest with new best to visualize
-                        print(f"\n🎯 NEW BEST found in iteration {gen+1}!")
-                        print(f"   Fitness: {current_best_fitness:.4f}")
-                        print(f"   Trades: {best_metrics.get('n', 0)}")
-                        print(f"   Win Rate: {best_metrics.get('win_rate', 0):.2%}")
-                        print(f"   Avg R: {best_metrics.get('avg_R', 0):.2f}")
-                        print(f"   Total PnL: ${best_metrics.get('total_pnl', 0):.4f}")
+                        logger.info("🎯 New best found in iteration %s | Fitness=%.4f", gen + 1, current_best_fitness)
+                        self._log_metrics_snapshot(best_metrics, prefix="  ")
+                        if best_seller is not None and best_backtest is not None:
+                            self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
+                        coach_log_manager.append(
+                            "BEST "
+                            f"gen={gen+1} fitness={current_best_fitness:.4f} "
+                            f"{self._compact_metrics(best_metrics)}"
+                        )
                         
                         # Run backtest for visualization using RAW data
-                        print(f"\n📊 Running backtest with new best parameters...")
+                        logger.info("Running backtest with new best parameters...")
                         
                         try:
                             if self.raw_data is None:
-                                print("⚠ No raw data available, skipping visualization backtest")
+                                logger.warning("No raw data available, skipping visualization backtest")
                                 self.temp_backtest_result = None
+                                coach_log_manager.append("WARN no_raw_data")
                             else:
                                 # Rebuild features from raw OHLCV data with new parameters
                                 feats = build_features(self.raw_data, best_seller, self.current_tf)
                                 backtest_result = run_backtest(feats, best_backtest)
                                 
-                                print(f"✓ Backtest complete: {backtest_result['metrics']['n']} trades")
+                                logger.info("Backtest complete: %d trades", backtest_result['metrics']['n'])
                                 
                                 # Store for UI update
                                 self.temp_backtest_result = backtest_result
+                                metrics_payload = backtest_result.get('metrics', {}) if backtest_result else {}
+                                coach_log_manager.append(
+                                    "BEST backtest "
+                                    f"gen={gen+1} {self._compact_metrics(metrics_payload)}"
+                                )
                             
                         except Exception as e:
-                            print(f"Error running backtest: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            logger.exception("Error running visualization backtest: %s", e)
+                            coach_log_manager.append(f"ERROR backtest {e}")
                             self.temp_backtest_result = None
                     
                     # Update UI (from main thread)
@@ -975,40 +1183,41 @@ class StatsPanel(QWidget):
                     )
                     
                 except Exception as e:
-                    print(f"Error in generation {gen+1}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("Error in generation %s: %s", gen + 1, e)
+                    coach_log_manager.append(f"ERROR generation_{gen+1} {e}")
                     break
             
             # Final progress update
             total_time = time.time() - start_time
             if not self.stop_requested:
                 self.progress_updated.emit(n_gens, n_gens, f"✓ Complete in {total_time:.1f}s")
-                print(f"\n{'='*70}")
-                print(f"✓ Optimization complete! {n_gens} iterations in {total_time:.1f}s")
-                print(f"  Average: {total_time/n_gens:.2f}s per iteration")
-                print(f"{'='*70}\n")
+                logger.info("=" * 70)
+                logger.info("✓ Optimization complete! %s iterations in %.1fs", n_gens, total_time)
+                logger.info("  Average: %.2fs per iteration", total_time / n_gens if n_gens else 0.0)
+                logger.info("=" * 70)
+                coach_log_manager.append(
+                    f"RUN done time={total_time:.1f}s avg={(total_time / n_gens if n_gens else 0.0):.2f}s"
+                )
                 
                 # Show final best results
                 best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
                 if best_seller is not None:
-                    print(f"\n🏆 Final Best Parameters:")
-                    print(f"   Fitness: {best_fitness:.4f}")
+                    logger.info("🏆 Final Best Parameters | Fitness=%.4f", best_fitness or 0.0)
                     
                     # Get metrics from optimizer stats if available
                     stats = self.optimizer.get_stats()
-                    if 'best_metrics' in stats:
-                        best_metrics = stats['best_metrics']
-                        print(f"   Trades: {best_metrics.get('n', 0)}")
-                        print(f"   Win Rate: {best_metrics.get('win_rate', 0):.2%}")
-                        print(f"   Avg R: {best_metrics.get('avg_R', 0):.2f}")
-                        print(f"   Total PnL: ${best_metrics.get('total_pnl', 0):.4f}\n")
+                    best_metrics = stats.get('best_metrics') if isinstance(stats, dict) else None
+                    self._log_metrics_snapshot(best_metrics or {}, prefix="  ")
+                    self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
+                    coach_log_manager.append(
+                        "BEST final "
+                        f"fitness={(best_fitness or 0.0):.4f} {self._compact_metrics(best_metrics or {})}"
+                    )
         
         except Exception as e:
-            print(f"Error in multi-step optimization: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error in multi-step optimization: %s", e)
             self.progress_updated.emit(0, n_gens, f"❌ Error: {str(e)}")
+            coach_log_manager.append(f"ERROR run {e}")
         
         finally:
             # Restore UI state (from main thread)
@@ -1050,13 +1259,15 @@ class StatsPanel(QWidget):
                 )
                 
                 # AUTO-APPLY: Update param editor immediately with best parameters
-                print(f"✓ Auto-applying new best parameters from iteration {iteration}")
+                logger.info("Auto-applying new best parameters from iteration %s", iteration)
                 self.set_params_from_individual(best_individual)
+                self._log_parameter_snapshot(best_individual.seller_params, best_individual.backtest_params, prefix="  ")
                 
                 # Update stats display with backtest results if available
                 if self.temp_backtest_result:
                     self.trades_df = self.temp_backtest_result['trades']
                     self.metrics = self.temp_backtest_result['metrics']
+                    self._log_metrics_snapshot(self.metrics, prefix="  ")
                     
                     # Update metrics display
                     self.update_metrics()
@@ -1065,15 +1276,13 @@ class StatsPanel(QWidget):
                     self.update_equity_curve()
                     
                     # Emit signal with backtest results for chart update
-                    print(f"✓ Updating chart with new best strategy...")
+                    logger.debug("Updating chart with new best strategy")
                     self.optimization_step_complete.emit(best_individual, self.temp_backtest_result)
                 else:
-                    print(f"⚠ No backtest result available for new best")
+                    logger.warning("No backtest result available for new best")
             
         except Exception as e:
-            print(f"Error updating UI after multi-step iteration: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error updating UI after multi-step iteration: %s", e)
     
     @Slot()
     @Slot()
@@ -1091,7 +1300,7 @@ class StatsPanel(QWidget):
         if best_seller is not None:
             try:
                 if self.raw_data is None:
-                    print("⚠ No raw data available, skipping final backtest")
+                    logger.warning("No raw data available, skipping final backtest")
                 else:
                     # Build features from RAW data with best parameters
                     feats = build_features(self.raw_data, best_seller, self.current_tf)
@@ -1113,19 +1322,20 @@ class StatsPanel(QWidget):
                     self.optimization_step_complete.emit(best_individual, backtest_result)
                     
                     # Auto-save best parameters to .env
-                    print("\n" + "="*70)
-                    print("💾 Auto-saving best parameters...")
-                    print("="*70)
+                    logger.info("=" * 70)
+                    logger.info("💾 Auto-saving best parameters...")
+                    logger.info("=" * 70)
                     self.apply_best_parameters(auto_save=True)
                 
             except Exception as e:
-                print(f"Error running final backtest: {e}")
+                logger.exception("Error running final backtest: %s", e)
     
     def stop_optimization(self):
         """Stop ongoing multi-step optimization (keeps progress)."""
         if self.is_optimizing:
             self.stop_requested = True
-            print("\n⏹ Stop requested... will finish current iteration and keep best parameters")
+            logger.info("⏹ Stop requested... will finish current iteration and keep best parameters")
+            coach_log_manager.append("RUN stop_requested")
     
     @Slot(int, int, str)
     def _emit_progress_signal(self, current: int, total: int, message: str):

@@ -51,8 +51,13 @@ def ema_gpu(x: torch.Tensor, span: int) -> torch.Tensor:
     
     # Sequential update - PyTorch handles this efficiently on GPU
     # Each iteration: result[i] = alpha * x[i] + beta * result[i-1]
-    for i in range(1, len(x)):
+    n = len(x)
+    for i in range(1, n):
         result[i] = alpha * x[i] + beta * result[i-1]
+    
+    # Synchronize to ensure GPU operations complete
+    if x.device.type == 'cuda':
+        torch.cuda.synchronize()
     
     return result
 

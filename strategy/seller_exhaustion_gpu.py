@@ -175,27 +175,48 @@ def build_features_gpu_batch(
     
     if verbose:
         print(f"   [3/6] Calculating unique indicator values on GPU...")
+        import sys
     
     # EMA Fast (calculate once per unique value)
     ema_fast_cache: Dict[int, torch.Tensor] = {}
-    for span in ema_fast_groups.keys():
+    for i, span in enumerate(ema_fast_groups.keys()):
+        if verbose:
+            print(f"      EMA Fast span={span}...", end='', flush=True)
+            sys.stdout.flush()
         ema_fast_cache[span] = ema_gpu(close_t, span)
+        if verbose:
+            print(f" ✓", flush=True)
     
     # EMA Slow
     ema_slow_cache: Dict[int, torch.Tensor] = {}
     for span in ema_slow_groups.keys():
+        if verbose:
+            print(f"      EMA Slow span={span}...", end='', flush=True)
+            sys.stdout.flush()
         ema_slow_cache[span] = ema_gpu(close_t, span)
+        if verbose:
+            print(f" ✓", flush=True)
     
     # ATR (depends on window)
     atr_cache: Dict[int, torch.Tensor] = {}
     for window in atr_window_groups.keys():
+        if verbose:
+            print(f"      ATR window={window}...", end='', flush=True)
+            sys.stdout.flush()
         atr_cache[window] = atr_gpu(high_t, low_t, close_t, window)
+        if verbose:
+            print(f" ✓", flush=True)
     
     # Volume z-score (depends on z_window)
     vol_z_cache: Dict[int, torch.Tensor] = {}
     
     for window in z_window_groups.keys():
+        if verbose:
+            print(f"      Vol Z-Score window={window}...", end='', flush=True)
+            sys.stdout.flush()
         vol_z_cache[window] = zscore_gpu(volume_t, window)
+        if verbose:
+            print(f" ✓", flush=True)
     
     # TR z-score calculation - CRITICAL: Must match CPU exactly!
     # CPU calculates: tr = out["atr"] * atr_window_bars

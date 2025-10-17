@@ -139,57 +139,34 @@ def _find_exit_bar_cpu(
     bp: BacktestParams
 ) -> int:
     """
-    Find exit bar for a trade (CPU-based quick check).
+    Find exit bar for a trade (CPU-based quick check - PURE FIBONACCI).
     
     This mirrors the GPU exit logic but runs on CPU for filtering.
-    CRITICAL: Exit priority must match GPU exactly!
+    Simplified to only check Fibonacci target.
     """
-    # Get trade parameters
-    entry_price = data.iloc[entry_bar]['open']
+    # Get Fibonacci target from signal bar
+    fib_col = FIB_LEVEL_TO_COL.get(bp.fib_target_level)
+    if not fib_col or fib_col not in feats_df.columns:
+        return len(data) - 1  # No Fib data, assume never exits
     
     try:
-        atr_val = feats_df.loc[signal_ts, 'atr']
-        signal_low = feats_df.loc[signal_ts, 'low']
+        fib_target = feats_df.loc[signal_ts, fib_col]
     except (KeyError, IndexError):
-        # Fallback if features not available
-        return min(entry_bar + bp.max_hold - 1, len(data) - 1)
+        return len(data) - 1  # Can't get fib target, assume never exits
     
-    # Calculate stop and TP
-    stop_price = signal_low - bp.atr_stop_mult * atr_val if bp.use_stop_loss else 0.0
-    risk = entry_price - stop_price if bp.use_stop_loss else entry_price * 0.01
-    risk = max(risk, 1e-8)  # Avoid division by zero
-    tp_price = entry_price + bp.reward_r * risk if bp.use_traditional_tp else 0.0
+    if fib_target <= 0:
+        return len(data) - 1  # Invalid target, never exits
     
-    # Search for exit (same priority as GPU!)
-    # CRITICAL: Start from NEXT bar after entry (not entry bar itself)
-    # CRITICAL: Must find EARLIEST bar where ANY exit is hit, then apply priority
-    
-    earliest_exit_bar = None
-    exit_reason = None
-    
-    search_end = min(entry_bar + bp.max_hold + 1, len(data))
-    
-    for j in range(entry_bar + 1, search_end):
+    # Search for Fibonacci exit starting from bar AFTER entry
+    for j in range(entry_bar + 1, len(data)):
         bar = data.iloc[j]
         
-        # Check all exit conditions for this bar
-        stop_gap_hit = bp.use_stop_loss and bar['open'] <= stop_price
-        stop_hit = bp.use_stop_loss and bar['low'] <= stop_price
-        tp_hit = bp.use_traditional_tp and bar['high'] >= tp_price
-        
-        # If any condition met, this is our exit (priority: stop_gap > stop > tp within same bar)
-        if stop_gap_hit or stop_hit or tp_hit:
-            earliest_exit_bar = j
-            break
+        # Check if Fibonacci target hit
+        if bar['high'] >= fib_target:
+            return j
     
-    # Time exit if nothing hit
-    if earliest_exit_bar is None:
-        if bp.use_time_exit:
-            return min(entry_bar + bp.max_hold, len(data) - 1)
-        else:
-            return min(entry_bar + bp.max_hold, len(data) - 1)
-    
-    return earliest_exit_bar
+    # Fibonacci target never hit
+    return len(data) - 1
 
 
 @dataclass
@@ -508,7 +485,7 @@ def batch_backtest_full_gpu(
             continue
         
         # Filter all tensors to valid trades only
-        valid_indices = valid_trade_mask.nonzero().squeeze()
+        valid_indices = valid_trade_mask.nonzero(as_tuple=True)[0]
         signal_indices_t = signal_indices_t[valid_indices]
         entry_indices_t = entry_indices_t[valid_indices]
         entry_prices_t = entry_prices_t[valid_indices]

@@ -307,28 +307,148 @@ class Population:
             'max_fitness': float(np.max(fitnesses)),
             'best_ever_fitness': self.best_ever.fitness if self.best_ever else 0.0,
         }
+    
+    def add_immigrants(
+        self,
+        fraction: float = 0.15,
+        strategy: str = "worst_replacement",
+        generation: int = 0
+    ) -> int:
+        """
+        Add random immigrants to maintain population diversity.
+        
+        Helps prevent premature convergence when population becomes homogeneous.
+        
+        Args:
+            fraction: Fraction of population to add/replace (e.g., 0.15 = 15%)
+            strategy: "worst_replacement" = replace worst individuals (default)
+                     "random" = random insertion
+            generation: Current generation (for tracking)
+        
+        Returns:
+            Number of immigrants added
+        """
+        n_immigrants = max(1, int(self.size * fraction))
+        
+        # Create new random individuals
+        new_immigrants = [
+            self._create_random_individual()
+            for _ in range(n_immigrants)
+        ]
+        
+        if strategy == "worst_replacement":
+            # Sort by fitness and replace worst N
+            sorted_inds = sorted(self.individuals, key=lambda x: x.fitness, reverse=True)
+            self.individuals = sorted_inds[:self.size - n_immigrants] + new_immigrants
+        else:  # random strategy
+            # Keep best individuals, add immigrants at end, trim to size
+            self.individuals = self.individuals[:self.size - n_immigrants] + new_immigrants
+        
+        return n_immigrants
+    
+    def get_diversity_metric(self) -> float:
+        """
+        Calculate population diversity (0=homogeneous, 1=highly diverse).
+        
+        Based on normalized parameter variance across population.
+        """
+        if len(self.individuals) < 2:
+            return 1.0
+        
+        # Collect normalized parameter vectors
+        param_vectors = []
+        for ind in self.individuals:
+            # Normalize each parameter to 0-1 range based on bounds
+            vals = []
+            
+            # SellerParams
+            for param_name in ['ema_fast', 'ema_slow', 'z_window', 'atr_window']:
+                if param_name in self.bounds:
+                    min_v, max_v = self.bounds[param_name]
+                    raw_val = getattr(ind.seller_params, param_name)
+                    normalized = (raw_val - min_v) / max(max_v - min_v, 1)
+                    vals.append(np.clip(normalized, 0.0, 1.0))
+            
+            # BacktestParams (Fibonacci + costs)
+            for param_name in ['fib_swing_lookback', 'fib_swing_lookahead']:
+                if param_name in self.bounds:
+                    min_v, max_v = self.bounds[param_name]
+                    raw_val = getattr(ind.backtest_params, param_name)
+                    normalized = (raw_val - min_v) / max(max_v - min_v, 1)
+                    vals.append(np.clip(normalized, 0.0, 1.0))
+            
+            # Statistical thresholds
+            for param_name in ['vol_z', 'tr_z', 'cloc_min', 'fee_bp', 'slippage_bp']:
+                if param_name in self.bounds:
+                    min_v, max_v = self.bounds[param_name]
+                    raw_val = getattr(ind.seller_params if param_name in ['vol_z', 'tr_z', 'cloc_min'] 
+                                      else ind.backtest_params, param_name)
+                    normalized = (raw_val - min_v) / max(max_v - min_v, 1)
+                    vals.append(np.clip(normalized, 0.0, 1.0))
+            
+            param_vectors.append(np.array(vals))
+        
+        if not param_vectors or len(param_vectors[0]) == 0:
+            return 1.0
+        
+        # Calculate pairwise distances
+        distances = []
+        for i in range(len(param_vectors)):
+            for j in range(i + 1, len(param_vectors)):
+                dist = np.linalg.norm(param_vectors[i] - param_vectors[j])
+                distances.append(dist)
+        
+        if not distances:
+            return 1.0
+        
+        # Normalize: max possible distance = sqrt(n_params)
+        mean_dist = np.mean(distances)
+        n_params = len(param_vectors[0])
+        max_possible_dist = np.sqrt(n_params)
+        
+        diversity = min(mean_dist / max(max_possible_dist, 1.0), 1.0)
+        return float(diversity)
+    
+    def apply_bounds_override(self, override_bounds: Dict[str, Tuple[float, float]]) -> None:
+        """
+        Apply Coach-recommended bounds overrides to modify search space.
+        
+        Allows Coach to expand or narrow search space based on analysis.
+        
+        Args:
+            override_bounds: Dict mapping param names to new (min, max) bounds
+        """
+        for param_name, (min_val, max_val) in override_bounds.items():
+            if param_name in self.bounds:
+                old_bounds = self.bounds[param_name]
+                self.bounds[param_name] = (min_val, max_val)
+                print(f"  📌 Bounds {param_name}: {old_bounds} → ({min_val}, {max_val})")
 
 
-def calculate_fitness(metrics: Dict[str, Any], config: "FitnessConfig" = None) -> float:
+def calculate_fitness(
+    metrics: Dict[str, Any],
+    config: "FitnessConfig" = None,
+    generation: int = 0
+) -> float:
     """
     Calculate composite fitness from backtest metrics using configurable weights.
     
-    Supports multiple optimization strategies:
-    - Balanced: Standard multi-objective (default)
-    - High Frequency: Maximize trade count (scalping/day trading)
-    - Conservative: Prioritize win rate and drawdown control
-    - Profit Focused: Maximize total PnL
-    - Custom: User-defined weights
+    Supports:
+    - Multiple optimization strategies (Balanced, HF, Conservative, Profit-focused)
+    - Soft penalties (continuous) vs hard gates (discrete clipping)
+    - Curriculum learning (gradually increase min_trades requirement)
     
     Args:
         metrics: Backtest metrics dictionary
         config: FitnessConfig with weights and requirements (uses balanced if None)
+        generation: Current generation (for curriculum learning)
     
     Returns:
         Fitness score (higher is better)
     """
     # Import here to avoid circular dependency
     from core.models import FitnessConfig
+    import numpy as np
     
     if config is None:
         config = FitnessConfig()  # Use balanced defaults
@@ -344,47 +464,55 @@ def calculate_fitness(metrics: Dict[str, Any], config: "FitnessConfig" = None) -
     total_pnl = metrics.get('total_pnl', 0.0)
     max_dd = metrics.get('max_dd', 0.0)
     
-    # Apply minimum requirements (hard filters)
-    if n_trades < config.min_trades:
-        return -100.0  # Fail: not enough trades
+    # Get effective min_trades (supports curriculum learning)
+    effective_min_trades = config.get_effective_min_trades(generation)
+    effective_min_wr = config.min_win_rate
     
-    if win_rate < config.min_win_rate:
-        return -50.0  # Fail: win rate too low
-    
-    # Normalize trade count (0-1 scale, higher is better)
-    # Scale based on reasonable expectations: 100 trades = 1.0
+    # Normalize components (0-1 scale)
     trade_count_normalized = min(n_trades / 100.0, 1.0)
-    
-    # Normalize PnL (sigmoid-like, centered at 0)
-    # Positive PnL → positive contribution, negative → penalty
-    import numpy as np
     pnl_normalized = np.tanh(total_pnl / 0.5)  # Range: -1 to 1
-    
-    # Normalize avg R-multiple (typical range: -2 to 5)
-    # Scale to 0-1 range
     avg_r_normalized = np.clip((avg_r + 2) / 7.0, 0.0, 1.0)
-    
-    # Normalize drawdown penalty (0 = no DD, -1 = severe DD)
-    # More negative DD → more negative contribution
     dd_normalized = max(max_dd / 0.5, -1.0)
     
-    # Calculate weighted fitness
-    fitness = (
+    # Calculate base fitness (weighted components)
+    fitness_base = (
         config.trade_count_weight * trade_count_normalized +
-        config.win_rate_weight * win_rate +  # Already 0-1
+        config.win_rate_weight * win_rate +
         config.avg_r_weight * avg_r_normalized +
         config.total_pnl_weight * pnl_normalized +
-        config.max_drawdown_penalty * dd_normalized  # Negative contribution
+        config.max_drawdown_penalty * dd_normalized
     )
     
-    return fitness
+    # Apply selected fitness function type
+    if config.fitness_function_type == "hard_gates":
+        # Original: hard fail if below minimums
+        if n_trades < effective_min_trades:
+            return -100.0
+        if win_rate < effective_min_wr:
+            return -50.0
+        return fitness_base
+    
+    else:  # "soft_penalties" (default, recommended)
+        # Continuous penalty for shortfalls - maintains gradient for GA
+        penalty_trades = 0.0
+        if n_trades < effective_min_trades:
+            shortfall_ratio = (effective_min_trades - n_trades) / max(effective_min_trades, 1)
+            penalty_trades = config.penalty_trades_strength * shortfall_ratio
+        
+        penalty_wr = 0.0
+        if win_rate < effective_min_wr:
+            shortfall_ratio = (effective_min_wr - win_rate) / max(effective_min_wr, 0.01)
+            penalty_wr = config.penalty_wr_strength * shortfall_ratio
+        
+        return fitness_base - penalty_trades - penalty_wr
 
 
 def evaluate_individual(
     individual: Individual,
     data: pd.DataFrame,
     tf: Timeframe = Timeframe.m15,
-    fitness_config: "FitnessConfig" = None
+    fitness_config: "FitnessConfig" = None,
+    generation: int = 0
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Evaluate an individual by running backtest and calculating fitness.
@@ -394,6 +522,7 @@ def evaluate_individual(
         data: Historical OHLCV data
         tf: Timeframe
         fitness_config: FitnessConfig for fitness calculation (uses balanced if None)
+        generation: Current generation (for curriculum learning)
     
     Returns:
         (fitness, metrics) tuple
@@ -405,9 +534,9 @@ def evaluate_individual(
         # Run backtest with individual's backtest params
         result = run_backtest(feats, individual.backtest_params)
         
-        # Calculate fitness with configurable weights
+        # Calculate fitness with configurable weights and curriculum learning
         metrics = result['metrics']
-        fitness = calculate_fitness(metrics, fitness_config)
+        fitness = calculate_fitness(metrics, fitness_config, generation=generation)
         
         return fitness, metrics
         
@@ -612,107 +741,177 @@ def evolution_step(
     data: pd.DataFrame,
     tf: Timeframe = Timeframe.m15,
     fitness_config: "FitnessConfig" = None,
-    mutation_rate: float = 0.3,
-    sigma: float = 0.1,
-    elite_fraction: float = 0.1,
-    tournament_size: int = 3,
-    mutation_probability: float = 0.9
+    ga_config: "OptimizationConfig" = None,  # NEW: structured GA config
+    mutation_rate: float = None,  # Deprecated: use ga_config instead
+    sigma: float = None,
+    elite_fraction: float = None,
+    tournament_size: int = None,
+    mutation_probability: float = None
 ) -> Population:
     """
-    Perform one generation of evolution.
+    Perform one generation of evolution with Coach-compatible configuration.
     
-    Steps:
-    1. Evaluate fitness for all unevaluated individuals
-    2. Selection (tournament)
-    3. Crossover
-    4. Mutation
-    5. Elitism (preserve best individuals)
+    Supports:
+    - Soft penalties + curriculum learning (via fitness_config)
+    - Dynamic GA hyperparameters (via ga_config)
+    - Random immigrants for diversity (via ga_config)
+    - Bounds override (via ga_config)
     
     Args:
         population: Current population
         data: Historical OHLCV data
         tf: Timeframe
-        mutation_rate: Probability of mutating each parameter
-        sigma: Mutation strength (std dev as fraction of range)
-        elite_fraction: Fraction of population to preserve as elite
-        tournament_size: Size of tournament for selection
-        mutation_probability: Probability that an offspring undergoes mutation
+        fitness_config: Fitness function configuration
+        ga_config: Optimization configuration (Coach applies changes here)
+        
+        [Deprecated parameters - use ga_config instead]:
+        mutation_rate, sigma, elite_fraction, tournament_size, mutation_probability
     
     Returns:
         New population for next generation
     """
+    from core.models import OptimizationConfig
+    
+    # Handle backward compatibility: if ga_config not provided, build from old params
+    if ga_config is None:
+        ga_config = OptimizationConfig(
+            mutation_rate=mutation_rate or 0.3,
+            sigma=sigma or 0.1,
+            elite_fraction=elite_fraction or 0.1,
+            tournament_size=tournament_size or 3,
+            mutation_probability=mutation_probability or 0.9
+        )
+    
     pop_size = population.size
+    current_gen = population.generation
+    
+    print(f"\n=== Generation {current_gen} ===")
+    
+    # Apply bounds override if Coach recommended changes
+    if ga_config.override_bounds:
+        population.apply_bounds_override(ga_config.override_bounds)
     
     # Step 1: Evaluate fitness for unevaluated individuals
-    print(f"\n=== Generation {population.generation} ===")
     unevaluated = [ind for ind in population.individuals if ind.fitness == 0.0]
     
     if unevaluated:
         print(f"Evaluating {len(unevaluated)} individuals...")
         for i, ind in enumerate(unevaluated):
-            fitness, metrics = evaluate_individual(ind, data, tf, fitness_config)
+            fitness, metrics = evaluate_individual(
+                ind, data, tf, fitness_config,
+                generation=current_gen  # Pass generation for curriculum
+            )
             ind.fitness = fitness
             ind.metrics = metrics
-            print(f"  [{i+1}/{len(unevaluated)}] Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")
+            
+            if i % 10 == 0 or i == len(unevaluated) - 1:
+                print(f"  [{i+1}/{len(unevaluated)}] Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | WR: {metrics.get('win_rate', 0):.1%}")
     
     # Update best ever
     current_best = population.get_best()
     if population.best_ever is None or current_best.fitness > population.best_ever.fitness:
         population.best_ever = deepcopy(current_best)
-        print(f"🌟 NEW BEST: Fitness={current_best.fitness:.4f}")
+        print(f"🌟 NEW BEST: Fitness={current_best.fitness:.4f}, Trades={current_best.metrics.get('n', 0)}")
     
     # Population statistics
     stats = population.get_stats()
-    print(f"Population stats: mean={stats['mean_fitness']:.4f}, std={stats['std_fitness']:.4f}, best={stats['max_fitness']:.4f}")
+    trade_counts = [ind.metrics.get('n', 0) for ind in population.individuals]
+    below_min_trades = sum(1 for tc in trade_counts if tc < (fitness_config.get_effective_min_trades(current_gen) if fitness_config else 10))
+    diversity = population.get_diversity_metric() if ga_config.track_diversity else 1.0
     
-    # Record history
+    print(f"Population stats: mean={stats['mean_fitness']:.4f}, std={stats['std_fitness']:.4f}, best={stats['max_fitness']:.4f}")
+    print(f"  Below min_trades: {below_min_trades}/{pop_size} ({100*below_min_trades/pop_size:.1f}%)")
+    print(f"  Mean trades: {np.mean(trade_counts):.1f}, Diversity: {diversity:.2f}")
+    
+    # Detect stagnation (Coach cares about this)
+    is_stagnant = False
+    if ga_config.track_stagnation and len(population.history) >= ga_config.stagnation_threshold:
+        recent_bests = [h['best_fitness'] for h in population.history[-ga_config.stagnation_threshold:]]
+        best_improvement = max(recent_bests) - min(recent_bests)
+        is_stagnant = best_improvement < ga_config.stagnation_fitness_tolerance
+        
+        if is_stagnant:
+            print(f"⚠️  STAGNATION: Fitness flat for {ga_config.stagnation_threshold} gens (improvement: {best_improvement:.4f})")
+    
+    # Record history with new metrics
     population.history.append({
-        'generation': population.generation,
+        'generation': current_gen,
         'best_fitness': stats['max_fitness'],
         'mean_fitness': stats['mean_fitness'],
         'std_fitness': stats['std_fitness'],
+        'diversity': diversity,
+        'below_min_trades': below_min_trades,
+        'mean_trades': np.mean(trade_counts),
+        'stagnant': is_stagnant,
     })
     
     # Step 2: Selection
-    parents = [tournament_selection(population.individuals, tournament_size) for _ in range(pop_size)]
+    parents = [
+        tournament_selection(population.individuals, ga_config.tournament_size)
+        for _ in range(pop_size)
+    ]
     
     # Step 3: Crossover
     offspring = []
     for i in range(0, len(parents) - 1, 2):
-        child1, child2 = crossover(parents[i], parents[i+1], generation=population.generation + 1)
+        child1, child2 = crossover(parents[i], parents[i+1], generation=current_gen + 1)
         offspring.extend([child1, child2])
     
     # Handle odd number
     if len(offspring) < pop_size:
         offspring.append(deepcopy(parents[-1]))
-        offspring[-1].generation = population.generation + 1
+        offspring[-1].generation = current_gen + 1
     
     # Step 4: Mutation
-    bounds = population.bounds if hasattr(population, "bounds") else PARAM_BOUNDS
+    bounds = population.bounds
     for child in offspring:
-        if random.random() < mutation_probability:
+        if random.random() < ga_config.mutation_probability:
             mutated = mutate_individual(
                 child,
                 bounds,
-                mutation_rate,
-                sigma,
-                population.generation + 1
+                ga_config.mutation_rate,
+                ga_config.sigma,
+                current_gen + 1
             )
             child.seller_params = mutated.seller_params
             child.backtest_params = mutated.backtest_params
             child.fitness = 0.0  # Reset fitness (needs re-evaluation)
     
     # Step 5: Elitism
-    elite_size = max(1, int(pop_size * elite_fraction))
+    elite_size = max(1, int(pop_size * ga_config.elite_fraction))
     elite = sorted(population.individuals, key=lambda x: x.fitness, reverse=True)[:elite_size]
     
     # Create new generation
     new_individuals = elite + offspring[:pop_size - elite_size]
     
+    # NEW: Add random immigrants for diversity (Coach controls this)
+    diversity_trigger = (
+        is_stagnant or
+        (ga_config.track_diversity and diversity < 0.3)
+    )
+    
+    if ga_config.immigrant_fraction > 0 and diversity_trigger:
+        n_added = Population(size=pop_size, timeframe=population.timeframe).add_immigrants(
+            ga_config.immigrant_fraction,
+            ga_config.immigrant_strategy,
+            current_gen + 1
+        )
+        # Replace worst individuals with immigrants
+        new_individuals = sorted(new_individuals, key=lambda x: x.fitness, reverse=True)
+        n_replace = int(pop_size * ga_config.immigrant_fraction)
+        new_individuals = new_individuals[:-n_replace] if n_replace > 0 else new_individuals
+        # Add new immigrants
+        for _ in range(min(n_replace, n_added)):
+            new_immigrants = Population(size=n_replace, timeframe=population.timeframe)
+            new_individuals.extend(new_immigrants.individuals[:n_replace - len(new_individuals) + elite_size])
+    
+    # Ensure population size is correct
+    new_individuals = new_individuals[:pop_size]
+    
     # Create new population
     new_population = Population(size=pop_size, timeframe=population.timeframe)
     new_population.individuals = new_individuals
-    new_population.generation = population.generation + 1
+    new_population.generation = current_gen + 1
     new_population.best_ever = population.best_ever
     new_population.history = population.history
     new_population.bounds = population.bounds

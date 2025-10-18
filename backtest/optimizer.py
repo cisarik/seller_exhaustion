@@ -9,11 +9,13 @@ Uses genetic algorithm with:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 import random
 from copy import deepcopy
+import json
+from pathlib import Path
 
 from strategy.seller_exhaustion import SellerParams
 from core.models import BacktestParams, Timeframe, minutes_to_bars
@@ -157,6 +159,98 @@ class Population:
             # All random
             for _ in range(size):
                 self.individuals.append(self._create_random_individual())
+
+    # -------- Population I/O (Export / Import) --------
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize population to a JSON-serializable dict."""
+        return {
+            "version": 1,
+            "timeframe": str(self.timeframe.value if isinstance(self.timeframe, Timeframe) else self.timeframe),
+            "generation": int(self.generation),
+            "size": int(self.size),
+            "individuals": [
+                {
+                    "seller_params": deepcopy(ind.seller_params.__dict__),
+                    "backtest_params": deepcopy(
+                        ind.backtest_params.model_dump() if hasattr(ind.backtest_params, "model_dump") else ind.backtest_params.__dict__
+                    ),
+                    "fitness": float(ind.fitness),
+                    "metrics": deepcopy(ind.metrics),
+                    "generation": int(ind.generation),
+                }
+                for ind in self.individuals
+            ],
+        }
+
+    def save(self, path: str | Path) -> None:
+        """Save population to a JSON file.
+
+        Args:
+            path: Output file path ('.json')
+        """
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _individual_from_dict(d: Dict[str, Any]) -> Individual:
+        sp = SellerParams(**d.get("seller_params", {}))
+        bp = BacktestParams(**d.get("backtest_params", {}))
+        ind = Individual(seller_params=sp, backtest_params=bp)
+        ind.fitness = float(d.get("fitness", 0.0))
+        ind.metrics = d.get("metrics", {}) or {}
+        ind.generation = int(d.get("generation", 0))
+        return ind
+
+    @classmethod
+    def from_file(
+        cls,
+        path: str | Path,
+        timeframe: Optional[Timeframe] = None,
+        limit: Optional[int] = None,
+    ) -> "Population":
+        """Construct a population from a JSON file previously saved via save().
+
+        Args:
+            path: JSON file path
+            timeframe: Optional override timeframe; if None, uses value from file when available
+            limit: Optional maximum number of individuals to load (truncates if provided)
+
+        Returns:
+            Population instance initialized with loaded individuals (no random fill)
+        """
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Population file not found: {path}")
+
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        inds_raw = data.get("individuals", [])
+        if limit is not None:
+            inds_raw = inds_raw[: int(limit)]
+
+        inds = [cls._individual_from_dict(d) for d in inds_raw]
+
+        # Determine timeframe
+        tf_str = data.get("timeframe")
+        tf_val = timeframe
+        try:
+            if tf_val is None and tf_str is not None:
+                # Map string like '15m' or '15' to enum when possible
+                tf_val = Timeframe(tf_str) if tf_str in [t.value for t in Timeframe] else timeframe
+        except Exception:
+            tf_val = timeframe or Timeframe.m15
+
+        pop = cls(size=len(inds) or data.get("size", 0) or 0, timeframe=tf_val or Timeframe.m15)
+        pop.individuals = inds
+        pop.size = len(inds)
+        pop.generation = int(data.get("generation", 0))
+        pop.best_ever = deepcopy(max(inds, key=lambda x: x.fitness)) if inds else None
+        # Keep timeframe-aware bounds consistent
+        pop.bounds = get_param_bounds_for_timeframe(pop.timeframe)
+        return pop
     
     def _create_random_individual(self) -> Individual:
         """Create an individual with random parameters within timeframe-appropriate bounds."""
@@ -625,3 +719,20 @@ def evolution_step(
     new_population.timeframe = population.timeframe
     
     return new_population
+
+
+# -------- Convenience helpers (explicit export/import API) --------
+def export_population(population: Population, path: str | Path) -> None:
+    """Export a population to JSON file."""
+    population.save(path)
+
+
+def import_population(path: str | Path, timeframe: Optional[Timeframe] = None, limit: Optional[int] = None) -> Population:
+    """Import a population from JSON file.
+
+    Args:
+        path: JSON file path
+        timeframe: Optional override timeframe
+        limit: Optional max number of individuals
+    """
+    return Population.from_file(path, timeframe=timeframe, limit=limit)

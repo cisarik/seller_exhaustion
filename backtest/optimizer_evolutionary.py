@@ -14,7 +14,8 @@ from copy import deepcopy
 from backtest.optimizer_base import BaseOptimizer, OptimizationResult
 from backtest.optimizer import (
     Population, Individual, evolution_step,
-    get_param_bounds_for_timeframe
+    get_param_bounds_for_timeframe,
+    export_population as _export_population,
 )
 from strategy.seller_exhaustion import SellerParams
 from core.models import BacktestParams, Timeframe, FitnessConfig
@@ -36,8 +37,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
         elite_fraction: float = 0.1,
         tournament_size: int = 3,
         mutation_probability: float = 0.9,
-        acceleration: str = "multicore",  # cpu, multicore, or gpu
-        n_workers: Optional[int] = None
+        acceleration: str = "cpu",  # acceleration disabled; force CPU
+        n_workers: Optional[int] = None,
+        initial_population_file: Optional[str] = None,
     ):
         """
         Initialize evolutionary optimizer.
@@ -60,27 +62,15 @@ class EvolutionaryOptimizer(BaseOptimizer):
             'tournament_size': tournament_size,
             'mutation_probability': mutation_probability,
         }
-        self.acceleration = acceleration.lower()
+        # Acceleration is currently disabled. Force CPU mode regardless of input.
+        self.acceleration = "cpu"
         self.n_workers = n_workers or multiprocessing.cpu_count()
         self.population = None
         self.timeframe = None
+        self.initial_population_file = initial_population_file
         
-        # Validate acceleration mode
-        if self.acceleration not in ['cpu', 'multicore', 'gpu']:
-            raise ValueError(f"Invalid acceleration mode: {acceleration}. Must be cpu/multicore/gpu")
-        
-        # Check GPU availability
-        if self.acceleration == 'gpu':
-            try:
-                from backtest.optimizer_gpu import has_gpu
-                if not has_gpu():
-                    print("⚠ GPU not available, falling back to multi-core CPU")
-                    self.acceleration = 'multicore'
-            except ImportError:
-                print("⚠ GPU acceleration not available (PyTorch not installed), falling back to multi-core CPU")
-                self.acceleration = 'multicore'
-        
-        print(f"✓ Evolutionary optimizer initialized: {self.get_acceleration_mode()}")
+        # Initialization note (no acceleration messaging to reduce noise)
+        print("✓ Evolutionary optimizer initialized")
     
     def initialize(
         self,
@@ -99,12 +89,34 @@ class EvolutionaryOptimizer(BaseOptimizer):
                 backtest_params=seed_backtest_params
             )
         
-        # Initialize population
-        self.population = Population(
-            size=self.config['population_size'],
-            seed_individual=seed_individual,
-            timeframe=timeframe
-        )
+        # Initialize population (optionally from saved file)
+        if self.initial_population_file:
+            try:
+                self.population = Population.from_file(
+                    self.initial_population_file,
+                    timeframe=timeframe,
+                    limit=self.config['population_size']
+                )
+                # If user provided seed_individual as well, ensure it's present as the first individual
+                if seed_individual is not None:
+                    self.population.individuals.insert(0, seed_individual)
+                    # Truncate to pop size
+                    self.population.individuals = self.population.individuals[: self.config['population_size']]
+                    self.population.size = len(self.population.individuals)
+                print(f"✓ Population loaded from file: {self.initial_population_file} ({self.population.size} individuals)")
+            except Exception as e:
+                print(f"⚠ Failed to load initial population from file: {e}. Falling back to random initialization.")
+                self.population = Population(
+                    size=self.config['population_size'],
+                    seed_individual=seed_individual,
+                    timeframe=timeframe
+                )
+        else:
+            self.population = Population(
+                size=self.config['population_size'],
+                seed_individual=seed_individual,
+                timeframe=timeframe
+            )
         
         print(
             f"✓ Population initialized: {self.population.size} individuals | "
@@ -125,7 +137,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
             raise RuntimeError("Optimizer not initialized. Call initialize() first.")
         
         print(f"\n{'='*60}")
-        print(f"Evolution Step [{ self.get_acceleration_mode()}]")
+        print("Evolution Step")
         print(f"Generation: {self.population.generation}")
         print(f"Fitness Preset: {fitness_config.preset}")
         print(f"{'='*60}")
@@ -233,9 +245,11 @@ class EvolutionaryOptimizer(BaseOptimizer):
     
     def get_acceleration_mode(self) -> str:
         """Return acceleration mode."""
-        if self.acceleration == 'multicore':
-            return f"Multi-Core CPU ({self.n_workers} workers)"
-        elif self.acceleration == 'gpu':
-            return "GPU (CUDA)"
-        else:
-            return "Single-Core CPU"
+        # Acceleration disabled; always CPU
+        return "Single-Core CPU"
+
+    # Convenience: export current population
+    def export_population(self, path: str) -> None:
+        if self.population is None:
+            raise RuntimeError("Population not initialized")
+        _export_population(self.population, path)

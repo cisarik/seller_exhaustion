@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QGroupBox, QFileDialog, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor, QBrush
+from PySide6.QtGui import QAction, QColor, QBrush, QFont
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.DateAxisItem import DateAxisItem
 from pyqtgraph import InfiniteLine, TextItem
@@ -112,6 +112,7 @@ class CandleChartWidget(QWidget):
         self.params = SellerParams()
         self.tf = Timeframe.m15
         self.backtest_result = None
+        self.backtest_params = None  # Store backtest params for Fib target
         self.selected_trade_idx = None  # Track selected trade for Fib display
         self.indicator_config = {
             'ema_fast': True,
@@ -278,9 +279,10 @@ class CandleChartWidget(QWidget):
         if self.feats is not None:
             self.render_candles(self.feats, self.backtest_result)
     
-    def set_backtest_result(self, result):
+    def set_backtest_result(self, result, backtest_params=None):
         """Set backtest results and re-render with trade markers."""
         self.backtest_result = result
+        self.backtest_params = backtest_params  # Store for Fib target
         if result and 'trades' in result:
             self.update_trade_table(result['trades'])
         if self.feats is not None:
@@ -604,6 +606,7 @@ class CandleChartWidget(QWidget):
         Render entry and exit arrows for selected trade:
         - Small GREEN triangle pointing UP at entry price
         - Small RED triangle pointing DOWN at exit price
+        - Display entry and exit PRICES on black background
         - Rendered ON TOP of the chart (after balls)
         
         Args:
@@ -619,49 +622,206 @@ class CandleChartWidget(QWidget):
         exit_x = int(exit_ts.value // 1_000_000_000)
         exit_y = trade['exit']
         
+        # Render Fibonacci retracement levels FIRST (so arrows appear on top)
+        self._render_fibonacci_levels(trade, df, entry_x, exit_x, entry_y)
+        
         # Entry arrow: GREEN triangle pointing UP at entry price
-        # Using 't1' for up-pointing triangle
+        # Small size (25px) for clear visibility without dominating
         entry_scatter = pg.ScatterPlotItem(
             x=[entry_x],
             y=[entry_y],
-            size=35,  # Larger size for visibility
+            size=25,  # Smaller, cleaner size
             pen=pg.mkPen('#00FF00', width=2),  # Bright green outline
             brush=pg.mkBrush('#00FF00'),  # Bright green fill
-            symbol='t1',  # UP triangle
-            pxMode=True,
-            zValue=1000  # Ensure it's drawn on top
+            symbol='t1',  # UP triangle (t1 explicitly points up)
+            pxMode=True
         )
         self.plot_widget.addItem(entry_scatter)
+        entry_scatter.setZValue(5000)  # HIGHEST z-value - set AFTER adding to plot
         
         # Exit arrow: RED triangle pointing DOWN at exit price
-        # Using 't3' for down-pointing triangle
+        # Small size (25px) for clear visibility without dominating
         exit_scatter = pg.ScatterPlotItem(
             x=[exit_x],
             y=[exit_y],
-            size=35,  # Larger size for visibility
+            size=25,  # Smaller, cleaner size
             pen=pg.mkPen('#FF0000', width=2),  # Bright red outline
             brush=pg.mkBrush('#FF0000'),  # Bright red fill
-            symbol='t3',  # DOWN triangle
-            pxMode=True,
-            zValue=1000  # Ensure it's drawn on top
+            symbol='t3',  # DOWN triangle (t3 explicitly points down)
+            pxMode=True
         )
         self.plot_widget.addItem(exit_scatter)
+        exit_scatter.setZValue(5000)  # HIGHEST z-value - set AFTER adding to plot
         
-        # Add text labels for entry and exit times (slightly offset for visibility)
-        entry_label = TextItem(text=entry_ts.strftime('%H:%M'), color='#00FF00')
-        entry_label.setAnchor((0.5, 1))  # Below the arrow
-        entry_label.setPos(entry_x, entry_y - 0.005)
+        # Add price labels RIGHT NEXT TO triangles with colored text
+        # Green text for entry, red text for exit, on solid black background
+        # NO arrow symbols - just the price
+        entry_price_text = f"{entry_y:.4f}"
+        entry_label = TextItem(
+            text=entry_price_text,
+            color='#00FF00',  # GREEN text for entry
+            anchor=(0.5, 1.2),  # Below the triangle
+            fill=(0, 0, 0, 255)  # SOLID black background
+        )
+        entry_font = QFont('Courier', 12)  # Bold readable font
+        entry_font.setBold(True)
+        entry_label.setFont(entry_font)
+        entry_label.setPos(entry_x, entry_y - 0.002)  # Just below triangle
         self.plot_widget.addItem(entry_label)
+        entry_label.setZValue(6000)  # Even higher than arrows
         
-        exit_label = TextItem(text=exit_ts.strftime('%H:%M'), color='#FF0000')
-        exit_label.setAnchor((0.5, 0))  # Above the arrow
-        exit_label.setPos(exit_x, exit_y + 0.005)
+        exit_price_text = f"{exit_y:.4f}"
+        exit_label = TextItem(
+            text=exit_price_text,
+            color='#FF0000',  # RED text for exit
+            anchor=(0.5, -0.2),  # Above the triangle
+            fill=(0, 0, 0, 255)  # SOLID black background
+        )
+        exit_font = QFont('Courier', 12)  # Bold readable font
+        exit_font.setBold(True)
+        exit_label.setFont(exit_font)
+        exit_label.setPos(exit_x, exit_y + 0.002)  # Just above triangle
         self.plot_widget.addItem(exit_label)
+        exit_label.setZValue(6000)  # Even higher than arrows
         
         logger.debug(
-            "Rendered trade detail | Entry ↑ at %s @ %.4f | Exit ↓ at %s @ %.4f",
-            entry_ts.strftime('%Y-%m-%d %H:%M'),
+            "Rendered trade detail | Entry ↑ at %.4f | Exit ↓ at %.4f",
             entry_y,
-            exit_ts.strftime('%Y-%m-%d %H:%M'),
             exit_y,
+        )
+    def _render_fibonacci_levels(self, trade: pd.Series, df: pd.DataFrame, entry_x: int, exit_x: int, entry_y: float):
+        """
+        Render Fibonacci retracement levels for selected trade.
+        
+        Shows semi-transparent zones and horizontal lines for Fibonacci levels
+        from entry (0) to swing high (1.0).
+        
+        Args:
+            trade: Selected trade data
+            df: Full OHLCV DataFrame
+            entry_x: Entry timestamp in epoch seconds
+            exit_x: Exit timestamp in epoch seconds
+            entry_y: Entry price
+        """
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPen, QBrush
+        
+        # Find swing high before entry
+        entry_ts = pd.Timestamp(trade['entry_ts'])
+        
+        # Look back from entry to find recent swing high (last 96 bars = 24h on 15m)
+        lookback = 96
+        entry_idx = df.index.get_loc(entry_ts) if entry_ts in df.index else None
+        
+        if entry_idx is None or entry_idx < lookback:
+            logger.debug("Cannot render Fibonacci: entry not found or insufficient history")
+            return
+        
+        # Get slice before entry
+        lookback_slice = df.iloc[max(0, entry_idx - lookback):entry_idx]
+        
+        if len(lookback_slice) == 0:
+            return
+        
+        # Find swing high (highest high in lookback period)
+        swing_high = lookback_slice['high'].max()
+        swing_high_idx = lookback_slice['high'].idxmax()
+        swing_high_x = int(swing_high_idx.value // 1_000_000_000)
+        
+        # Calculate Fibonacci levels from entry (0) to swing high (1.0)
+        fib_range = swing_high - entry_y
+        
+        if fib_range <= 0:
+            logger.debug("Invalid Fibonacci range: swing high not above entry")
+            return
+        
+        # Get the Fib target from backtest params (default to 0.618)
+        fib_target = 0.618  # Default
+        if self.backtest_params and hasattr(self.backtest_params, 'fib_target_level'):
+            fib_target = self.backtest_params.fib_target_level
+        
+        # Define Fibonacci levels with colors
+        # Format: (ratio, price, label_base, line_color, label_color, alpha, show_label)
+        fib_ratios = [
+            (0.0, 'Entry', '#808080', '#808080', 30, False),  # Gray - NO LABEL (duplicate)
+            (0.236, '0.236', '#8B0000', '#8B0000', 50, True),  # Dark red
+            (0.382, '0.382', '#FF8C00', '#FF8C00', 50, True),  # Dark orange
+            (0.5, '0.5', '#228B22', '#228B22', 50, True),  # Forest green
+            (0.618, '0.618', '#FFD700', '#FFD700', 60, True),  # GOLDEN (default target)
+            (0.786, '0.786', '#20B2AA', '#20B2AA', 50, True),  # Light sea green
+            (1.0, '1.0', '#696969', '#FFFFFF', 30, True),  # Gray line, WHITE label
+        ]
+        
+        # Build fib_levels with star on the actual target
+        fib_levels = []
+        for ratio, label_base, line_color, label_color, alpha, show_label in fib_ratios:
+            price = entry_y + fib_range * ratio
+            # Add ⭐ to the label if this matches the Fib target
+            label = f"{label_base} ⭐" if abs(ratio - fib_target) < 0.001 else label_base
+            fib_levels.append((ratio, price, label, line_color, label_color, alpha, show_label))
+        
+        # Draw dashed diagonal line from entry to swing high
+        diagonal_line = pg.PlotDataItem(
+            [entry_x, swing_high_x],
+            [entry_y, swing_high],
+            pen=pg.mkPen('#808080', width=1, style=Qt.PenStyle.DashLine)
+        )
+        self.plot_widget.addItem(diagonal_line)
+        
+        # Render each Fibonacci level
+        for i, (ratio, price, label, line_color, label_color, alpha, show_label) in enumerate(fib_levels):
+            # Draw semi-transparent horizontal zone (from entry to exit)
+            if i < len(fib_levels) - 1:
+                next_price = fib_levels[i + 1][1]
+                
+                # Create semi-transparent color for zone
+                zone_color = QColor(line_color)
+                zone_color.setAlpha(alpha)
+                zone_brush = QBrush(zone_color)
+                
+                # Create filled region item
+                zone = pg.LinearRegionItem(
+                    values=[price, next_price],
+                    orientation='horizontal',
+                    brush=zone_brush,
+                    movable=False
+                )
+                zone.setZValue(-10)  # Behind everything
+                self.plot_widget.addItem(zone)
+            
+            # Draw horizontal line at this level
+            # Make target line thicker and more prominent
+            is_target = abs(ratio - fib_target) < 0.001
+            line = pg.InfiniteLine(
+                pos=price,
+                angle=0,  # Horizontal
+                pen=pg.mkPen(line_color, width=2 if is_target else 1),  # Target line thicker
+                movable=False
+            )
+            line.setZValue(100)  # Above zones but below arrows
+            self.plot_widget.addItem(line)
+            
+            # Add price label on the left (only if show_label is True)
+            if show_label:
+                label_text = f"{label} ({price:.4f})"
+                fib_label = TextItem(
+                    text=label_text,
+                    color=label_color,
+                    anchor=(1, 0.5),  # Right-aligned, vertically centered
+                    fill=(0, 0, 0, 200)  # Black background
+                )
+                fib_font = QFont('Courier', 10)  # Slightly larger
+                fib_font.setBold(True)
+                fib_label.setFont(fib_font)
+                
+                # Position label on the left side of the chart
+                fib_label.setPos(entry_x - (exit_x - entry_x) * 0.02, price)
+                fib_label.setZValue(150)  # Above lines
+                self.plot_widget.addItem(fib_label)
+        
+        logger.debug(
+            "Rendered Fibonacci levels | Entry: %.4f | Swing High: %.4f | Range: %.4f",
+            entry_y,
+            swing_high,
+            fib_range
         )

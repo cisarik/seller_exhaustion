@@ -64,3 +64,7 @@ Thumbs.db
 # Qt
 *.qmlc
 *.jsc
+
+# Workspace data
+populations/
+processes/

@@ -67,11 +67,11 @@ class Settings(BaseSettings):
     adam_beta2: float = 0.999
     adam_epsilon_stability: float = 1e-8
     
-    # Acceleration Settings (NEW)
-    acceleration_mode: str = "multicore"  # cpu, multicore, gpu
-    cpu_workers: int = 7  # Number of CPU workers for multicore
-    gpu_batch_size: int = 512  # Batch size for GPU processing (increased from 150 for better utilization)
-    gpu_memory_fraction: float = 0.85  # Fraction of GPU memory to use
+    # Acceleration Settings (disabled for now)
+    acceleration_mode: str = "cpu"  # cpu only; multicore/GPU deferred
+    cpu_workers: int = 7  # Reserved for future use
+    gpu_batch_size: int = 512  # Reserved for future use
+    gpu_memory_fraction: float = 0.85  # Reserved for future use
     
     # Chart Indicator Display
     chart_ema_fast: bool = True
@@ -190,7 +190,7 @@ class SettingsManager:
             f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
             
             f.write("# Acceleration Settings\n")
-            f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'multicore')}\n")
+            f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'cpu')}\n")
             f.write(f"CPU_WORKERS={existing.get('CPU_WORKERS', '7')}\n")
             f.write(f"GPU_BATCH_SIZE={existing.get('GPU_BATCH_SIZE', '512')}\n")
             f.write(f"GPU_MEMORY_FRACTION={existing.get('GPU_MEMORY_FRACTION', '0.85')}\n\n")

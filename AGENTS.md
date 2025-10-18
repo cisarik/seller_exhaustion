@@ -39,7 +39,7 @@ Intraday trading research and backtesting system for Cardano (ADAUSD) on 15-minu
 - **Async**: httpx for HTTP, qasync for Qt integration
 - **Data**: pandas + numpy for time series
 - **UI**: PySide6 (Qt) + PyQtGraph for charts
-- **Optimization**: NumPy-based GA with optional PyTorch CUDA acceleration
+- **Optimization**: NumPy-based Genetic Algorithm (GA); ADAM prototype; CPU-only focus
 - **CLI**: Typer + Rich for terminal output
 - **Testing**: pytest
 - **API**: Polygon.io crypto aggregates (15-minute bars)
@@ -50,6 +50,12 @@ Intraday trading research and backtesting system for Cardano (ADAUSD) on 15-minu
 3. **Modular**: Clear separation between data/indicators/strategy/backtest/UI
 4. **UTC everywhere**: All timestamps in UTC timezone
 5. **Type-safe**: Pydantic models for configuration and data validation
+
+---
+
+## Acceleration Status
+
+To reduce noise and focus development, all acceleration paths (multi-core and GPU) are currently disabled. The implementation and documentation focus on algorithmic improvements to the evolutionary optimizer (and ADAM prototype) on CPU. Acceleration will be reintroduced and re-documented once results stabilize.
 
 ---
 
@@ -100,18 +106,15 @@ ada-agent/
 │       ├── __init__.py
 │       ├── candle_view.py   # PyQtGraph chart widget
 │       ├── settings_dialog.py # Multi-tab settings (incl. GA parameters)
-│       └── stats_panel.py   # Metrics dashboard + GA controls/GPU status
+│       └── stats_panel.py   # Metrics dashboard + GA controls
 │
 ├── backtest/                # Backtesting engine
 │   ├── __init__.py
 │   ├── engine.py                # Event-driven backtest logic (CPU)
-│   ├── engine_gpu_full.py       # Full GPU pipeline (features + backtest)
 │   ├── optimizer.py             # GA helpers (CPU compatibility)
 │   ├── optimizer_evolutionary.py# Evolutionary optimizer core
-│   ├── optimizer_multicore.py   # Multi-core execution backend
 │   ├── optimizer_adam.py        # ADAM optimizer option
-│   ├── optimizer_factory.py     # Optimizer/acceleration factory
-│   ├── optimizer_gpu.py         # GPU-aware optimizer wrapper
+│   ├── optimizer_factory.py     # Optimizer selection (CPU-only)
 │   └── metrics.py               # Performance metrics calculations
 │
 ├── config/                  # Configuration and settings
@@ -134,12 +137,10 @@ ada-agent/
 ├── indicators/              # Technical indicators
 │   ├── __init__.py
 │   ├── local.py            # Pandas-based TA calculations
-│   └── gpu.py              # PyTorch GPU indicator implementations
 │
 ├── strategy/                # Trading strategies
 │   ├── __init__.py
 │   ├── seller_exhaustion.py     # Seller exhaustion signal logic (CPU)
-│   └── seller_exhaustion_gpu.py # GPU feature builder (kept in parity)
 │
 ├── tests/                   # Unit tests
 │   ├── __init__.py
@@ -149,13 +150,10 @@ ada-agent/
 │
 ├── backtest/                # Backtesting & optimization
 │   ├── engine.py                # CPU backtester
-│   ├── engine_gpu_full.py       # Full GPU pipeline (features + backtest)
 │   ├── optimizer.py             # Legacy GA helpers (compatibility)
-│   ├── optimizer_evolutionary.py# Evolutionary optimizer (UI default)
-│   ├── optimizer_multicore.py   # Multi-core CPU execution
+│   ├── optimizer_evolutionary.py# Evolutionary optimizer core
 │   ├── optimizer_adam.py        # Gradient-based optimizer alternative
-│   ├── optimizer_factory.py     # Optimizer/acceleration selection
-│   ├── optimizer_gpu.py         # GPU orchestrator
+│   ├── optimizer_factory.py     # Optimizer selection (CPU-only)
 │   └── metrics.py               # Performance calculations
 ├── cli.py                   # Typer CLI with fetch/backtest/ui commands
 ├── pyproject.toml           # Poetry dependencies
@@ -464,33 +462,18 @@ zscore(series, window) -> pd.Series
 - All use pandas vectorized operations (fast)
 - First `window` values will be NaN (expected)
 - Use `.dropna()` before backtesting
-- GPU path mirrors these formulas in `indicators/gpu.py` for parity testing.
+ 
 
 **Adding New Indicators**:
 1. Add function to `indicators/local.py`
 2. Follow pattern: take Series/DataFrame, return Series/DataFrame
-3. Mirror implementation in `indicators/gpu.py` if GPU support is needed (keep naming consistent).
-4. Add unit test to `tests/test_indicators.py`
+3. Add unit test to `tests/test_indicators.py`
 5. Document expected behavior
 
 ---
 
-### 7. `indicators/gpu.py`
-
-**Purpose**: PyTorch CUDA implementations of key indicators for batched evaluation.
-
-**Highlights**:
-- `get_device()` selects CUDA when available; otherwise computations fall back to CPU tensors seamlessly.
-- `to_tensor()` / `to_numpy()` bridge pandas ↔ PyTorch conversions.
-- Indicator functions (`ema_gpu`, `sma_gpu`, `atr_gpu`, `rsi_gpu`, `zscore_gpu`, `macd_gpu`) are API-aligned with pandas counterparts, easing drop-in usage.
-- Loops are kept minimal; where iterative logic exists (e.g., EMA), consider migrating to `torch.scan` for further speedups.
-
-**Usage**:
-- `backtest/engine_gpu_full.py` and `optimizer_gpu.py` import these helpers to keep all heavy lifting on device.
-- Safe to call even without CUDA; ensures developers can test GPU pipeline on CPU-only machines.
-
-**Testing**:
-- Add assertions comparing GPU vs pandas outputs for synthetic data when introducing new indicators (tolerances ~1e-5).
+### 7. GPU Indicators (Deferred)
+Acceleration-related indicator implementations are deferred. The current focus is on robust CPU implementations in `indicators/local.py`.
 
 ---
 
@@ -696,22 +679,8 @@ This module ensures **temporal consistency** across timeframes. Without it, mult
 
 ---
 
-### 8b. `strategy/seller_exhaustion_gpu.py`
-
-**Purpose**: GPU-native feature builder that mirrors the CPU implementation for batched evaluations.
-
-**Highlights**:
-- Accepts batched OHLCV tensors and per-individual `SellerParams`, emitting the same columns as `build_features()` using torch operations.
-- Shares helper routines with `engine_gpu_full.py` and guards parity via `_find_exit_bar_cpu()` checks.
-- Designed to keep all heavy lifting on the device—no pandas round trips once tensors are prepared.
-
-**Usage**:
-- Called from `batch_backtest_full_gpu()` so feature engineering, backtesting, and fitness scoring stay on device.
-- Falls back to CPU tensors automatically when CUDA is unavailable, making it safe for development laptops.
-
-**Extending**:
-- When adding new indicators or thresholds, update both CPU and GPU builders together and extend parity tests.
-- Prefer vectorized tensor math over Python loops; leverage broadcasting to keep performance high.
+### 8b. GPU Feature Builder (Deferred)
+GPU-native feature building is deferred. Keep CPU strategy logic (`strategy/seller_exhaustion.py`) as the single source of truth.
 
 ---
 
@@ -798,20 +767,8 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> dict:
 
 ---
 
-### 10. `backtest/engine_gpu_full.py`
-
-**Purpose**: Run feature engineering, backtesting, and fitness prep entirely on GPU for batched populations.
-
-**Highlights**:
-- `batch_backtest_full_gpu()` keeps OHLCV tensors on device, invokes the GPU feature builder, and returns `GPUBacktestStats`.
-- `_find_exit_bar_cpu()` filter ensures trade sequencing matches the CPU engine 1:1 despite running in parallel on GPU.
-- Aggregates metrics for each individual so the optimizer can score and log without extra conversions.
-- Exposes helper functions (`has_gpu`, `calculate_fitness_gpu_batch`) for quick capability checks and scoring.
-
-**Implementation Tips**:
-- Avoid tensor ↔ pandas conversions inside the loop; perform them only when the optimizer needs to display results.
-- Keep tensors on the same device returned by `indicators.gpu.get_device()`; pass `device` through when extending APIs.
-- When adding new indicators or exits, update both CPU and GPU logic and extend the parity tests to keep outputs aligned.
+### 10. GPU Backtest Engine (Deferred)
+The GPU backtesting pipeline is deferred. Use `backtest/engine.py` for the canonical CPU event-driven engine.
 
 ---
 
@@ -831,19 +788,8 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> dict:
 
 ---
 
-### 12. `backtest/optimizer_gpu.py`
-
-**Purpose**: GPU-enabled GA wrapper with shared accelerator state.
-
-**Highlights**:
-- `GPUOptimizer` lazily creates `GPUBacktestAccelerator` and exposes `.has_gpu`.
-- `evolution_step_gpu` batches unevaluated individuals, logs progress, and mirrors CPU GA flow for familiarity.
-- Mutation respects UI-configurable `mutation_probability`; behaviour stays consistent between CPU/GPU.
-- CPU fallback path simply calls `backtest.optimizer.evolution_step`.
-
-**Usage Notes**:
-- Called exclusively from `StatsPanel`; no need to manage GPU state manually elsewhere.
-- After each generation, call `accelerator.clear_cache()` to free VRAM for subsequent operations.
+### 12. GPU Optimizer (Deferred)
+GPU optimization wrappers are deferred. The evolutionary optimizer runs on CPU only for now.
 
 ---
 
@@ -1035,14 +981,13 @@ FIB_COLORS = {
 
 ### 17. `app/widgets/stats_panel.py`
 
-**Purpose**: Optimization dashboard that visualizes performance and orchestrates CPU/GPU GA runs.
+**Purpose**: Optimization dashboard that visualizes performance and orchestrates GA runs (CPU-only).
 
 **Core Responsibilities**:
-- Loads strategy/backtest params into editable spin boxes; shares data with main UI.
-- Tracks population stats (generation, mean fitness, best fitness) and acceleration mode.
+- Loads strategy/backtest params into editable controls; shares data with main UI.
+- Tracks population stats (generation, mean fitness, best fitness).
 - Keeps equity curve + fitness evolution charts up to date.
 - Emits `optimization_step_complete` to let chart view highlight trades from best individual.
-- Supports GPU fallback: `GPU_AVAILABLE` is computed at import, and `_get_ga_settings()` pulls latest `.env` values before each run.
 
 **Workflow**:
 1. `Initialize Population` seeds GA with current UI params and persisted population size.
@@ -1176,17 +1121,40 @@ def evolution_step(population, data, tf, fitness_config=None, ...):
         fitness, metrics = evaluate_individual(ind, data, tf, fitness_config)
 ```
 
-**GPU Support** (`backtest/optimizer_gpu.py`, `backtest/engine_gpu_full.py`):
-```python
-def evolution_step_gpu(population, data, tf, fitness_config=None, ...):
-    # GPU batch evaluation with fitness_config
-    fitness_tensor = calculate_fitness_gpu_batch(metrics_list, fitness_config)
+### 2. Population Export/Import 🧬
 
-def calculate_fitness_gpu_batch(metrics_list, fitness_config=None, device=None):
-    # Use same calculate_fitness() for each metrics dict
-    fitness_scores = [calculate_fitness(m, fitness_config) for m in metrics_list]
-    return torch.tensor(fitness_scores, device=device)
+Resume or share progress by exporting/importing GA populations. Also supports automatic export and UI auto-start.
+
+```python
+from backtest.optimizer import export_population, Population
+from core.models import Timeframe
+
+# Export current population
+export_population(population, "population.json")
+
+# Load initial population (CPU-only)
+pop = Population.from_file("population.json", timeframe=Timeframe.m15, limit=24)
 ```
+
+UI Auto-Start and Auto-Export
+
+- Launch UI with a population and auto-start optimization:
+  - `poetry run python cli.py ui --ga-init-from population.json`
+  - or `poetry run python cli.py ga-init-from population.json`
+- On app launch: an empty marker file `processes/<pid>` is created (no contents).
+- On optimization Finish: the current population is automatically exported to `populations/<pid>.json` (after results render).
+- Iteration count for multi-step optimization is read from `.env` (`OPTIMIZER_ITERATIONS`).
+
+CLI Quick Reference
+
+- `ga-export OUTPUT [--size N] [--timeframe TF]`
+  - OUTPUT: destination JSON path
+  - --size: population size; defaults to `.env` `GA_POPULATION_SIZE`
+  - --timeframe: TF enum string (`1m,3m,5m,10m,15m,30m,60m`); defaults to `.env` timeframe
+- `ui --ga-init-from PATH`
+  - Loads population from PATH and auto-starts optimization after the UI and data are ready
+- `ga-init-from PATH`
+  - Alias for `ui --ga-init-from PATH`
 
 #### Fitness Presets
 
@@ -1284,23 +1252,14 @@ def get_current_params(self):
 def _run_single_step(self):
     # Get fitness config and pass to optimizer
     _, _, fitness_config = self.get_current_params()
-    
-    if self.use_gpu:
-        self.population = self.gpu_optimizer.evolution_step(
-            self.population,
-            self.current_data,
-            self.current_tf,
-            fitness_config=fitness_config,  # NEW
-            # ... other params ...
-        )
-    else:
-        self.population = evolution_step(
-            self.population,
-            self.current_data,
-            self.current_tf,
-            fitness_config=fitness_config,  # NEW
-            # ... other params ...
-        )
+    # CPU-only evolution step
+    self.population = evolution_step(
+        self.population,
+        self.current_data,
+        self.current_tf,
+        fitness_config=fitness_config,  # NEW
+        # ... other params ...
+    )
 ```
 
 **Main Window Updates** (`app/main.py`):
@@ -1581,8 +1540,6 @@ seller_params, bt_params, _ = editor.get_params()
 
 **Optimizer**:
 - `backtest/optimizer.py` - Updated `calculate_fitness()`, `evaluate_individual()`, `evolution_step()` (+60 lines)
-- `backtest/optimizer_gpu.py` - Updated `evolution_step_gpu()`, `GPUOptimizer.evolution_step()` (+15 lines)
-- `backtest/engine_gpu_full.py` - Updated `calculate_fitness_gpu_batch()` (+3 lines)
 
 **UI Components**:
 - `app/widgets/compact_params.py` - Reorganized into 4 sections, added fitness controls (+180 lines)
@@ -1810,7 +1767,7 @@ population = evolution_step(pop, data, tf, fitness_config=custom_fitness, ...)
 2. ✅ Reorganized parameter editor (4 logical sections)
 3. ✅ Time-based parameter display (minutes instead of bars)
 4. ✅ Eliminated parameter duplication (Fibonacci moved to main window)
-5. ✅ Full GPU support for fitness configs
+ 
 
 **Why It Matters**:
 - **Before**: One-size-fits-all optimization, bar-based parameters
@@ -1840,8 +1797,7 @@ poetry install
 cp .env.example .env
 nano .env  # Add POLYGON_API_KEY, tweak GA_* defaults if desired
 
-# 4. (Optional) Verify GPU availability
-poetry run python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+ 
 
 # 5. Run tests
 poetry run pytest -q
@@ -2183,7 +2139,7 @@ asyncio.create_task(live_trading_loop())
 2. Use **Settings → Optimization** to adjust GA hyperparameters (population size, mutation rate/sigma, elite fraction, tournament size, mutation probability). Hit **Save Settings** to persist them to `.env`.
 3. Back in the main window, ensure data is loaded (run a backtest once to populate the stats panel).
 4. Click **Initialize Population** in the stats panel; confirm the console log shows the configured population/parameters.
-5. Press **Step** repeatedly (or script future multi-step runs) to evolve the population. Watch fitness charts and acceleration status (CPU/GPU).
+5. Press **Step** repeatedly (or script future multi-step runs) to evolve the population. Watch fitness charts.
 6. Best parameters **automatically apply** to the "Best Parameters" panel as optimization progresses. Backtest results update automatically.
 
 ---
@@ -2316,13 +2272,13 @@ polygon_client.py (data layer)
     ↓
 provider.py (data orchestration)
     ↓
-local.py / gpu.py (indicators)
+local.py (indicators)
     ↓
 seller_exhaustion.py (strategy)
     ↓
 engine.py ─┬─► metrics.py
-engine_gpu_full.py │
-                   └─► optimizer_evolutionary.py / optimizer_gpu.py ──► stats_panel.py (visualization)
+engine.py │
+                   └─► optimizer_evolutionary.py ──► stats_panel.py (visualization)
     ↓
 cli.py / main.py (presentation)
 ```
@@ -2349,7 +2305,7 @@ cli.py / main.py (presentation)
 2. Stats panel loads settings, initializes Population(seed)
    ↓
 3. Evolution step runs:
-     • GPU path → engine_gpu_full.batch_backtest_full_gpu()/optimizer_gpu
+     • Acceleration deferred; CPU is the single source of truth
      • CPU path → engine.run_backtest()/optimizer
    ↓
 4. Best individual metrics → stats panel plots & console logs

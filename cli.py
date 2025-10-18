@@ -147,11 +147,76 @@ def backtest(
 
 
 @app.command()
-def ui():
-    """Launch the PySide6 UI"""
+def ui(
+    ga_init_from: str = typer.Option("", help="Path to GA population JSON to initialize and auto-start optimization"),
+):
+    """Launch the PySide6 UI (optionally initialize GA from file and auto-start)."""
     console.print("[cyan]Launching UI...[/cyan]")
     from app.main import main
-    main()
+    main(ga_init_from=ga_init_from or None)
+
+
+@app.command("ga-export")
+def ga_export(
+    output: str = typer.Argument(..., help="Output JSON file path for population"),
+    size: int = typer.Option(None, help="Population size (defaults to GA_POPULATION_SIZE)"),
+    timeframe: str = typer.Option(None, help="Override timeframe (e.g., 1m,3m,5m,10m,15m,30m,60m); defaults to settings.timeframe"),
+):
+    """Export a GA population (seeded by current settings) to JSON."""
+    from backtest.optimizer import Population, Individual, export_population
+    from config.settings import settings as app_settings
+    from strategy.seller_exhaustion import SellerParams
+    from core.models import BacktestParams
+
+    # Determine TF
+    tf = None
+    if timeframe is None:
+        # Map minutes in settings to enum
+        mapping = {
+            1: Timeframe.m1, 3: Timeframe.m3, 5: Timeframe.m5, 10: Timeframe.m10,
+            15: Timeframe.m15, 30: Timeframe.m30, 60: Timeframe.m60
+        }
+        try:
+            tf = mapping.get(int(app_settings.timeframe), Timeframe.m15)
+        except Exception:
+            tf = Timeframe.m15
+    else:
+        tf_map = {
+            "1m": Timeframe.m1, "3m": Timeframe.m3, "5m": Timeframe.m5,
+            "10m": Timeframe.m10, "15m": Timeframe.m15, "30m": Timeframe.m30, "60m": Timeframe.m60
+        }
+        tf = tf_map.get(timeframe.lower(), Timeframe.m15)
+
+    # Seed params from .env
+    seed_seller = SellerParams(
+        ema_fast=int(app_settings.strategy_ema_fast),
+        ema_slow=int(app_settings.strategy_ema_slow),
+        z_window=int(app_settings.strategy_z_window),
+        vol_z=float(app_settings.strategy_vol_z),
+        tr_z=float(app_settings.strategy_tr_z),
+        cloc_min=float(app_settings.strategy_cloc_min),
+        atr_window=int(app_settings.strategy_atr_window),
+    )
+    seed_backtest = BacktestParams(
+        fee_bp=float(app_settings.backtest_fee_bp),
+        slippage_bp=float(app_settings.backtest_slippage_bp),
+    )
+    seed = Individual(seller_params=seed_seller, backtest_params=seed_backtest)
+
+    pop_size = int(size) if size is not None else int(app_settings.ga_population_size)
+    population = Population(size=pop_size, seed_individual=seed, timeframe=tf)
+    export_population(population, output)
+    console.print(f"[green]✓ Exported population ({pop_size}) to {output}[/green]")
+
+
+@app.command("ga-init-from")
+def ga_init_from(
+    path: str = typer.Argument(..., help="Population JSON path to initialize UI and auto-start optimization"),
+):
+    """Launch UI with GA initialized from a population file and auto-start optimization."""
+    from app.main import main
+    console.print(f"[cyan]Launching UI with GA init from: {path}[/cyan]")
+    main(ga_init_from=path)
 
 
 if __name__ == "__main__":

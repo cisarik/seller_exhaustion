@@ -1,8 +1,8 @@
-# ADA Seller-Exhaustion Backtesting Tool v2.1
+# Seller-Exhaustion Entry - Fibonacci Exit Trading strategy Optimization Tool
 
-**Multi-timeframe strategy research, backtesting, and optimization for Cardano (ADAUSD)**
+**Multi-timeframe strategy research, backtesting, and optimization**
 
-A complete strategy development platform with Fibonacci-based exits, parameter optimization, GPU acceleration, and **strategy export for live trading**.
+A complete strategy development platform with Fibonacci-based exits, parameter optimization, and **strategy export for live trading**.
 
 **🚨 IMPORTANT**: This is a BACKTESTING tool, not a live trading application.  
 For live trading, export your strategy using **💾 Export Strategy** and use the separate trading agent (see **PRD_TRADING_AGENT.md**).
@@ -91,6 +91,38 @@ All four conditions must be true:
 
 **Workflow**: Backtest → Optimize → **Export** → Deploy to VPS Trading Agent
 
+### 🧬 Population Export/Import (NEW)
+- Export the full GA population to JSON for later continuation or sharing
+- Initialize optimization from a saved population instead of a random start
+– Automatic export on finish: writes `populations/<pid>.json` after results render
+- Process marker: creates an empty file `processes/<pid>` at launch (no contents)
+- APIs:
+  - `from backtest.optimizer import export_population, Population`
+  - `export_population(pop, "population.json")`
+  - `Population.from_file("population.json", timeframe=Timeframe.m15, limit=24)`
+  - `EvolutionaryOptimizer(..., initial_population_file="population.json").initialize(...)`
+
+### 🧰 CLI Commands (Population Management)
+
+- `ui --ga-init-from PATH`
+  - Launches UI, loads population from `PATH`, auto-starts optimization when the window and data are ready.
+  - Parameters: `PATH` is a JSON exported by ga-export or via the API.
+
+- `ga-export OUTPUT [--size N] [--timeframe TF]`
+  - Exports a population seeded from current `.env` strategy/backtest settings.
+  - `OUTPUT`: destination JSON path.
+  - `--size`: population size; defaults to `GA_POPULATION_SIZE` in `.env`.
+  - `--timeframe`: one of `1m,3m,5m,10m,15m,30m,60m`; if omitted uses `TIMEFRAME` from `.env`.
+
+- `ga-init-from PATH`
+  - Convenience alias for `ui --ga-init-from PATH`.
+
+### 🤖 Auto Behavior
+
+- On app launch: creates `processes/<pid>` (empty file) to mark the running process.
+- On optimization finish: automatically exports `populations/<pid>.json` (after results render).
+- Generations run by the auto-start flow are read from `.env` as `OPTIMIZER_ITERATIONS`.
+
 ### 🎨 Strategy Editor
 - Comprehensive parameter management with detailed explanations
 - **⭐ Golden Button**: One-click setup for optimal 61.8% Fibonacci target
@@ -110,16 +142,8 @@ All four conditions must be true:
 - Browse saved configurations
 - Export to JSON/YAML
 
-### ⚡ GPU Acceleration (Optional, Fully Optimized)
-- **18.5x speedup** for typical populations (24 individuals)
-- **32x speedup** for large populations (150+ individuals)
-- **Unified pipeline**: features + backtest + fitness on CUDA
-- **Multi-step optimization** with progress bar (10-1000 generations)
-- **Parameter grouping**: 82% reduction in redundant calculations
-- **Linear scaling** to 500+ individuals
-- **GPU memory management** with real-time usage display
-- **Robust fallback**: Auto-switches to multi-core or CPU if CUDA unavailable
-- **Production ready**: 50 generations in ~2-8 minutes
+### ⚠ Acceleration Note
+Acceleration (multi-core/GPU) is intentionally disabled to focus on improving the evolutionary algorithm and ADAM variant. It will return after the algorithms stabilize.
 
 ### 📈 Multi-Timeframe Support
 - 1m, 3m, 5m, 10m, 15m timeframes
@@ -285,21 +309,16 @@ seller_exhaustion-1/
 │       └── strategy_editor.py     # Parameter editor ⭐
 ├── backtest/
 │   ├── engine.py                  # CPU backtest with exit toggles
-│   ├── engine_gpu_full.py         # Full GPU pipeline (features + backtest)
-│   ├── optimizer.py               # Legacy GA helpers (kept for compatibility)
-│   ├── optimizer_evolutionary.py  # Evolutionary optimizer (UI default)
-│   ├── optimizer_multicore.py     # Multi-core CPU acceleration
+│   ├── optimizer.py               # GA helpers (population, evolution)
+│   ├── optimizer_evolutionary.py  # Evolutionary optimizer (CPU)
 │   ├── optimizer_adam.py          # Gradient-based optimizer variant
-│   ├── optimizer_factory.py       # Optimizer/acceleration selection helpers
-│   ├── optimizer_gpu.py           # GPU batch orchestration
+│   ├── optimizer_factory.py       # Optimizer selection helpers (CPU only)
 │   └── metrics.py                 # Performance calculations
 ├── indicators/
 │   ├── local.py                   # Pandas indicators
-│   ├── gpu.py                     # PyTorch indicators
 │   └── fibonacci.py               # Fib retracement calculations
 ├── strategy/
 │   ├── seller_exhaustion.py       # Strategy with Fib support
-│   ├── seller_exhaustion_gpu.py   # GPU feature builder (kept in sync with CPU)
 │   ├── params_store.py            # Parameter persistence
 │   └── timeframe_defaults.py      # ⭐ Timeframe scaling (NEW)
 ├── data/
@@ -454,8 +473,7 @@ poetry run pytest tests/test_fibonacci.py -v
 # With coverage
 poetry run pytest tests/ --cov=. --cov-report=html
 
-# Verify GPU (if CUDA available)
-poetry run python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+# (GPU acceleration is disabled; no CUDA required)
 ```
 
 **Test Results**: ✅ 19/19 passing (100%)
@@ -469,7 +487,7 @@ poetry run python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 - **Async**: httpx, qasync
 - **Data**: pandas, numpy
 - **UI**: PySide6 (Qt6), PyQtGraph
-- **Optimization**: NumPy GA + PyTorch GPU (optional)
+- **Optimization**: NumPy GA; ADAM prototype
 - **Config**: Pydantic Settings, python-dotenv
 - **Persistence**: JSON, YAML (pyyaml)
 - **CLI**: Typer, Rich
@@ -555,15 +573,7 @@ asyncio.run(run())
 
 ## 📊 Performance Notes
 
-### CPU Mode
-- Backtest 1 year 15m data: ~0.5s
-- Parameter sweep (10 configs): ~5s
-- GA optimization (24 pop, 10 gen): ~2-3 min
-
-### GPU Mode (CUDA)
-- Same GA optimization: ~10-30s (10-100x faster)
-- Batch eval 24 individuals: ~0.5s
-- VRAM usage: ~500MB typical
+Performance focuses on algorithmic correctness. Acceleration (multi-core/GPU) will be revisited after EA/ADAM stabilize.
 
 ---
 
@@ -581,7 +591,7 @@ asyncio.run(run())
 ✨ **Parameter Persistence** - Save/load evolved configurations  
 ✨ **Exit Toggles** - Clean defaults (Fib-only by default)  
 ✨ **Golden Button** - One-click optimal setup (61.8%)  
-✨ **GPU Acceleration** - PyTorch/CUDA optimization support  
+ 
 ✨ **Multi-Timeframe** - 1m, 3m, 5m, 10m, 15m support  
 
 ### Breaking Changes
@@ -593,35 +603,17 @@ See `CHANGELOG_DEFAULT_BEHAVIOR.md` for migration guide.
 
 ---
 
-## ⚡ GPU Acceleration (Optional, Full Pipeline)
+## ⚠ Note on Acceleration
 
-**Status**: ✅ Full-device pipeline with 18.5x-32x speedup
-
-GPU acceleration now runs feature engineering, backtesting, and fitness scoring end-to-end on CUDA via `batch_backtest_full_gpu`. The legacy three-phase system was removed in favor of a single high-utilization pipeline; CPU and multi-core execution remain available through the optimizer factory.
-
-### Performance Results
-
-| Population | GPU Time | CPU Time | **Speedup** | Per Individual |
-|------------|----------|----------|-------------|----------------|
-| 10 ind | 2.41s | 21.08s | **8.73x** ⚡ | 0.241s |
-| 24 ind | 2.73s | 50.57s | **18.50x** 🚀 | 0.114s |
-| 50 ind | 3.27s | ~105s | **~32x** 💥 | 0.065s |
-| 150 ind | ~9.8s | ~315s | **~32x** 🔥 | 0.065s |
-
-**Key Achievements**:
-- ✅ Unified pipeline (features + backtest + fitness) on device
-- ✅ GPU-native feature builder matches CPU trade counts 1:1
-- ✅ Detailed timing/throughput stats for each batch
-- ✅ Automatic fallback to CPU or multi-core when CUDA unavailable
+All acceleration paths (multi-core and GPU) are intentionally disabled and omitted from current workflows to reduce noise. The current focus is improving the evolutionary algorithm (and ADAM variant). Acceleration will be reintroduced when algorithms stabilize.
 
 ### Multi-Step Optimization UI
 
-**New Features**:
+Features:
 - **🚀 Optimize button**: Run 10-1000 generations automatically
 - **Progress bar**: Real-time ETA and generation count
 - **⏹ Cancel button**: Graceful interruption without data loss
-- **GPU memory display**: Monitor VRAM usage
-- **Thread-safe**: Non-blocking UI during optimization
+- Thread-safe, non-blocking UI during optimization
 
 **Workflow**:
 ```bash
@@ -635,66 +627,17 @@ poetry run python cli.py ui
 #    - Watch progress bar!
 #    - Cancel anytime if needed
 
-# Result: 50 generations in ~2-8 minutes (vs 42 minutes on CPU)
+# Result: 50 generations (CPU-only focus)
 ```
 
-### Pipeline Highlights
-
-- Batch-evaluates entire populations with one CUDA call (`batch_backtest_full_gpu`)
-- Uses `strategy/seller_exhaustion_gpu.py` to keep features in lockstep with CPU logic
-- Reports feature/build/backtest timing and utilization for diagnostics
-- Shares result handling with CPU GA, so outputs remain deterministic
-
-### Check CUDA Availability
-```bash
-poetry run python -c "import torch; print('CUDA:', torch.cuda.is_available())"
-
-# Check GPU info and recommendations
-poetry run python backtest/gpu_manager.py
-```
-
-### Install PyTorch with CUDA
-If CUDA is not detected, reinstall PyTorch with CUDA support:
-
-```bash
-# For CUDA 12.1 (most common)
-poetry run pip install --upgrade --force-reinstall \
-  torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# For CUDA 11.8
-poetry run pip install --upgrade --force-reinstall \
-  torch torchvision --index-url https://download.pytorch.org/whl/cu118
-```
-
-### NVIDIA Driver Requirements
-- **CUDA 12.1**: Driver ≥ 530.x
-- **CUDA 11.8**: Driver ≥ 450.x
-
-Check your driver: `nvidia-smi`
-
-### Real-World Performance
-
-**Typical Use Case** (24 individuals, 10k bars):
-- **Single Generation**: CPU ~50s → GPU ~2.7s (18.5x faster)
-- **50 Generations**: CPU ~42 min → GPU ~2.3 min (time saved: 40 minutes!)
-- **VRAM Usage**: < 1% of 10GB (massive headroom)
-
-**Large Population** (150 individuals, 10k bars):
-- **Single Generation**: CPU ~315s → GPU ~9.8s (32x faster)
-- **50 Generations**: CPU ~4.4 hours → GPU ~8 minutes (time saved: 4+ hours!)
-- **Overnight Run** (500 generations): ~82 minutes (vs 44 hours on CPU)
-
-### Automatic Fallback
-The optimizer attempts the full GPU pipeline first. If CUDA is unavailable—or a batch run fails—it transparently switches to multi-core (when configured) or sequential CPU evaluation. No manual configuration required.
+### Notes
+This release intentionally avoids detailing any acceleration paths. All examples and workflows assume CPU-only execution.
 
 ---
 
 ## 🐛 Troubleshooting
 
-**GPU not detected?**
-- Check driver: `nvidia-smi`
-- Reinstall PyTorch with correct CUDA version (see GPU section above)
-- Reduce population size if out of memory
+ 
 
 **No trades in backtest?**
 - Check signals: `feats['exhaustion'].sum()`
@@ -740,7 +683,7 @@ MIT
 - **Polygon.io** for crypto data
 - **PySide6** for Qt bindings
 - **PyQtGraph** for fast charting
-- **PyTorch** for GPU acceleration
+ 
 
 ---
 

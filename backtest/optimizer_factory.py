@@ -41,7 +41,8 @@ def create_optimizer(
         opt = create_optimizer("adam", "gpu", learning_rate=0.01)
     """
     optimizer_type = optimizer_type.lower()
-    acceleration = acceleration.lower()
+    # Acceleration is currently disabled: force CPU regardless of input
+    acceleration = 'cpu'
     
     if optimizer_type == "evolutionary":
         return _create_evolutionary_optimizer(acceleration, **kwargs)
@@ -74,12 +75,11 @@ def _create_evolutionary_optimizer(acceleration: str, **kwargs) -> EvolutionaryO
     # Override with kwargs
     defaults.update(kwargs)
     
-    # Add acceleration
-    defaults['acceleration'] = acceleration
+    # Add acceleration (forced to CPU to disable acceleration paths)
+    defaults['acceleration'] = 'cpu'
     
     # Add n_workers for multicore (from settings or default to cpu_count)
-    if acceleration == 'multicore' and 'n_workers' not in defaults:
-        defaults['n_workers'] = getattr(s, 'cpu_workers', multiprocessing.cpu_count())
+    # Multi-core disabled for now
     
     return EvolutionaryOptimizer(**defaults)
 
@@ -104,12 +104,11 @@ def _create_adam_optimizer(acceleration: str, **kwargs) -> AdamOptimizer:
     # Override with kwargs
     defaults.update(kwargs)
     
-    # Add acceleration
-    defaults['acceleration'] = acceleration
+    # Add acceleration (forced to CPU)
+    defaults['acceleration'] = 'cpu'
     
     # Add n_workers for multicore (from settings or default to cpu_count)
-    if acceleration == 'multicore' and 'n_workers' not in defaults:
-        defaults['n_workers'] = getattr(s, 'cpu_workers', multiprocessing.cpu_count())
+    # Multi-core disabled for now
     
     return AdamOptimizer(**defaults)
 
@@ -134,23 +133,7 @@ def get_available_accelerations(optimizer_type: str) -> list[str]:
     Returns:
         List of acceleration modes
     """
-    if optimizer_type == 'evolutionary':
-        # Check GPU availability
-        try:
-            from backtest.optimizer_gpu import has_gpu
-            if has_gpu():
-                return ['cpu', 'multicore', 'gpu']
-        except ImportError:
-            pass
-        return ['cpu', 'multicore']
-    
-    elif optimizer_type == 'adam':
-        # ADAM supports CPU/Multi-Core/GPU
-        import torch
-        if torch.cuda.is_available():
-            return ['cpu', 'multicore', 'gpu']
-        return ['cpu', 'multicore']
-    
+    # Acceleration choices are hidden/disabled for now
     return ['cpu']
 
 

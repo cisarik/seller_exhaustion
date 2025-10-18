@@ -16,6 +16,7 @@ from backtest.engine import run_backtest
 import config.settings as config_settings
 from core.logging_utils import get_logger
 from core.coach_logging import coach_log_manager
+import os
 
 # New modular optimizer system
 from backtest.optimizer_base import BaseOptimizer
@@ -64,15 +65,57 @@ class StatsPanel(QWidget):
         # Track previous best fitness to detect improvements
         self.prev_best_fitness = None
         
+        # Optional: path to an initial population JSON file
+        self.initial_population_file: str | None = None
+        
         self.init_ui()
         
         # Connect generation_complete signal for thread-safe UI updates
         self.generation_complete.connect(self._update_after_generation)
 
+    def set_initial_population_file(self, path: str | None):
+        """Set a population file to initialize the optimizer from (one-time)."""
+        self.initial_population_file = path
+
+    # ---------------- Auto Export Helpers ----------------
+    def _get_process_id(self) -> int:
+        try:
+            return os.getpid()
+        except Exception:
+            return 0
+
+    def _auto_export_population(self) -> None:
+        """Export current optimizer population to populations/<pid>.json if available."""
+        try:
+            if self.optimizer is None:
+                return
+            population = getattr(self.optimizer, "population", None)
+            if population is None:
+                logger.info("No population to export (optimizer has no population attribute)")
+                return
+            pid = self._get_process_id()
+            out_dir = os.path.join(os.getcwd(), "populations")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{pid}.json")
+            from backtest.optimizer import export_population
+            export_population(population, out_path)
+            logger.info("💾 Exported population to %s", out_path)
+        except Exception as e:
+            logger.exception("Failed to auto-export population: %s", e)
+
     @staticmethod
     def _format_dict_for_log(payload: dict) -> str:
         """Return deterministic key-sorted string representation for logging."""
         return ", ".join(f"{key}={payload[key]}" for key in sorted(payload))
+
+    @staticmethod
+    def _format_dict_compact(payload: dict, float_dp: int = 4) -> str:
+        """Deterministic, compact key/value list with basic float rounding."""
+        def _fmt(v):
+            if isinstance(v, float):
+                return f"{v:.{float_dp}f}"
+            return v
+        return ", ".join(f"{k}={_fmt(payload[k])}" for k in sorted(payload))
 
     @staticmethod
     def _compact_seller_params(p: SellerParams) -> str:
@@ -227,7 +270,9 @@ class StatsPanel(QWidget):
         try:
             self.optimizer = create_optimizer(
                 optimizer_type=optimizer_type,
-                acceleration=acceleration
+                acceleration=acceleration,
+                # If provided, initialize from file (supported by EvolutionaryOptimizer)
+                initial_population_file=self.initial_population_file,
             )
             
             # Initialize with seed parameters
@@ -236,6 +281,8 @@ class StatsPanel(QWidget):
                 seed_backtest_params=backtest_params,
                 timeframe=self.current_tf
             )
+            # Clear after use so subsequent re-inits don't re-use it inadvertently
+            self.initial_population_file = None
             
             # Reset best fitness tracking
             self.prev_best_fitness = None
@@ -250,12 +297,30 @@ class StatsPanel(QWidget):
             coach_log_manager.append(
                 f"OPT init name={self.optimizer.get_optimizer_name()} accel={self.optimizer.get_acceleration_mode()}"
             )
+            # Optimizer hyperparameters
+            hp = getattr(self.optimizer, 'config', {}) or {}
+            if isinstance(hp, dict) and hp:
+                coach_log_manager.append(f"OPT hp {self._format_dict_compact(hp, float_dp=3)}")
+            # Population status
+            pop = getattr(self.optimizer, 'population', None)
+            if pop is not None:
+                coach_log_manager.append(
+                    f"POP status size={getattr(pop, 'size', '--')} gen={getattr(pop, 'generation', '--')}"
+                )
             coach_log_manager.append(
                 f"SEED seller[{self._compact_seller_params(seller_params)}]"
             )
             coach_log_manager.append(
                 f"SEED backtest[{self._compact_backtest_params(backtest_params)}]"
             )
+            # Full seed dumps for agent completeness
+            from dataclasses import asdict as _asdict
+            full_seller = _asdict(seller_params)
+            full_backtest = (
+                backtest_params.model_dump() if hasattr(backtest_params, 'model_dump') else dict(backtest_params)
+            )
+            coach_log_manager.append(f"SEED SellerParams: {self._format_dict_compact(full_seller)}")
+            coach_log_manager.append(f"SEED BacktestParams: {self._format_dict_compact(full_backtest)}")
             
             return True
             
@@ -999,6 +1064,13 @@ class StatsPanel(QWidget):
         coach_log_manager.append(
             f"FIT preset={getattr(fitness_config, 'preset', '--')}"
         )
+        # Full fitness config dump
+        if hasattr(fitness_config, 'model_dump'):
+            fit_payload = fitness_config.model_dump()
+        else:
+            fit_payload = getattr(fitness_config, '__dict__', {})
+        if isinstance(fit_payload, dict) and fit_payload:
+            coach_log_manager.append(f"FIT cfg[{self._format_dict_compact(fit_payload)}]")
         coach_log_manager.append(
             f"SEED seller[{self._compact_seller_params(seed_seller)}]"
         )
@@ -1144,6 +1216,17 @@ class StatsPanel(QWidget):
                             f"gen={gen+1} fitness={current_best_fitness:.4f} "
                             f"{self._compact_metrics(best_metrics)}"
                         )
+                        # Include full param snapshot for best
+                        if best_seller is not None:
+                            from dataclasses import asdict as _asdict
+                            coach_log_manager.append(
+                                f"BEST seller[{self._format_dict_compact(_asdict(best_seller))}]"
+                            )
+                        if best_backtest is not None:
+                            btp = best_backtest.model_dump() if hasattr(best_backtest, 'model_dump') else dict(best_backtest)
+                            coach_log_manager.append(
+                                f"BEST backtest_params[{self._format_dict_compact(btp)}]"
+                            )
                         
                         # Run backtest for visualization using RAW data
                         logger.info("Running backtest with new best parameters...")
@@ -1329,6 +1412,9 @@ class StatsPanel(QWidget):
                 
             except Exception as e:
                 logger.exception("Error running final backtest: %s", e)
+        
+        # Always auto-export the final population snapshot
+        self._auto_export_population()
     
     def stop_optimization(self):
         """Stop ongoing multi-step optimization (keeps progress)."""

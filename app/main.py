@@ -1,4 +1,5 @@
 import sys
+import os
 import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QToolBar, QSplitter, QProgressBar,
@@ -58,9 +59,9 @@ logger = get_logger(__name__)
 class MainWindow(QMainWindow):
     """Main application window with toolbar, chart, and stats panel."""
     
-    def __init__(self):
+    def __init__(self, ga_init_from: str | None = None):
         super().__init__()
-        self.setWindowTitle("Seller-Exhaustion Strategy Optimizer")
+        self.setWindowTitle("Seller-Exhaustion Entry - Fibonacci Exit Trading Strategy Optimizer")
         self.setGeometry(100, 100, 1600, 1000)
         
         # Data and settings
@@ -74,6 +75,9 @@ class MainWindow(QMainWindow):
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
         self.current_range = (settings.last_date_from, settings.last_date_to)
+        
+        # Optional: path to initial GA population file for auto-start optimization
+        self.ga_init_from: str | None = ga_init_from
         
         self.init_ui()
     
@@ -622,8 +626,8 @@ class MainWindow(QMainWindow):
             # Update stats panel
             self.stats_panel.update_stats(result)
             
-            # Update chart with trade markers
-            self.chart_view.set_backtest_result(result)
+            # Update chart with trade markers and pass bt_params for Fib target
+            self.chart_view.set_backtest_result(result, bt_params)
 
             # Persist session snapshot
             self._persist_session(seller_params, bt_params, result)
@@ -712,6 +716,7 @@ class MainWindow(QMainWindow):
         try:
             # Get best individual's parameters
             seller_params = best_individual.seller_params
+            backtest_params = best_individual.backtest_params
             
             # Rebuild features for chart display
             raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
@@ -720,7 +725,7 @@ class MainWindow(QMainWindow):
             # Update chart with features and backtest results
             self.chart_view.feats = feats
             self.chart_view.params = seller_params
-            self.chart_view.set_backtest_result(backtest_result)
+            self.chart_view.set_backtest_result(backtest_result, backtest_params)
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             
@@ -1262,6 +1267,26 @@ class MainWindow(QMainWindow):
         
         # Try to auto-load cached data
         await self.try_load_cached_data()
+        
+        # If a GA population file was provided, initialize optimizer from it
+        # and auto-start multi-step optimization after the UI is ready
+        if self.ga_init_from:
+            try:
+                # Provide the initial population file to the stats panel
+                self.stats_panel.set_initial_population_file(self.ga_init_from)
+
+                # Wait until data is loaded before starting optimization
+                def _maybe_start():
+                    if self.stats_panel.current_data is not None:
+                        logger.info("Auto-starting optimization from population file: %s", self.ga_init_from)
+                        self.stats_panel.run_multi_step_optimize()
+                    else:
+                        # Poll again shortly until data is ready
+                        QTimer.singleShot(200, _maybe_start)
+
+                QTimer.singleShot(200, _maybe_start)
+            except Exception as e:
+                logger.exception("Failed to auto-start optimization from file: %s", e)
     
     def load_parameters_state(self):
         """Load saved parameters from .env into compact editor."""
@@ -1290,14 +1315,26 @@ class MainWindow(QMainWindow):
             # Parameters will remain at defaults if loading fails
 
 
-def main():
+def main(ga_init_from: str | None = None):
     """Main entry point for the UI application."""
     configure_logging()
+    # Create processes/<pid> marker file at startup (empty file)
+    try:
+        pid = os.getpid()
+        proc_dir = os.path.join(os.getcwd(), "processes")
+        os.makedirs(proc_dir, exist_ok=True)
+        marker_path = os.path.join(proc_dir, str(pid))
+        with open(marker_path, "a", encoding="utf-8"):
+            pass  # create empty file if not exists
+        logger.info("Process marker created: %s", marker_path)
+    except Exception as e:
+        # Non-fatal
+        print(f"Warning: Could not create process marker: {e}")
 
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_FOREST_QSS)
     
-    window = MainWindow()
+    window = MainWindow(ga_init_from=ga_init_from)
     window.show()
     
     if HAS_QASYNC:

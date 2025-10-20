@@ -17,6 +17,7 @@ pyqtgraph = "^0.13"
 PySide6 = "^6.7"
 qasync = "^0.27"
 typer = {version = "^0.12", extras = ["all"]}
+click = ">=8.1,<8.2"
 python-dotenv = "^1.0"
 rich = "^13.0"
 torch = "^2.8.0"

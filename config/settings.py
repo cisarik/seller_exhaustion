@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     
     # ADAM Optimizer Parameters
     adam_learning_rate: float = 0.01
-    adam_epsilon: float = 1e-3
+    adam_epsilon: float = 0.02  # Finite difference step size (was 1e-3, too small for integer params)
     adam_max_grad_norm: float = 1.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.999
@@ -185,7 +185,7 @@ class SettingsManager:
             
             f.write("# ADAM Optimizer Parameters\n")
             f.write(f"ADAM_LEARNING_RATE={existing.get('ADAM_LEARNING_RATE', '0.01')}\n")
-            f.write(f"ADAM_EPSILON={existing.get('ADAM_EPSILON', '0.001')}\n")
+            f.write(f"ADAM_EPSILON={existing.get('ADAM_EPSILON', '0.02')}\n")  # Fixed: was 0.001
             f.write(f"ADAM_MAX_GRAD_NORM={existing.get('ADAM_MAX_GRAD_NORM', '1.0')}\n")
             f.write(f"ADAM_BETA1={existing.get('ADAM_BETA1', '0.9')}\n")
             f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")

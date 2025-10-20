@@ -26,6 +26,7 @@ from backtest.optimizer import (
     get_param_bounds_for_timeframe,
     INTEGER_PARAMS,
     VALID_FIB_LEVELS,
+    Population,
 )
 from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams, Timeframe, FitnessConfig
@@ -59,6 +60,7 @@ def _evaluate_perturbed_parameter(
     Returns:
         (param_index, fitness, param_name) tuple
     """
+    import numpy as np
     import pandas as pd
     from core.models import Timeframe, FitnessConfig
     
@@ -78,11 +80,16 @@ def _evaluate_perturbed_parameter(
     
     # Perturb parameter
     perturbed = param_vector.copy()
+    original_value = perturbed[param_index]
     perturbed[param_index] = min(1.0, perturbed[param_index] + epsilon)
     
     # Convert to SellerParams and BacktestParams
-    from backtest.optimizer import get_param_bounds_for_timeframe
+    from backtest.optimizer import get_param_bounds_for_timeframe, INTEGER_PARAMS, VALID_FIB_LEVELS
     bounds = get_param_bounds_for_timeframe(timeframe)
+    
+    # DEBUG: Print perturbation details for first few parameters
+    if param_index < 3:
+        print(f"  DEBUG [{param_name}]: epsilon={epsilon:.4f}, normalized: {original_value:.4f} → {perturbed[param_index]:.4f}")
     
     # Denormalize
     idx = 0
@@ -97,10 +104,17 @@ def _evaluate_perturbed_parameter(
     
     backtest_dict = {}
     for key in ['fib_swing_lookback', 'fib_swing_lookahead', 'fib_target_level', 'fee_bp', 'slippage_bp']:
-        min_val, max_val = bounds[key]
-        val = perturbed[idx] * (max_val - min_val) + min_val
-        if key in INTEGER_PARAMS:
-            val = int(round(val))
+        # Special handling for fib_target_level (discrete choice)
+        if key == 'fib_target_level':
+            # Map 0-1 range back to discrete level
+            level_idx = int(round(perturbed[idx] * (len(VALID_FIB_LEVELS) - 1)))
+            level_idx = np.clip(level_idx, 0, len(VALID_FIB_LEVELS) - 1)
+            val = VALID_FIB_LEVELS[level_idx]
+        else:
+            min_val, max_val = bounds[key]
+            val = perturbed[idx] * (max_val - min_val) + min_val
+            if key in INTEGER_PARAMS:
+                val = int(round(val))
         backtest_dict[key] = val
         idx += 1
     
@@ -112,6 +126,12 @@ def _evaluate_perturbed_parameter(
     
     seller_params = SellerParams(**seller_dict)
     backtest_params = BacktestParams(**backtest_dict)
+    
+    # DEBUG: Print denormalized values for perturbed parameter
+    if param_index < 7:  # Strategy params
+        actual_value = seller_dict[list(seller_dict.keys())[param_index]]
+        if param_index < 3:
+            print(f"  DEBUG [{param_name}]: actual value = {actual_value}")
     
     try:
         feats = build_features(data, seller_params, timeframe)
@@ -143,12 +163,13 @@ class AdamOptimizer(BaseOptimizer):
     def __init__(
         self,
         learning_rate: float = 0.01,
-        epsilon: float = 1e-3,  # For finite differences
+        epsilon: float = 0.02,  # For finite differences (2% step ensures meaningful changes in integer params)
         max_grad_norm: float = 1.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.999,
         adam_epsilon: float = 1e-8,
-        n_workers: Optional[int] = None
+        n_workers: Optional[int] = None,
+        initial_population_file: Optional[str] = None,
     ):
         """
         Initialize ADAM optimizer.
@@ -179,6 +200,7 @@ class AdamOptimizer(BaseOptimizer):
         self.params_tensor = None
         self.optimizer = None
         self.timeframe = None
+        self.initial_population_file = initial_population_file
         
         # Tracking
         self.iteration = 0
@@ -208,7 +230,20 @@ class AdamOptimizer(BaseOptimizer):
         self.timeframe = timeframe
         self.bounds = get_param_bounds_for_timeframe(timeframe)
         
-        # Use defaults if no seed provided
+        # If nie sú poskytnuté seed parametre a máme súbor populácie, načítame z neho
+        if (seed_seller_params is None or seed_backtest_params is None) and self.initial_population_file:
+            try:
+                pop = Population.from_file(self.initial_population_file, timeframe=timeframe)
+                best = getattr(pop, 'best_ever', None)
+                ind = best if best is not None else (pop.individuals[0] if getattr(pop, 'individuals', []) else None)
+                if ind is not None:
+                    seed_seller_params = seed_seller_params or ind.seller_params
+                    seed_backtest_params = seed_backtest_params or ind.backtest_params
+                    print(f"✓ ADAM seed načítaný z populácie: {self.initial_population_file}")
+            except Exception as e:
+                print(f"⚠ Nepodarilo sa načítať populáciu pre ADAM: {e}. Použijú sa defaulty alebo poskytnuté seedy.")
+        
+        # Use defaults if still missing
         if seed_seller_params is None:
             seed_seller_params = SellerParams()
         if seed_backtest_params is None:
@@ -244,6 +279,7 @@ class AdamOptimizer(BaseOptimizer):
             f"✓ ADAM initialized with learning_rate={self.lr}, fd_epsilon={self.fd_epsilon}, "
             f"n_workers={self.n_workers}"
         )
+        print(f"  DEBUG: Epsilon value being used: {self.fd_epsilon}")
     
     def _params_to_vector(self, seller_params: SellerParams, backtest_params: BacktestParams) -> np.ndarray:
         """Convert parameters to normalized vector (0-1 range)."""
@@ -423,17 +459,24 @@ class AdamOptimizer(BaseOptimizer):
         """
         # Multi-core CPU mode
         if self.n_workers > 1:
+            current_vector = self.params_tensor.detach().cpu().numpy()
+            
+            # Evaluate at current point first
+            if progress_callback:
+                progress_callback(0, len(current_vector) + 1, "Evaluating current parameters...")
+            
+            f_current, metrics_current = self._evaluate_fitness(current_vector, data, fitness_config)
+            print(f"Current fitness: {f_current:.4f} | Trades: {metrics_current.get('n', 0)}")
+            
+            # Compute gradients in parallel (pass f_current)
             gradient = self._compute_gradient_parallel(
-                self.params_tensor.detach().cpu().numpy(),
-                None,  # Will be calculated inside
+                current_vector,
+                f_current,
                 data,
                 fitness_config,
                 progress_callback,
                 stop_flag
             )
-            # Get current fitness (already computed in parallel method)
-            current_vector = self.params_tensor.detach().cpu().numpy()
-            f_current, metrics_current = self._evaluate_fitness(current_vector, data, fitness_config)
             
             # Negate for maximization
             gradient = -gradient

@@ -318,9 +318,10 @@ class SettingsDialog(QDialog):
         # Epsilon (for finite differences)
         self.adam_epsilon = QDoubleSpinBox()
         self.adam_epsilon.setRange(1e-5, 0.1)
-        self.adam_epsilon.setSingleStep(0.0001)
-        self.adam_epsilon.setDecimals(5)
-        self.adam_epsilon.setValue(0.001)
+        self.adam_epsilon.setSingleStep(0.001)
+        self.adam_epsilon.setDecimals(4)
+        self.adam_epsilon.setValue(0.02)
+        self.adam_epsilon.setToolTip("Step size for finite difference gradient approximation. Too small = no parameter change, too large = noisy gradients. Recommended: 0.01-0.05")
         adam_layout.addRow("FD Epsilon:", self.adam_epsilon)
         
         # Max gradient norm
@@ -530,7 +531,7 @@ class SettingsDialog(QDialog):
     def reset_adam_params(self):
         """Reset ADAM optimizer parameters to defaults."""
         self.adam_learning_rate.setValue(0.01)
-        self.adam_epsilon.setValue(0.001)
+        self.adam_epsilon.setValue(0.02)
         self.adam_max_grad_norm.setValue(1.0)
         self.adam_beta1.setValue(0.9)
         self.adam_beta2.setValue(0.999)

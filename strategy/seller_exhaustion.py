@@ -99,7 +99,8 @@ def _build_features_pandas(
     out["tr_z"] = zscore(tr_proxy, z_window_bars)
 
     # Close location in candle (0 = low, 1 = high)
-    span = (out["high"] - out["low"]).replace(0, np.nan)
+    span = out["high"] - out["low"]
+    span = span.mask(span == 0, np.nan)
     out["cloc"] = (out["close"] - out["low"]) / span
 
     # Generate exhaustion signal

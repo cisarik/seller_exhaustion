@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
+from enum import Enum
+
 import typer
 import pandas as pd
 from rich.console import Console
@@ -10,6 +12,13 @@ from strategy.seller_exhaustion import SellerParams, build_features
 from backtest.engine import run_backtest
 from core.models import Timeframe, BacktestParams
 from backtest.metrics import print_metrics
+from backtest.optimizer_factory import create_optimizer
+from core.models import FitnessConfig
+
+
+class OptimizerChoice(str, Enum):
+    evolutionary = "evolutionary"
+    adam = "adam"
 
 app = typer.Typer(help="ADA Seller-Exhaustion Agent CLI")
 console = Console()
@@ -20,7 +29,7 @@ def fetch(
     ticker: str = typer.Option("X:ADAUSD", help="Ticker symbol"),
     from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
     to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
-    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
+    tf: Timeframe = typer.Option("15m", case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
 ):
     """Fetch bar data from Polygon.io with selectable timeframe."""
     
@@ -52,7 +61,7 @@ def backtest(
     ticker: str = typer.Option("X:ADAUSD", help="Ticker symbol"),
     from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
     to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
-    tf: Timeframe = typer.Option(Timeframe.m15, case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
+    tf: Timeframe = typer.Option("15m", case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
     ema_fast_min: int = typer.Option(96 * 15, help="Fast EMA window in minutes"),
     ema_slow_min: int = typer.Option(672 * 15, help="Slow EMA window in minutes"),
     z_window_min: int = typer.Option(672 * 15, help="Z-score lookback in minutes"),
@@ -63,6 +72,7 @@ def backtest(
     fee_bp: float = typer.Option(5.0, help="Fee in basis points"),
     slippage_bp: float = typer.Option(5.0, help="Slippage in basis points"),
     output: str = typer.Option("trades.csv", help="Output CSV file for trades"),
+    data: str = typer.Option("", help="Path to cached OHLCV DataFrame (parquet/pickle) to use instead of fetching; e.g. .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet"),
 ):
     """Run backtest on historical data"""
     
@@ -73,9 +83,21 @@ def backtest(
         
         try:
             # Fetch data
-            console.print(f"[cyan]Fetching data from {from_date} to {to_date}...[/cyan]")
-            df = await dp.fetch(ticker, tf, from_date, to_date)
-            console.print(f"[green]✓ Fetched {len(df)} bars[/green]")
+            if data:
+                console.print(f"[cyan]Loading cached data from {data}...[/cyan]")
+                if data.endswith(".parquet"):
+                    df = pd.read_parquet(data)
+                elif data.endswith(".pkl") or data.endswith(".pickle"):
+                    df = pd.read_pickle(data)
+                else:
+                    raise ValueError("Unsupported --data file type; use .parquet or .pkl")
+                if df.index.name == 'ts':
+                    df.index = pd.to_datetime(df.index, utc=True)
+                console.print(f"[green]✓ Loaded {len(df)} bars from cache[/green]")
+            else:
+                console.print(f"[cyan]Fetching data from {from_date} to {to_date}...[/cyan]")
+                df = await dp.fetch(ticker, tf, from_date, to_date)
+                console.print(f"[green]✓ Fetched {len(df)} bars[/green]")
             
             # Build features
             console.print("[cyan]Building features...[/cyan]")
@@ -219,6 +241,86 @@ def ga_init_from(
     from app.main import main
     console.print(f"[cyan]Launching UI with GA init from: {path}[/cyan]")
     main(ga_init_from=path)
+
+
+@app.command()
+def optimize(
+    ticker: str = typer.Option("X:ADAUSD", "--ticker", help="Ticker symbol"),
+    from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
+    to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
+    tf: Timeframe = typer.Option("15m", "--tf", case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
+    optimizer: OptimizerChoice = typer.Option(OptimizerChoice.evolutionary, "--optimizer", "-o", help="Optimizer type: evolutionary|adam"),
+    init_from: str = typer.Option("", "--init-from", "-i", help="Path to population JSON to initialize optimizer (for GA uses full pop; for ADAM seeds params)"),
+    generations: int = typer.Option(10, "--generations", "-g", help="Number of optimization steps/generations to run"),
+    data: str = typer.Option("", "--data", help="Path to cached OHLCV DataFrame (parquet/pickle) to use instead of fetching; e.g. .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet"),
+):
+    """Run optimization headlessly (CLI) with chosen optimizer and optional population seed file."""
+
+    async def _run():
+        console.print(f"[cyan]Optimizing {ticker} on {tf.value} using {optimizer.value.upper()}...[/cyan]")
+        dp = DataProvider()
+        try:
+            # Load data: prefer --data if provided, else fetch by date range
+            if data:
+                console.print(f"[cyan]Loading cached data from {data}...[/cyan]")
+                if data.endswith(".parquet"):
+                    df = pd.read_parquet(data)
+                elif data.endswith(".pkl") or data.endswith(".pickle"):
+                    df = pd.read_pickle(data)
+                else:
+                    raise ValueError("Unsupported --data file type; use .parquet or .pkl")
+                # Normalize index if needed
+                if df.index.name == 'ts':
+                    df.index = pd.to_datetime(df.index, utc=True)
+            else:
+                df = await dp.fetch(ticker, tf, from_date, to_date)
+            if len(df) == 0:
+                raise RuntimeError("No data fetched")
+
+            # Build features with defaults (will be overridden by optimizer seeds)
+            seed_params = SellerParams()
+            feats = build_features(df, seed_params, tf)
+
+            # Create optimizer (pass initial_population_file when provided)
+            kwargs = {}
+            if init_from:
+                kwargs["initial_population_file"] = init_from
+
+            opt = create_optimizer(optimizer_type=optimizer.value, **kwargs)
+
+            # Initialize from defaults; ADAM môže načítať seed z init_from vo vnútri
+            opt.initialize(seed_seller_params=SellerParams(), seed_backtest_params=BacktestParams(), timeframe=tf)
+
+            # Fitness config (balanced by default)
+            fitness_cfg = FitnessConfig.get_preset_config("balanced") if hasattr(FitnessConfig, "get_preset_config") else FitnessConfig()
+
+            best_fitness = None
+            for i in range(max(1, generations)):
+                res = opt.step(feats, tf, fitness_cfg)
+                best_fitness = res.fitness
+                console.print(
+                    f"[green]✓ Step {i+1}/{generations}[/green] "
+                    f"fitness={res.fitness:.4f} trades={res.metrics.get('n', 0)} "
+                    f"win={res.metrics.get('win_rate', 0.0):.1%} avgR={res.metrics.get('avg_R', 0.0):.2f}"
+                )
+
+            sp, bp, fit = opt.get_best_params()
+            if sp and bp:
+                console.print("\n[bold]Best parameters:[/bold]")
+                console.print(f"fitness={fit:.4f}")
+                console.print(f"seller_params={sp}")
+                console.print(f"backtest_params={bp}")
+            else:
+                console.print("[yellow]No best params available[/yellow]")
+
+        except Exception as e:
+            console.print(f"[red]✗ Optimization error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
+        finally:
+            await dp.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

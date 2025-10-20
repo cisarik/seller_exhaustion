@@ -102,7 +102,7 @@ All four conditions must be true:
   - `Population.from_file("population.json", timeframe=Timeframe.m15, limit=24)`
   - `EvolutionaryOptimizer(..., initial_population_file="population.json").initialize(...)`
 
-### 🧰 CLI Commands (Population Management)
+### 🧰 CLI Commands (Population & Optimization)
 
 - `ui --ga-init-from PATH`
   - Launches UI, loads population from `PATH`, auto-starts optimization when the window and data are ready.
@@ -116,6 +116,25 @@ All four conditions must be true:
 
 - `ga-init-from PATH`
   - Convenience alias for `ui --ga-init-from PATH`.
+
+- `optimize` (headless optimization without UI)
+  - Arguments:
+    - `--optimizer evolutionary|adam` — choose optimizer type (default: evolutionary)
+    - `--init-from PATH` — seed from population JSON
+      - GA: loads the entire population
+      - ADAM: uses `best_ever` or the first individual as seed parameters
+    - `--from/--to/--tf` — date range and timeframe
+    - `--generations N` — number of steps/generations (default: 10)
+  - Examples:
+    ```bash
+    # ADAM seeded from a saved population
+    poetry run python cli.py optimize --optimizer adam \
+      --init-from populations/118576.json --from 2024-12-01 --to 2024-12-31 --tf 15m --generations 10
+
+    # GA with a loaded population and 25 generations
+    poetry run python cli.py optimize --optimizer evolutionary \
+      --init-from populations/118576.json --from 2024-12-01 --to 2024-12-31 --tf 15m --generations 25
+    ```
 
 ### 🤖 Auto Behavior
 
@@ -151,13 +170,17 @@ Feature computation now runs on pandas vectorized operations only (Spectre/GPU p
 - **Consistent strategy behavior across all timeframes**
 - Automatic parameter scaling with user confirmation
 
-### 🎛️ Genetic Algorithm Optimizer
+### 🎛️ Optimizers (GA + ADAM)
 - Population-based parameter search
 - **Timeframe-aware optimization bounds**
 - Configurable mutation rate, sigma, elitism
 - Fitness evolution tracking
 - Apply best parameters to UI
 - Worker process count configurable in Settings → Optimization (set to 1 for sequential runs)
+ 
+ADAM (gradient-based, CPU):
+- Supports `--init-from` in CLI and `initial_population_file` in code: uses best or first individual from file as seed parameters
+- Finite differences + Adam updates; best on smoother fitness landscapes
 
 ### 🖥️ Dark Forest UI
 - Interactive PyQtGraph candlestick charts
@@ -196,6 +219,35 @@ poetry run python cli.py ui
 #    - Click Step repeatedly (parameters auto-apply)
 #    - Save in Strategy Editor if satisfied
 ```
+
+### Test Scripts (Quick CLI Testing)
+
+**NEW**: Convenient bash scripts for quick optimizer testing:
+
+```bash
+# ADAM Optimizer (gradient-based fine-tuning)
+./test_cli_adam.sh [population] [data] [timeframe] [generations]
+# Example: ./test_cli_adam.sh populations/118576.json .data/X_ADAUSD_2024-01-14_2025-10-17_15minute.parquet 15m 10
+
+# Genetic Algorithm (broad exploration)
+./test_cli_ga.sh [population] [data] [timeframe] [generations]
+# Example: ./test_cli_ga.sh populations/118576.json .data/X_ADAUSD_2024-01-14_2025-10-17_15minute.parquet 15m 20
+```
+
+**Features**:
+- ✅ Forces correct ADAM epsilon (0.02) via environment variable
+- ✅ Uses largest dataset by default (61,600 bars, 641 days)
+- ✅ Includes debug output for gradient computation
+- ✅ No line-break issues (tested on bash and fish)
+
+**Key Differences**:
+| Feature | GA (test_cli_ga.sh) | ADAM (test_cli_adam.sh) |
+|---------|---------------------|-------------------------|
+| **Strategy** | Population evolution | Gradient descent |
+| **Speed** | ~5s/generation | ~60s/generation |
+| **Default gens** | 5 | 1 |
+| **Best for** | Exploration | Refinement |
+| **Epsilon** | N/A | Fixed at 0.02 |
 
 ---
 
@@ -538,8 +590,14 @@ poetry run python cli.py fetch --from 2024-01-01 --to 2024-12-31
 # Run backtest (Fibonacci exits only, default)
 poetry run python cli.py backtest --from 2024-01-01 --to 2024-12-31
 
+# Run backtest using cached parquet/pickle instead of fetching
+poetry run python cli.py backtest --data .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet --tf 15m
+
 # Launch GUI (recommended)
 poetry run python cli.py ui
+
+# Headless optimalizácia (GA alebo ADAM)
+poetry run python cli.py optimize --optimizer adam --init-from populations/118576.json --from 2024-12-01 --to 2024-12-31 --tf 15m --generations 10
 ```
 
 ### Programmatic
@@ -643,7 +701,7 @@ The entire pipeline is CPU-based. Parallelism comes from the configurable worker
 
 ## 🐛 Troubleshooting
 
- 
+### General Issues
 
 **No trades in backtest?**
 - Check signals: `feats['exhaustion'].sum()`
@@ -658,13 +716,62 @@ The entire pipeline is CPU-based. Parallelism comes from the configurable worker
 - Click 💾 Save Params (not auto-saved)
 - Check `.strategy_params/` directory created
 
+### ADAM Optimizer Issues
+
+**All workers show same signal count?**
+- **Problem**: Epsilon too small (e.g., 0.0007), perturbations don't affect parameters
+- **Symptom**: All workers report identical signal counts (e.g., `signals=66` every time)
+- **Solution**: Use `./test_cli_adam.sh` which forces `ADAM_EPSILON=0.02`
+- **Root cause**: Environment variable override (Pydantic priority: env var > .env file > defaults)
+
+**Zero gradients for strategy parameters?**
+- **Problem**: Same as above - epsilon too small
+- **Check**: Look for `DEBUG: Epsilon value being used: X.XXXX` in output
+- **Expected**: Should be `0.02`, not `0.0007` or `0.001`
+- **Fix**: 
+  ```bash
+  # Option 1: Use test script (recommended)
+  ./test_cli_adam.sh
+  
+  # Option 2: Set environment variable manually
+  export ADAM_EPSILON=0.02
+  ./adam.sh
+  
+  # Option 3: Unset stale variable
+  unset ADAM_EPSILON  # bash
+  set -e ADAM_EPSILON  # fish
+  ```
+
+**Why epsilon=0.02?**
+- Integer parameters need ~2% perturbation to change by 1+ bars
+- Example: EMA Fast = 96 bars with epsilon=0.001 → 96.144 → rounds to 96 (no change!)
+- With epsilon=0.02 → 98.88 → rounds to 99 (3 bar change ✓)
+- Continuous parameters also benefit from larger step size
+
+**Checking epsilon in code:**
+```bash
+# Verify what settings will load
+poetry run python -c "from config.settings import settings; print(f'Epsilon: {settings.adam_epsilon}')"
+
+# Check environment variable
+echo $ADAM_EPSILON  # bash
+env | grep ADAM_EPSILON  # all shells
+```
+
+**Debug mode:**
+The ADAM optimizer includes debug output showing:
+- Epsilon value being used
+- Normalized parameter perturbations (0-1 range)
+- Actual parameter values after denormalization
+- Signal counts for each worker (should vary!)
+
 See `AGENTS.md` Troubleshooting section for more.
 
 ---
 
 ## 🛣️ Roadmap
 
-### v2.1 (Next)
+### v3.1 (Next)
 - [ ] Multi-Fib targets (partial exits)
 - [ ] Fibonacci visualization on chart
 - [ ] Auto-save best GA parameters
@@ -736,6 +843,6 @@ User-defined weights for specific optimization goals.
 
 ---
 
-**Version**: 2.2.0  
+**Version**: 3.0.1  
 **Last Updated**: 2025-01-17  
 **Status**: ✅ Production Ready ????????????????????????????????????

@@ -1,6 +1,6 @@
 # AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion **BACKTESTING** Tool
 
-**Last Updated**: 2025-01-17 (v2.2 - CPU Simplification)  
+**Last Updated**: 2025-01-17 (v3.0.1 - ADAM optimizer fixes: epsilon 0.0007 → 0.02)  
 **Project**: ADA Seller-Exhaustion **Backtesting & Strategy Development** Tool  
 **Owner**: Michal  
 **Python Version**: 3.10+ (tested on 3.13)
@@ -1001,7 +1001,7 @@ FIB_COLORS = {
 
 ### 18. `cli.py`
 
-**Purpose**: Typer-based CLI with three commands.
+**Purpose**: Typer-based CLI with commands for fetch/backtest/UI and headless optimization.
 
 **Commands**:
 
@@ -1021,9 +1021,36 @@ FIB_COLORS = {
      --output trades.csv
    ```
 
-3. **ui**: Launch PySide6 GUI
+3. **ui**: Launch PySide6 GUI (with optional auto-init from population)
    ```bash
-   poetry run python cli.py ui
+   poetry run python cli.py ui --ga-init-from populations/118576.json
+   ```
+
+4. **ga-export**: Export GA populácie
+   ```bash
+   poetry run python cli.py ga-export populations/out.json --size 24 --timeframe 15m
+   ```
+
+5. **ga-init-from**: Alias for `ui --ga-init-from`
+   ```bash
+   poetry run python cli.py ga-init-from populations/118576.json
+   ```
+
+6. **optimize**: Headless optimization without UI (GA or ADAM)
+   ```bash
+   # ADAM seeded from population (uses best_ever or first individual)
+   poetry run python cli.py optimize --optimizer adam \
+     --init-from populations/118576.json --from 2024-12-01 --to 2024-12-31 --tf 15m --generations 10
+
+   # GA with loaded population and 25 generations
+   poetry run python cli.py optimize --optimizer evolutionary \
+     --init-from populations/118576.json --from 2024-12-01 --to 2024-12-31 --tf 15m --generations 25
+   ```
+
+   Using cached data instead of fetching:
+   ```bash
+   poetry run python cli.py backtest --data .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet --tf 15m
+   poetry run python cli.py optimize --optimizer adam --data .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet --tf 15m --generations 10
    ```
 
 **Error Handling**:
@@ -1040,8 +1067,10 @@ FIB_COLORS = {
 - **Spectre/GPU removal (~900 LOC deleted):** Feature computation is now exclusively pandas; the old GPU path was 319× slower (51 s → 0.16 s) and produced incorrect signals.
 - **CPU performance snapshot:** Expect 0.16 s feature builds, 0.18 s backtests, ~4–5 s GA generations on a 12-core CPU (~30 s single-core) → 100 generations ≈ 8 minutes.
 - **UI auto-update fix:** `app/main.py` now refreshes charts, metrics, equity curve, and status bar immediately whenever Stats Panel reports a new best individual.
-- **Documentation refresh:** README.md, PRD.md, and this guide now describe the CPU-only architecture; do not add GPU dependencies without profiling + tests.
+- **Documentation refresh:** README.md, PRD.md, and this guide now cover the headless `optimize` command and seeding ADAM from population; do not add GPU deps without profiling + tests.
 - **Settings cleanup:** Acceleration tab removed—worker processes are configured from the Optimization tab (set to 1 for sequential runs).
+- **ADAM optimizer fixes:** Fixed critical epsilon issue (was 0.0007, now 0.02 for meaningful perturbations); added debug output showing epsilon, perturbations, and denormalized values; created `test_cli_adam.sh` and `test_cli_ga.sh` test scripts with proper epsilon handling and largest dataset defaults (61,600 bars).
+- **CLI improvements:** Fixed Timeframe enum parsing; added `--data` flag for cached parquet files; all test scripts avoid line-continuation issues.
 
 ---
 

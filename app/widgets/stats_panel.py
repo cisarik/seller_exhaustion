@@ -23,9 +23,7 @@ from backtest.optimizer_base import BaseOptimizer
 from backtest.optimizer_factory import (
     create_optimizer,
     get_available_optimizers,
-    get_available_accelerations,
     get_optimizer_display_name,
-    get_acceleration_display_name
 )
 import multiprocessing
 
@@ -248,9 +246,12 @@ class StatsPanel(QWidget):
             logger.error("No data loaded.")
             return False
         
-        # Get optimizer type and acceleration from UI
+        # Get optimizer type from UI, acceleration from Settings
         optimizer_type = self.optimizer_type_combo.currentData()
-        acceleration = self.acceleration_combo.currentData()
+        try:
+            acceleration = getattr(config_settings.settings, 'acceleration_mode', 'cpu')
+        except Exception:
+            acceleration = 'cpu'
         
         # If optimizer already exists with same type/acceleration, reuse it
         if self.optimizer is not None:
@@ -435,13 +436,7 @@ class StatsPanel(QWidget):
         optimizer_layout.addWidget(self.optimizer_type_combo, stretch=1)
         layout.addLayout(optimizer_layout)
         
-        # Acceleration Mode Selection
-        accel_layout = QHBoxLayout()
-        accel_layout.addWidget(QLabel("Acceleration:"))
-        self.acceleration_combo = self._create_acceleration_combo()
-        self.acceleration_combo.currentIndexChanged.connect(self._on_acceleration_changed)
-        accel_layout.addWidget(self.acceleration_combo, stretch=1)
-        layout.addLayout(accel_layout)
+        # Acceleration is configured in Settings → ⚡ Acceleration
         
         # Stop button and fitness preset dropdown (in one row)
         preset_stop_layout = QHBoxLayout()
@@ -484,66 +479,20 @@ class StatsPanel(QWidget):
         
         return combo
     
-    def _create_acceleration_combo(self):
-        """Create acceleration mode dropdown."""
-        from PySide6.QtWidgets import QComboBox
-        
-        combo = QComboBox()
-        
-        # Populate based on first optimizer (evolutionary)
-        optimizer_type = "evolutionary"
-        available_accels = get_available_accelerations(optimizer_type)
-        
-        for accel in available_accels:
-            display_name = get_acceleration_display_name(accel, optimizer_type)
-            combo.addItem(display_name, accel)
-        
-        # Default to multicore if available
-        if 'multicore' in available_accels:
-            for i in range(combo.count()):
-                if combo.itemData(i) == 'multicore':
-                    combo.setCurrentIndex(i)
-                    break
-        
-        combo.setToolTip("Select acceleration mode")
-        
-        return combo
+    # Acceleration dropdown removed; Settings dialog controls acceleration
     
     def _on_optimizer_type_changed(self, index):
         """Handle optimizer type change - update available accelerations."""
         optimizer_type = self.optimizer_type_combo.currentData()
         
-        # Update acceleration combo
-        self.acceleration_combo.blockSignals(True)
-        self.acceleration_combo.clear()
-        
-        available_accels = get_available_accelerations(optimizer_type)
-        for accel in available_accels:
-            display_name = get_acceleration_display_name(accel, optimizer_type)
-            self.acceleration_combo.addItem(display_name, accel)
-        
-        # Default to best option
-        if optimizer_type == 'evolutionary' and 'multicore' in available_accels:
-            for i in range(self.acceleration_combo.count()):
-                if self.acceleration_combo.itemData(i) == 'multicore':
-                    self.acceleration_combo.setCurrentIndex(i)
-                    break
-        
-        self.acceleration_combo.blockSignals(False)
+        # Acceleration dropdown removed; nothing to update here
         
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
         
         logger.info("Optimizer type changed to: %s", get_optimizer_display_name(optimizer_type))
     
-    def _on_acceleration_changed(self, index):
-        """Handle acceleration change."""
-        acceleration = self.acceleration_combo.currentData()
-        
-        # Reset optimizer (will be re-initialized on next run)
-        self.optimizer = None
-        
-        logger.info("Acceleration changed to: %s", self.acceleration_combo.currentText())
+    # Acceleration change handled via Settings tab
     
     def _create_fitness_preset_combo(self):
         """Create fitness preset dropdown combo box."""
@@ -861,7 +810,12 @@ class StatsPanel(QWidget):
                         logger.warning("No raw data available, skipping backtest")
                     else:
                         # Build features with best params from RAW data
-                        feats = build_features(self.raw_data, best_seller, self.current_tf)
+                        feats = build_features(
+                            self.raw_data,
+                            best_seller,
+                            self.current_tf,
+                            use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
+                        )
                         
                         # Run backtest
                         backtest_result = run_backtest(feats, best_backtest)
@@ -1088,19 +1042,7 @@ class StatsPanel(QWidget):
             f"RUN start iters={n_iters} accel={self.optimizer.get_acceleration_mode()}"
         )
         
-        # Show GPU recommendations
-        try:
-            from backtest.gpu_manager import get_gpu_manager
-            gpu_mgr = get_gpu_manager()
-            recs = gpu_mgr.get_recommendations(len(self.current_data))
-            
-            if recs['available']:
-                logger.info("GPU: %s", recs['device'])
-                logger.info("VRAM: %.2f GB free", recs['memory']['free_gb'])
-                logger.info("Expected speedup: %.1fx", recs['estimated_speedup'])
-            logger.info("")
-        except:
-            pass
+        # (GPU recommendations removed; Spectre used for features, CPU for backtests)
         
         # Reset best fitness tracking for this optimization run
         self.prev_best_fitness = None
@@ -1116,7 +1058,6 @@ class StatsPanel(QWidget):
         self.stop_btn.setEnabled(True)  # Enable stop button during optimization
         self.fitness_preset_combo.setEnabled(False)
         self.optimizer_type_combo.setEnabled(False)
-        self.acceleration_combo.setEnabled(False)
         
         # Emit initial progress
         self.progress_updated.emit(0, n_iters, "Initializing optimization...")
@@ -1238,7 +1179,12 @@ class StatsPanel(QWidget):
                                 coach_log_manager.append("WARN no_raw_data")
                             else:
                                 # Rebuild features from raw OHLCV data with new parameters
-                                feats = build_features(self.raw_data, best_seller, self.current_tf)
+                                feats = build_features(
+                                    self.raw_data,
+                                    best_seller,
+                                    self.current_tf,
+                                    use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
+                                )
                                 backtest_result = run_backtest(feats, best_backtest)
                                 
                                 logger.info("Backtest complete: %d trades", backtest_result['metrics']['n'])
@@ -1376,7 +1322,6 @@ class StatsPanel(QWidget):
         self.stop_btn.setEnabled(False)  # Disable stop button after optimization
         self.fitness_preset_combo.setEnabled(True)
         self.optimizer_type_combo.setEnabled(True)
-        self.acceleration_combo.setEnabled(True)
         
         # Run final backtest with best parameters
         best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
@@ -1386,7 +1331,12 @@ class StatsPanel(QWidget):
                     logger.warning("No raw data available, skipping final backtest")
                 else:
                     # Build features from RAW data with best parameters
-                    feats = build_features(self.raw_data, best_seller, self.current_tf)
+                    feats = build_features(
+                        self.raw_data,
+                        best_seller,
+                        self.current_tf,
+                        use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
+                    )
                     backtest_result = run_backtest(feats, best_backtest)
                     
                     self.trades_df = backtest_result['trades']

@@ -15,6 +15,15 @@ from strategy.timeframe_defaults import get_defaults_for_timeframe
 from strategy.seller_exhaustion import SellerParams
 from backtest.engine import BacktestParams
 
+def _spectre_available() -> bool:
+    try:
+        # Import key submodules to ensure dependencies resolve
+        from spectre import factors  # noqa: F401
+        from spectre.data import MemoryLoader  # noqa: F401
+        return True
+    except Exception:
+        return False
+
 
 # Timeframe mapping (multiplier, unit, label)
 TIMEFRAMES = {
@@ -377,6 +386,28 @@ class SettingsDialog(QDialog):
         # Backtest parameters
         self.fee_bp.setValue(settings.backtest_fee_bp)
         self.slippage_bp.setValue(settings.backtest_slippage_bp)
+        
+        # Feature engine (Spectre)
+        try:
+            use_spectre = bool(getattr(settings, 'use_spectre', True))
+        except Exception:
+            use_spectre = True
+        if _spectre_available():
+            # If available, use saved preference
+            if hasattr(self, 'use_spectre'):
+                self.use_spectre.setChecked(use_spectre)
+        else:
+            # If not available, ensure checkbox is off/disabled
+            if hasattr(self, 'use_spectre'):
+                self.use_spectre.setChecked(False)
+                self.use_spectre.setEnabled(False)
+        # CUDA toggle
+        try:
+            use_spectre_cuda = bool(getattr(settings, 'use_spectre_cuda', False))
+        except Exception:
+            use_spectre_cuda = False
+        if hasattr(self, 'use_spectre_cuda'):
+            self.use_spectre_cuda.setChecked(use_spectre_cuda)
 
         # Optimizer parameters (common)
         self.optimizer_iterations.setValue(settings.optimizer_iterations)
@@ -413,10 +444,7 @@ class SettingsDialog(QDialog):
             if self.accel_mode_combo.itemData(i) == accel_mode:
                 self.accel_mode_combo.setCurrentIndex(i)
                 break
-        
         self.cpu_workers.setValue(getattr(settings, 'cpu_workers', self.cpu_workers.value()))
-        self.gpu_batch_size.setValue(getattr(settings, 'gpu_batch_size', 512))  # Default 512 for better GPU utilization
-        self.gpu_memory_fraction.setValue(getattr(settings, 'gpu_memory_fraction', 0.85))
     
 
     def create_acceleration_tab(self):
@@ -424,26 +452,43 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Acceleration Mode Group
+        # Feature Engine (Spectre vs pandas)
+        fe_group = QGroupBox("Feature Engine")
+        fe_layout = QFormLayout()
+        
+        self.use_spectre = QCheckBox("Use Spectre for feature computation (CPU by default)")
+        self.use_spectre.setChecked(True)
+        if not _spectre_available():
+            self.use_spectre.setChecked(False)
+            self.use_spectre.setEnabled(False)
+        fe_layout.addRow(self.use_spectre)
+        
+        availability = QLabel("Spectre status: Available" if _spectre_available() else "Spectre status: Not installed")
+        availability.setProperty("variant", "secondary")
+        fe_layout.addRow(availability)
+        # Optional CUDA toggle
+        self.use_spectre_cuda = QCheckBox("Use Spectre CUDA (GPU) for factor computation")
+        try:
+            import torch
+            cuda_ok = torch.cuda.is_available()
+        except Exception:
+            cuda_ok = False
+        self.use_spectre_cuda.setChecked(False)
+        self.use_spectre_cuda.setEnabled(cuda_ok and _spectre_available())
+        if not cuda_ok:
+            self.use_spectre_cuda.setToolTip("CUDA not available")
+        fe_layout.addRow(self.use_spectre_cuda)
+        
+        fe_group.setLayout(fe_layout)
+        layout.addWidget(fe_group)
+        
+        # Acceleration Mode Group (CPU only)
         mode_group = QGroupBox("Acceleration Mode")
         mode_layout = QVBoxLayout()
         
         self.accel_mode_combo = QComboBox()
         self.accel_mode_combo.addItem("🖥️  CPU (Single Core)", "cpu")
         self.accel_mode_combo.addItem("🖥️ 🖥️  Multi-Core CPU", "multicore")
-        
-        # Check GPU availability
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_name = torch.cuda.get_device_name(0)
-                self.accel_mode_combo.addItem(f"🚀 GPU ({gpu_name})", "gpu")
-            else:
-                self.accel_mode_combo.addItem("🚀 GPU (Not Available)", "gpu_unavailable")
-                self.accel_mode_combo.setItemData(2, 0, Qt.UserRole - 1)  # Disable
-        except ImportError:
-            self.accel_mode_combo.addItem("🚀 GPU (PyTorch Not Installed)", "gpu_unavailable")
-            self.accel_mode_combo.setItemData(2, 0, Qt.UserRole - 1)  # Disable
         
         mode_layout.addWidget(QLabel("Select acceleration method:"))
         mode_layout.addWidget(self.accel_mode_combo)
@@ -476,51 +521,7 @@ class SettingsDialog(QDialog):
         self.multicore_group.setLayout(multicore_layout)
         layout.addWidget(self.multicore_group)
         
-        # GPU Settings
-        self.gpu_group = QGroupBox("GPU Settings")
-        gpu_layout = QFormLayout()
-        
-        self.gpu_batch_size = QSpinBox()
-        self.gpu_batch_size.setRange(1, 512)
-        self.gpu_batch_size.setValue(512)  # Increased from 150 for better GPU utilization
-        self.gpu_batch_size.setSuffix(" individuals")
-        gpu_layout.addRow("Batch Size:", self.gpu_batch_size)
-        
-        self.gpu_memory_fraction = QDoubleSpinBox()
-        self.gpu_memory_fraction.setRange(0.1, 1.0)
-        self.gpu_memory_fraction.setValue(0.85)
-        self.gpu_memory_fraction.setSingleStep(0.05)
-        self.gpu_memory_fraction.setDecimals(2)
-        gpu_layout.addRow("Memory Usage:", self.gpu_memory_fraction)
-        
-        gpu_info_label = QLabel(
-            "<small>ℹ️ <b>Batch Size</b>: Number of parameter sets processed simultaneously.\n"
-            "Larger = better GPU utilization, but more memory usage.\n\n"
-            "<b>Memory Usage</b>: Fraction of GPU VRAM to use (0.85 = 85%).\n"
-            "Leave headroom for system and display.</small>"
-        )
-        gpu_info_label.setWordWrap(True)
-        gpu_layout.addRow(gpu_info_label)
-        
-        # GPU Status
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_status = QLabel()
-                gpu_name = torch.cuda.get_device_name(0)
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-                gpu_status.setText(
-                    f"<b>✓ GPU Detected:</b> {gpu_name}<br>"
-                    f"<b>Total Memory:</b> {gpu_memory:.2f} GB<br>"
-                    f"<b>CUDA Version:</b> {torch.version.cuda}"
-                )
-                gpu_status.setWordWrap(True)
-                gpu_layout.addRow(gpu_status)
-        except:
-            pass
-        
-        self.gpu_group.setLayout(gpu_layout)
-        layout.addWidget(self.gpu_group)
+        # GPU Settings removed (Spectre used for features; backtests run on CPU)
         
         # Performance Comparison
         perf_group = QGroupBox("📊 Expected Performance")
@@ -528,9 +529,8 @@ class SettingsDialog(QDialog):
         
         perf_text = QLabel(
             "<b>Approximate Speedup (24 individuals, 1000 bars):</b><br><br>"
-            "🖥️  <b>CPU (Single Core)</b>: ~50s per generation (baseline)<br>"
-            "🖥️ 🖥️  <b>Multi-Core CPU</b>: ~10s per generation (~5x faster)<br>"
-            "🚀 <b>GPU</b>: ~2-5s per generation (~10-25x faster)<br><br>"
+            "🖥️  <b>CPU (Single Core)</b>: baseline<br>"
+            "🖥️ 🖥️  <b>Multi-Core CPU</b>: ~4-6x faster (hardware dependent)<br><br>"
             "<small>Note: Actual speedup depends on hardware, data size, and parameter complexity.</small>"
         )
         perf_text.setWordWrap(True)
@@ -544,16 +544,10 @@ class SettingsDialog(QDialog):
         warning_layout = QVBoxLayout()
         
         warning_text = QLabel(
-            "<b>GPU Acceleration:</b><br>"
-            "• GPU mode is VALIDATED and safe for production use<br>"
-            "• Results match CPU exactly (100% tested)<br>"
-            "• Automatic fallback to CPU if GPU unavailable<br>"
-            "• See GPU_VALIDATION_REPORT.md for details<br><br>"
-            "<b>Recommendations:</b><br>"
-            "• Start with Multi-Core CPU for reliability<br>"
-            "• Use GPU for large populations (>50 individuals)<br>"
-            "• Monitor GPU temperature during long runs<br>"
-            "• GPU requires ~2GB VRAM for typical workloads"
+            "<b>Performance:</b><br>"
+            "• Spectre accelerates feature computation by leveraging vectorized backends<br>"
+            "• Use Multi-Core CPU for faster GA evaluation<br>"
+            "• Advanced users can enable Spectre CUDA outside the UI if desired"
         )
         warning_text.setWordWrap(True)
         warning_layout.addWidget(warning_text)
@@ -579,7 +573,6 @@ class SettingsDialog(QDialog):
         
         # Show/hide relevant groups
         self.multicore_group.setVisible(mode == "multicore")
-        self.gpu_group.setVisible(mode == "gpu")
     
     def reset_acceleration_params(self):
         """Reset acceleration parameters to defaults."""
@@ -588,8 +581,6 @@ class SettingsDialog(QDialog):
         
         self.accel_mode_combo.setCurrentIndex(1)  # Multi-Core CPU default
         self.cpu_workers.setValue(max(1, max_cores - 1))
-        self.gpu_batch_size.setValue(512)  # Increased from 150 for better GPU utilization
-        self.gpu_memory_fraction.setValue(0.85)
     
     def save_settings(self):
         """Save all settings to .env file."""
@@ -598,6 +589,10 @@ class SettingsDialog(QDialog):
                 # Backtest
                 'backtest_fee_bp': self.fee_bp.value(),
                 'backtest_slippage_bp': self.slippage_bp.value(),
+                
+                # Feature engine
+                'use_spectre': bool(self.use_spectre.isChecked()) if hasattr(self, 'use_spectre') else True,
+                'use_spectre_cuda': bool(self.use_spectre_cuda.isChecked()) if hasattr(self, 'use_spectre_cuda') else False,
                 
                 # Optimizer (Common)
                 'optimizer_iterations': self.optimizer_iterations.value(),
@@ -621,8 +616,6 @@ class SettingsDialog(QDialog):
                 # Acceleration settings (NEW)
                 'acceleration_mode': self.accel_mode_combo.currentData(),
                 'cpu_workers': self.cpu_workers.value(),
-                'gpu_batch_size': self.gpu_batch_size.value(),
-                'gpu_memory_fraction': self.gpu_memory_fraction.value(),
                 
                 # Chart indicators
                 'chart_ema_fast': self.show_ema_fast.isChecked(),

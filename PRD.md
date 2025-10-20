@@ -1,13 +1,15 @@
 # PRD — ADA Seller‑Exhaustion **BACKTESTING TOOL** (Multi-Timeframe)
 
 **Product:** Research → Backtest → Optimize → **Export Strategy** for Live Trading  
-**Tech:** Python 3.10, async I/O, PySide6 UI, PyQtGraph candles, Polygon.io crypto REST, optional Yahoo/yfinance fallback, PyTorch CUDA acceleration (optional)  
+**Tech:** Python 3.10, async I/O, PySide6 UI, PyQtGraph candles, Polygon.io crypto REST, Spectre factor engine (feature computation), optional Yahoo/yfinance fallback  
 **Theme:** Dark Forest UI (QSS)  
 **Owner:** Michal  
 **Version:** 2.1 (Strategy Export System)
 
 **IMPORTANT**: This PRD describes the BACKTESTING application.  
 For live trading agent specifications, see **PRD_TRADING_AGENT.md**.
+
+> Note: Legacy CUDA/GPU pipeline content in this PRD is deprecated. The current implementation uses Spectre for factor computation and CPU (single or multi‑core) for backtesting and optimization.
 
 ---
 
@@ -21,7 +23,7 @@ Chcem backtestovať a potom spúšťať agenta, ktorý na **15‑min timeframe**
 - Získať 15m historické OHLCV pre `X:ADAUSD` (Polygon) a vybudovať **deterministický backtest** s parametrami.
 - V UI zobraziť sviece, overlay indikátory (EMA/SMA/MACD/RSI) a zvýrazniť signály.
 - „Paper trade“ mód s jednoduchým exekútorom (bez reálneho brokera) a plánovačom na **bar‑close** každej 15m sviečky (UTC :00/:15/:30/:45).
-- Poskytnúť **genetický algoritmus** na optimalizáciu parametrov s UI nastaveniami (population, mutation, elitism) perzistovanými v `.env` a podporou GPU ak je k dispozícii.
+- Poskytnúť **genetický algoritmus** na optimalizáciu parametrov s UI nastaveniami (population, mutation, elitism) perzistovanými v `.env` a podporou multi-core CPU.
 
 ---
 
@@ -35,13 +37,13 @@ Chcem backtestovať a potom spúšťať agenta, ktorý na **15‑min timeframe**
 - **Signál seller‑exhaustion**: downtrend filter (EMA_f < EMA_s), volume z‑score spike, range z‑score spike, close v top časti sviečky.
 - **Backtest**: event‑driven, vstup t+1 open, ATR stop, 2R TP, `max_hold` safety; voliteľná provízia a slippage.
 - **UI**: PySide6 okno, PyQtGraph sviece + overlay indikátorov, panel s parametrami, log panel.
-- **Optimalizácia**: genetický algoritmus (Population/Individual) s editovateľnými parametrami v UI (perzistentné). Backend musí podporovať CPU aj GPU batch evaluáciu (PyTorch).
+- **Optimalizácia**: genetický algoritmus (Population/Individual) s editovateľnými parametrami v UI (perzistentné). Backend podporuje single‑core aj multi‑core CPU evaluáciu.
 - **Async runtime**: `httpx.AsyncClient`, `qasync`/`QtAsyncio` integrácia s Qt event loop.
 
 ### Out‑of‑scope (MVP)
 - Priamy broker execution (Binance/Kraken). Papierový exekútor stačí.
 - Portfóliová alokácia viacerých párov.
-- Auto-scaling na viac GPU / distribuovaná optimalizácia (single GPU alebo CPU fallback postačuje).
+- Distribuovaná optimalizácia (voliteľné do budúcna); GPU nie je potrebné.
 
 ### Implemented in v2.1
 ✅ **Configurable Fitness Functions**: GA optimizer podporuje 4 presety + custom (balanced, high_frequency, conservative, profit_focused)  
@@ -89,7 +91,7 @@ ada-agent/
     widgets/
       candle_view.py     # PyQtGraph Canvas + overlays (EMA/SMA/RSI/MACD) + signal markers
       settings_dialog.py # Nastavenia (API kľúč, prahy, fees, slippage, GA parametre)
-      stats_panel.py     # Metriky, GA evolúcia, GPU stav
+      stats_panel.py     # Metriky, GA evolúcia
       log_panel.py
   core/
     models.py            # Pydantic dataclass-y: Bar, IndicatorBundle, Trade, Params
@@ -101,19 +103,15 @@ ada-agent/
     provider.py          # Interface + orchestrácia
   indicators/
     local.py             # Pandas výpočty EMA/SMA/RSI/MACD, ATR
-    gpu.py               # PyTorch (CUDA) implementácie indikátorov
   strategy/
     seller_exhaustion.py     # signál + parametre
-    seller_exhaustion_gpu.py # GPU feature parity s CPU
   backtest/
     engine.py                # event-driven backtester
-    engine_gpu_full.py       # Full pipeline na GPU (features + backtest)
     optimizer.py             # GA pomocné funkcie (CPU kompatibilita)
     optimizer_evolutionary.py# Evolučný optimizer (default)
     optimizer_multicore.py   # Viacjadrová CPU akcelerácia
     optimizer_adam.py        # Alternatívny ADAM optimizer
     optimizer_factory.py     # Výber optimizéra/akcelerácie
-    optimizer_gpu.py         # GPU orchestrácia
     metrics.py               # výpočty metrík
   exec/
     paper.py             # paper trade execution + positions state
@@ -695,17 +693,8 @@ poetry run python -m app.main
 
 **Rationale**: Guide new users to optimal defaults. 61.8% is mathematically significant and empirically performs well.
 
-### 6. GPU Acceleration (Optional) ✅
-**Requirement**: Optional PyTorch/CUDA support for 10-100x speedup in GA optimization.
-
-**Implementation**:
-- New modules: `strategy/seller_exhaustion_gpu.py`, `backtest/engine_gpu_full.py`, `backtest/optimizer_gpu.py`, `backtest/optimizer_factory.py`
-- Jednotný CUDA pipeline (`batch_backtest_full_gpu`) pokrýva features, backtest aj fitness
-- Automatický fallback na CPU alebo multi-core ak CUDA nie je dostupná
-- Memory management utilities (get_memory_usage, clear_cache)
-- GPU status indicator in UI
-
-**Rationale**: GA optimization with 24+ population over 10+ generations is slow on CPU (2-3 min). GPU reduces to 10-30 sec.
+### 6. Acceleration
+Feature computation uses Spectre by default. Optimization supports single‑core and multi‑core CPU evaluation. Legacy GPU implementations have been removed to simplify the stack.
 
 ### 7. Multi-Timeframe Support ✅
 **Requirement**: Support 1m, 3m, 5m, 10m, 15m timeframes with consistent strategy behavior.
@@ -764,26 +753,17 @@ See `CHANGELOG_DEFAULT_BEHAVIOR.md` for detailed migration guide.
 
 ---
 
-## V2.1 GPU Optimization Requirements (2025-01-14)
+<!-- GPU optimization section removed (Spectre + CPU/multicore only) -->
 
-### Mission
-Maximize GPU utilization for genetic algorithm optimization to achieve **30-50x speedup** vs sequential CPU.
+ 
 
-### Hardware Target
-- **Primary**: NVIDIA RTX 3080 (10.33 GB VRAM, 8704 CUDA cores)
-- **Secondary**: Any CUDA-capable GPU (automatic fallback to CPU)
+ 
 
-### Requirements
+ 
 
-#### 1. GPU Infrastructure ✅
-**Goal**: Detect GPU capabilities and provide optimization recommendations.
+ 
 
-**Implementation**:
-- New module: `backtest/gpu_manager.py` (436 lines)
-- Functions: `get_gpu_manager()`, `get_optimal_batch_size()`, `suggest_population_size()`
-- Auto-detect: GPU model, VRAM, compute capability, CUDA version
-- Recommendations: Optimal population size based on data size and available VRAM
-- Memory monitoring: Real-time VRAM usage tracking
+ 
 
 **Acceptance Criteria**:
 - ✅ Detects RTX 3080 with 10.33 GB VRAM
@@ -1277,10 +1257,4 @@ is_valid, warnings = validate_config_for_live_trading(config)
 
 ---
 
-**Version**: 2.1 (Complete: GPU Optimization + Strategy Export)  
-**Status**: ✅ Production-Ready  
-**Performance**: 18.5x-32x GPU speedup  
-**Export System**: Complete with security  
-**Test Coverage**: 19/19 (100%)  
-**Total Time Investment**: 38 hours (22 GPU + 16 Export)  
-**Total Lines Added**: ~10,200 (code + docs)
+ 

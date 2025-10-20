@@ -122,6 +122,6 @@ class BaseOptimizer(ABC):
         Return current acceleration mode.
         
         Returns:
-            Acceleration mode (e.g., "CPU", "Multi-Core", "GPU")
+            Acceleration mode (e.g., "Single-Core CPU", "Multi-Core CPU")
         """
         pass

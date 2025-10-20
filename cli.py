@@ -7,8 +7,8 @@ from rich.table import Table
 
 from data.provider import DataProvider
 from strategy.seller_exhaustion import SellerParams, build_features
-from backtest.engine import run_backtest, BacktestParams
-from core.models import Timeframe
+from backtest.engine import run_backtest
+from core.models import Timeframe, BacktestParams
 from backtest.metrics import print_metrics
 
 app = typer.Typer(help="ADA Seller-Exhaustion Agent CLI")
@@ -59,12 +59,11 @@ def backtest(
     vol_z: float = typer.Option(2.0, help="Volume z-score threshold"),
     tr_z: float = typer.Option(1.2, help="True range z-score threshold"),
     cloc_min: float = typer.Option(0.6, help="Minimum close location in candle"),
-    atr_stop: float = typer.Option(0.7, help="ATR stop multiplier"),
-    reward_r: float = typer.Option(2.0, help="Reward-to-risk ratio"),
-    max_hold_min: int = typer.Option(96 * 15, help="Maximum hold in minutes"),
+    fib_target_level: float = typer.Option(0.618, "--fib", help="Fibonacci target level: 0.382, 0.5, 0.618, 0.786, 1.0"),
     fee_bp: float = typer.Option(5.0, help="Fee in basis points"),
     slippage_bp: float = typer.Option(5.0, help="Slippage in basis points"),
     output: str = typer.Option("trades.csv", help="Output CSV file for trades"),
+    no_spectre: bool = typer.Option(False, "--no-spectre", is_flag=True, help="Disable Spectre; use pandas features"),
 ):
     """Run backtest on historical data"""
     
@@ -90,17 +89,22 @@ def backtest(
                 tr_z=tr_z,
                 cloc_min=cloc_min,
             )
-            feats = build_features(df, params, tf)
+            use_spectre = not no_spectre
+            feats = build_features(df, params, tf, use_spectre=use_spectre)
             console.print(f"[green]✓ Detected {feats['exhaustion'].sum()} signals[/green]")
             
             # Run backtest
             console.print("[cyan]Running backtest...[/cyan]")
+            # Normalize Fibonacci target to valid set if needed
+            valid_levels = {0.382, 0.5, 0.618, 0.786, 1.0}
+            if fib_target_level not in valid_levels:
+                # pick nearest
+                fib_target_level = min(valid_levels, key=lambda x: abs(x - fib_target_level))
+
             bt_params = BacktestParams(
-                atr_stop_mult=atr_stop,
-                reward_r=reward_r,
-                max_hold=max(1, int(round(max_hold_min / int(tf.value.replace('m',''))))),
+                fib_target_level=float(fib_target_level),
                 fee_bp=fee_bp,
-                slippage_bp=slippage_bp
+                slippage_bp=slippage_bp,
             )
             result = run_backtest(feats, bt_params)
             

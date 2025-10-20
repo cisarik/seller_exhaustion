@@ -21,6 +21,7 @@ from strategy.seller_exhaustion import SellerParams
 from core.models import BacktestParams, Timeframe, minutes_to_bars
 from backtest.engine import run_backtest
 from strategy.seller_exhaustion import build_features
+import config.settings as cfg_settings
 
 
 # Valid Fibonacci target levels (discrete choices)
@@ -529,7 +530,12 @@ def evaluate_individual(
     """
     try:
         # Build features with individual's seller params
-        feats = build_features(data, individual.seller_params, tf)
+        feats = build_features(
+            data,
+            individual.seller_params,
+            tf,
+            use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
+        )
         
         # Run backtest with individual's backtest params
         result = run_backtest(feats, individual.backtest_params)

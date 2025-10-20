@@ -143,7 +143,7 @@ All four conditions must be true:
 - Export to JSON/YAML
 
 ### ⚠ Acceleration Note
-Acceleration (multi-core/GPU) is intentionally disabled to focus on improving the evolutionary algorithm and ADAM variant. It will return after the algorithms stabilize.
+Feature computation uses Spectre by default for speed and consistency. Backtesting runs on CPU, and the optimizer supports single‑core and multi‑core evaluation. Legacy CUDA/GPU code has been removed to simplify the stack.
 
 ### 📈 Multi-Timeframe Support
 - 1m, 3m, 5m, 10m, 15m timeframes
@@ -464,7 +464,7 @@ slippage_bp = 5.0            # 0.05%
 ## 🧪 Testing
 
 ```bash
-# Run all tests (19 tests)
+# Run all tests
 poetry run pytest tests/ -v
 
 # Test Fibonacci functionality
@@ -473,10 +473,10 @@ poetry run pytest tests/test_fibonacci.py -v
 # With coverage
 poetry run pytest tests/ --cov=. --cov-report=html
 
-# (GPU acceleration is disabled; no CUDA required)
+# (GPU not required; Spectre accelerates features on CPU by default)
 ```
 
-**Test Results**: ✅ 19/19 passing (100%)
+
 
 ---
 
@@ -573,7 +573,7 @@ asyncio.run(run())
 
 ## 📊 Performance Notes
 
-Performance focuses on algorithmic correctness. Acceleration (multi-core/GPU) will be revisited after EA/ADAM stabilize.
+Spectre accelerates feature computation; backtesting runs on CPU. The optimizer supports single‑core and multi‑core evaluation.
 
 ---
 
@@ -605,7 +605,7 @@ See `CHANGELOG_DEFAULT_BEHAVIOR.md` for migration guide.
 
 ## ⚠ Note on Acceleration
 
-All acceleration paths (multi-core and GPU) are intentionally disabled and omitted from current workflows to reduce noise. The current focus is improving the evolutionary algorithm (and ADAM variant). Acceleration will be reintroduced when algorithms stabilize.
+Legacy GPU code has been removed for simplicity. If you need GPU for Spectre factors, enable it in your environment; the UI uses CPU by default.
 
 ### Multi-Step Optimization UI
 

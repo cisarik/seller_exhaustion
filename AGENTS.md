@@ -55,7 +55,7 @@ Intraday trading research and backtesting system for Cardano (ADAUSD) on 15-minu
 
 ## Acceleration Status
 
-To reduce noise and focus development, all acceleration paths (multi-core and GPU) are currently disabled. The implementation and documentation focus on algorithmic improvements to the evolutionary optimizer (and ADAM prototype) on CPU. Acceleration will be reintroduced and re-documented once results stabilize.
+As of v2.1, feature computation uses Spectre by default. Backtests and optimization run on CPU with optional multi‑core evaluation. Legacy CUDA/GPU code has been removed to simplify the stack and avoid duplicated logic.
 
 ---
 
@@ -472,8 +472,8 @@ zscore(series, window) -> pd.Series
 
 ---
 
-### 7. GPU Indicators (Deferred)
-Acceleration-related indicator implementations are deferred. The current focus is on robust CPU implementations in `indicators/local.py`.
+### 7. Spectre Indicators
+Spectre is used for fast factor/indicator computation where available. CPU fallbacks remain in `indicators/local.py`.
 
 ---
 
@@ -679,8 +679,8 @@ This module ensures **temporal consistency** across timeframes. Without it, mult
 
 ---
 
-### 8b. GPU Feature Builder (Deferred)
-GPU-native feature building is deferred. Keep CPU strategy logic (`strategy/seller_exhaustion.py`) as the single source of truth.
+### 8b. Feature Builder (Spectre)
+Spectre‑based feature building is the default path. `strategy/seller_exhaustion.py` remains the single source of truth and falls back to pandas if Spectre is unavailable.
 
 ---
 
@@ -767,8 +767,8 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> dict:
 
 ---
 
-### 10. GPU Backtest Engine (Deferred)
-The GPU backtesting pipeline is deferred. Use `backtest/engine.py` for the canonical CPU event-driven engine.
+### 10. Backtest Engine
+Use `backtest/engine.py` for the canonical CPU event‑driven engine.
 
 ---
 
@@ -788,8 +788,8 @@ The GPU backtesting pipeline is deferred. Use `backtest/engine.py` for the canon
 
 ---
 
-### 12. GPU Optimizer (Deferred)
-GPU optimization wrappers are deferred. The evolutionary optimizer runs on CPU only for now.
+### 12. Optimizer
+The evolutionary optimizer runs on CPU with optional multi‑core evaluation.
 
 ---
 

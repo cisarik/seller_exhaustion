@@ -23,13 +23,14 @@ from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
 from app.widgets.data_bar import DataBar
 from app.widgets.evolution_coach import EvolutionCoachWindow
-from strategy.seller_exhaustion import build_features, SellerParams
+from strategy.seller_exhaustion import build_features, SellerParams, _SPECTRE_AVAILABLE as SPECTRE_AVAILABLE
 from backtest.engine import BacktestParams
 from core.models import Timeframe
 from backtest.engine import run_backtest
 from data.provider import DataProvider
 from data.cache import DataCache
 from config.settings import settings, SettingsManager
+import config.settings as cfg_settings
 from app.session_store import (
     save_session_snapshot,
     load_session_snapshot,
@@ -75,6 +76,11 @@ class MainWindow(QMainWindow):
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
         self.current_range = (settings.last_date_from, settings.last_date_to)
+        # Feature engine preference
+        try:
+            self.use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+        except Exception:
+            self.use_spectre = True
         
         # Optional: path to initial GA population file for auto-start optimization
         self.ga_init_from: str | None = ga_init_from
@@ -136,6 +142,28 @@ class MainWindow(QMainWindow):
         
         # Hide the main window's status bar (we use the custom black status bar in chart view)
         self.statusBar().hide()
+
+    def _engine_label(self) -> str:
+        """Return short label for current feature engine."""
+        try:
+            use = bool(getattr(cfg_settings.settings, 'use_spectre', self.use_spectre))
+        except Exception:
+            use = self.use_spectre
+        if use and SPECTRE_AVAILABLE:
+            # Check CUDA flag
+            try:
+                use_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
+            except Exception:
+                use_cuda = False
+            if use_cuda:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        return "Spectre GPU"
+                except Exception:
+                    pass
+            return "Spectre"
+        return "pandas"
 
     def _indicator_config_from_settings(self) -> dict[str, bool]:
         """Return chart indicator configuration based on saved settings."""
@@ -375,7 +403,7 @@ class MainWindow(QMainWindow):
             else:
                 # Process the downloaded data
                 params, bt_params, _ = self.param_editor.get_params()
-                feats = build_features(df, params, tf)
+                feats = build_features(df, params, tf, use_spectre=self.use_spectre)
                 
                 # Update state
                 self.current_data = feats
@@ -454,6 +482,8 @@ class MainWindow(QMainWindow):
         if not self.settings_dialog:
             self.settings_dialog = SettingsDialog(self)
             self.settings_dialog.data_downloaded.connect(self.on_data_downloaded)
+            # Track settings saved to refresh feature-engine preference
+            self.settings_dialog.settings_saved.connect(self.on_settings_saved)
         
         self.settings_dialog.exec()
     
@@ -518,7 +548,7 @@ class MainWindow(QMainWindow):
             self.param_editor.set_timeframe(tf)
             
             # Build features
-            feats = build_features(df, params, tf)
+            feats = build_features(df, params, tf, use_spectre=self.use_spectre)
             
             # Update chart
             self.chart_view.feats = feats
@@ -556,9 +586,10 @@ class MainWindow(QMainWindow):
             self.backtest_action.setEnabled(True)
             
             # Update status
-            signals = feats['exhaustion'].sum()
+            signals = int(feats['exhaustion'].sum()) if 'exhaustion' in feats else 0
+            eng = self._engine_label()
             self.chart_view.status_label.setText(
-                f"✓ Loaded {len(feats)} bars | {signals} signals detected | Ready to backtest"
+                f"✓ Features built [{eng}] · {tf.value} · {len(feats):,} bars · {signals:,} signals"
             )
             
         except Exception as e:
@@ -576,8 +607,8 @@ class MainWindow(QMainWindow):
         """Handle parameter changes from the compact editor."""
         # Just mark that params changed - backtest will use latest values when run
         if self.current_data is not None:
-            self.chart_view.status_label.setText("Parameters changed - run backtest to see effects")
-            QTimer.singleShot(2000, lambda: self.chart_view.status_label.setText("Ready"))
+            self.chart_view.status_label.setText("Parameters changed — run backtest to apply")
+            QTimer.singleShot(2000, lambda: self.chart_view.status_label.setText(f"Engine: {self._engine_label()}"))
     
     async def run_backtest(self):
         """Run backtest on current data."""
@@ -606,7 +637,7 @@ class MainWindow(QMainWindow):
             else:
                 raw = self.raw_data
             
-            feats = build_features(raw, seller_params, self.current_tf)
+            feats = build_features(raw, seller_params, self.current_tf, use_spectre=self.use_spectre)
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             self.chart_view.feats = feats
@@ -635,10 +666,10 @@ class MainWindow(QMainWindow):
             # Update status
             metrics = result['metrics']
             self.statusBar().showMessage(
-                f"✓ Backtest complete: {metrics['n']} trades | "
-                f"Win rate: {metrics['win_rate']:.1%} | "
-                f"Avg R: {metrics['avg_R']:.2f} | "
-                f"Total PnL: ${metrics['total_pnl']:.4f}"
+                f"✓ Backtest complete: {metrics['n']} trades | Win {metrics['win_rate']:.1%} | Avg R {metrics['avg_R']:.2f} | Total ${metrics['total_pnl']:.4f}"
+            )
+            self.chart_view.status_label.setText(
+                f"✓ Backtest ready [{self._engine_label()}] · trades {metrics['n']} · win {metrics['win_rate']:.1%}"
             )
             
             # Show summary
@@ -666,7 +697,7 @@ class MainWindow(QMainWindow):
 
         finally:
             self.backtest_action.setEnabled(True)
-            final_msg = "Ready" if success else "Backtest failed"
+            final_msg = "✓ Backtest complete" if success else "Backtest failed"
             self.chart_view.hide_action_progress(final_msg)
     
     def clear_results(self):
@@ -720,7 +751,7 @@ class MainWindow(QMainWindow):
             
             # Rebuild features for chart display
             raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
-            feats = build_features(raw_data, seller_params, self.current_tf)
+            feats = build_features(raw_data, seller_params, self.current_tf, use_spectre=self.use_spectre)
             
             # Update chart with features and backtest results
             self.chart_view.feats = feats
@@ -758,12 +789,40 @@ class MainWindow(QMainWindow):
         if self.settings_dialog:
             # Strategy params now managed in main window compact editor
             self.settings_dialog.set_backtest_params(backtest_params)
+
+    def on_settings_saved(self):
+        """Refresh runtime flags from settings after the dialog saves."""
+        try:
+            self.use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+        except Exception:
+            self.use_spectre = True
+        # Optionally update status message
+        status = self._engine_label()
+        self.statusBar().showMessage(f"Settings saved. Feature engine: {status}", 3000)
+        if hasattr(self, 'chart_view'):
+            self.chart_view.status_label.setText(f"Engine: {status}")
         
-        # Update param editor
-        if hasattr(self, 'param_editor'):
-            self.param_editor.set_params(seller_params, backtest_params)
-        
-        self.statusBar().showMessage("Parameters loaded from file", 3000)
+        # Update param editor to reflect saved settings (best-effort)
+        try:
+            sp = SellerParams(
+                ema_fast=int(cfg_settings.settings.strategy_ema_fast),
+                ema_slow=int(cfg_settings.settings.strategy_ema_slow),
+                z_window=int(cfg_settings.settings.strategy_z_window),
+                vol_z=float(cfg_settings.settings.strategy_vol_z),
+                tr_z=float(cfg_settings.settings.strategy_tr_z),
+                cloc_min=float(cfg_settings.settings.strategy_cloc_min),
+                atr_window=int(cfg_settings.settings.strategy_atr_window),
+            )
+            bp = BacktestParams(
+                fee_bp=float(cfg_settings.settings.backtest_fee_bp),
+                slippage_bp=float(cfg_settings.settings.backtest_slippage_bp),
+            )
+            if hasattr(self, 'param_editor') and self.param_editor is not None:
+                self.param_editor.set_params(sp, bp)
+            self.statusBar().showMessage("Parameters loaded from settings", 3000)
+        except Exception:
+            # Ignore settings parsing errors
+            pass
         
         # Re-run backtest if data is loaded
         if self.current_data is not None:

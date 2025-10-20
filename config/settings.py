@@ -11,6 +11,7 @@ _ENV_VARS_TO_CLEAR = [
     'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
     'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
     'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
+    'USE_SPECTRE', 'USE_SPECTRE_CUDA',
 ]
 
 for var in _ENV_VARS_TO_CLEAR:
@@ -67,11 +68,9 @@ class Settings(BaseSettings):
     adam_beta2: float = 0.999
     adam_epsilon_stability: float = 1e-8
     
-    # Acceleration Settings (disabled for now)
-    acceleration_mode: str = "cpu"  # cpu only; multicore/GPU deferred
-    cpu_workers: int = 7  # Reserved for future use
-    gpu_batch_size: int = 512  # Reserved for future use
-    gpu_memory_fraction: float = 0.85  # Reserved for future use
+    # Acceleration Settings
+    acceleration_mode: str = "cpu"  # cpu or multicore
+    cpu_workers: int = 7
     
     # Chart Indicator Display
     chart_ema_fast: bool = True
@@ -83,6 +82,10 @@ class Settings(BaseSettings):
     chart_signals: bool = True
     chart_entries: bool = True
     chart_exits: bool = True
+    
+    # Feature Engine
+    use_spectre: bool = True
+    use_spectre_cuda: bool = False
     
     # Chart View State
     chart_x_min: Optional[float] = None
@@ -191,9 +194,11 @@ class SettingsManager:
             
             f.write("# Acceleration Settings\n")
             f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'cpu')}\n")
-            f.write(f"CPU_WORKERS={existing.get('CPU_WORKERS', '7')}\n")
-            f.write(f"GPU_BATCH_SIZE={existing.get('GPU_BATCH_SIZE', '512')}\n")
-            f.write(f"GPU_MEMORY_FRACTION={existing.get('GPU_MEMORY_FRACTION', '0.85')}\n\n")
+            f.write(f"CPU_WORKERS={existing.get('CPU_WORKERS', '7')}\n\n")
+
+            f.write("# Feature Engine\n")
+            f.write(f"USE_SPECTRE={existing.get('USE_SPECTRE', 'True')}\n")
+            f.write(f"USE_SPECTRE_CUDA={existing.get('USE_SPECTRE_CUDA', 'False')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")
@@ -231,6 +236,7 @@ class SettingsManager:
             'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
             'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
             'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
+            'USE_SPECTRE', 'USE_SPECTRE_CUDA',
         ]
         
         for var in env_vars_to_clear:

@@ -17,6 +17,7 @@ from backtest.optimizer import (
     calculate_fitness
 )
 from strategy.seller_exhaustion import SellerParams, build_features
+import config.settings as cfg_settings
 from backtest.engine import run_backtest
 from core.models import BacktestParams, Timeframe, FitnessConfig
 
@@ -34,7 +35,8 @@ def evaluate_individual_worker(args: Tuple) -> Tuple[float, Dict[str, Any]]:
     
     try:
         # Use EXACT CPU functions
-        feats = build_features(data, seller_params, tf)
+        use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+        feats = build_features(data, seller_params, tf, use_spectre=use_spectre)
         result = run_backtest(feats, backtest_params)
         fitness = calculate_fitness(result['metrics'], fitness_config)
         

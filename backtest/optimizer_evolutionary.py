@@ -4,7 +4,6 @@ Evolutionary Algorithm optimizer (wraps existing GA implementation).
 Supports multiple acceleration modes:
 - CPU: Single-core genetic algorithm
 - Multi-Core: Parallel evaluation across CPU cores
-- GPU: CUDA-accelerated batch evaluation
 """
 
 import multiprocessing
@@ -37,7 +36,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
         elite_fraction: float = 0.1,
         tournament_size: int = 3,
         mutation_probability: float = 0.9,
-        acceleration: str = "cpu",  # acceleration disabled; force CPU
+        acceleration: str = "cpu",  # cpu | multicore
         n_workers: Optional[int] = None,
         initial_population_file: Optional[str] = None,
     ):
@@ -51,7 +50,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
             elite_fraction: Fraction of population preserved as elite
             tournament_size: Tournament selection size
             mutation_probability: Probability that offspring undergoes mutation
-            acceleration: Acceleration mode (cpu/multicore/gpu)
+            acceleration: Acceleration mode (cpu/multicore)
             n_workers: Number of workers for multicore (defaults to CPU count)
         """
         self.config = {
@@ -62,14 +61,17 @@ class EvolutionaryOptimizer(BaseOptimizer):
             'tournament_size': tournament_size,
             'mutation_probability': mutation_probability,
         }
-        # Acceleration is currently disabled. Force CPU mode regardless of input.
-        self.acceleration = "cpu"
+        # Acceleration mode (validated later during step)
+        acc = (acceleration or 'cpu').lower()
+        if acc not in {"cpu", "multicore"}:
+            acc = "cpu"
+        self.acceleration = acc
         self.n_workers = n_workers or multiprocessing.cpu_count()
         self.population = None
         self.timeframe = None
         self.initial_population_file = initial_population_file
         
-        # Initialization note (no acceleration messaging to reduce noise)
+        # Initialization note
         print("✓ Evolutionary optimizer initialized")
     
     def initialize(
@@ -157,19 +159,6 @@ class EvolutionaryOptimizer(BaseOptimizer):
                 tournament_size=self.config['tournament_size'],
                 mutation_probability=self.config['mutation_probability']
             )
-        elif self.acceleration == 'gpu':
-            from backtest.optimizer_gpu import evolution_step_gpu
-            self.population = evolution_step_gpu(
-                self.population,
-                data,
-                timeframe,
-                fitness_config=fitness_config,
-                mutation_rate=self.config['mutation_rate'],
-                sigma=self.config['sigma'],
-                elite_fraction=self.config['elite_fraction'],
-                tournament_size=self.config['tournament_size'],
-                mutation_probability=self.config['mutation_probability']
-            )
         else:  # cpu
             self.population = evolution_step(
                 self.population,
@@ -245,8 +234,10 @@ class EvolutionaryOptimizer(BaseOptimizer):
     
     def get_acceleration_mode(self) -> str:
         """Return acceleration mode."""
-        # Acceleration disabled; always CPU
-        return "Single-Core CPU"
+        if self.acceleration == 'multicore':
+            return f"Multi-Core CPU ({self.n_workers} workers)"
+        else:
+            return "Single-Core CPU"
 
     # Convenience: export current population
     def export_population(self, path: str) -> None:

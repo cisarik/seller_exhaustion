@@ -24,7 +24,7 @@ def create_optimizer(
     
     Args:
         optimizer_type: "evolutionary" or "adam"
-        acceleration: "cpu", "multicore", or "gpu"
+        acceleration: "cpu" or "multicore"
         **kwargs: Optimizer-specific parameters (overrides defaults from settings)
     
     Returns:
@@ -37,12 +37,16 @@ def create_optimizer(
         # Create evolutionary optimizer with multi-core acceleration
         opt = create_optimizer("evolutionary", "multicore", population_size=48)
         
-        # Create ADAM optimizer with GPU acceleration
-        opt = create_optimizer("adam", "gpu", learning_rate=0.01)
+        # Create ADAM optimizer (CPU or multicore)
+        opt = create_optimizer("adam", "multicore", learning_rate=0.01)
     """
     optimizer_type = optimizer_type.lower()
-    # Acceleration is currently disabled: force CPU regardless of input
-    acceleration = 'cpu'
+    # Normalize and validate acceleration
+    acceleration = (acceleration or 'cpu').lower()
+    available = get_available_accelerations(optimizer_type)
+    if acceleration not in available:
+        # Fallback safely to CPU if unsupported
+        acceleration = 'cpu'
     
     if optimizer_type == "evolutionary":
         return _create_evolutionary_optimizer(acceleration, **kwargs)
@@ -75,11 +79,16 @@ def _create_evolutionary_optimizer(acceleration: str, **kwargs) -> EvolutionaryO
     # Override with kwargs
     defaults.update(kwargs)
     
-    # Add acceleration (forced to CPU to disable acceleration paths)
-    defaults['acceleration'] = 'cpu'
+    # Add acceleration (pass-through)
+    defaults['acceleration'] = acceleration
     
     # Add n_workers for multicore (from settings or default to cpu_count)
-    # Multi-core disabled for now
+    if acceleration == 'multicore':
+        try:
+            n_workers = int(getattr(s, 'cpu_workers', multiprocessing.cpu_count()))
+        except Exception:
+            n_workers = multiprocessing.cpu_count()
+        defaults['n_workers'] = max(1, n_workers)
     
     return EvolutionaryOptimizer(**defaults)
 
@@ -104,11 +113,16 @@ def _create_adam_optimizer(acceleration: str, **kwargs) -> AdamOptimizer:
     # Override with kwargs
     defaults.update(kwargs)
     
-    # Add acceleration (forced to CPU)
-    defaults['acceleration'] = 'cpu'
+    # Add acceleration (pass-through)
+    defaults['acceleration'] = acceleration
     
     # Add n_workers for multicore (from settings or default to cpu_count)
-    # Multi-core disabled for now
+    if acceleration == 'multicore':
+        try:
+            n_workers = int(getattr(s, 'cpu_workers', multiprocessing.cpu_count()))
+        except Exception:
+            n_workers = multiprocessing.cpu_count()
+        defaults['n_workers'] = max(1, n_workers)
     
     return AdamOptimizer(**defaults)
 
@@ -133,8 +147,9 @@ def get_available_accelerations(optimizer_type: str) -> list[str]:
     Returns:
         List of acceleration modes
     """
-    # Acceleration choices are hidden/disabled for now
-    return ['cpu']
+    # CPU is always available; enable multi-core universally
+    modes = ['cpu', 'multicore']
+    return modes
 
 
 def get_optimizer_display_name(optimizer_type: str) -> str:
@@ -166,9 +181,12 @@ def get_acceleration_display_name(acceleration: str, optimizer_type: str = None)
         Display name
     """
     if acceleration == 'multicore':
-        n_workers = multiprocessing.cpu_count()
+        try:
+            # Prefer configured workers if available
+            import config.settings as _cfg
+            n_workers = int(getattr(_cfg.settings, 'cpu_workers', multiprocessing.cpu_count()))
+        except Exception:
+            n_workers = multiprocessing.cpu_count()
         return f'Multi-Core CPU ({n_workers} workers)'
-    elif acceleration == 'gpu':
-        return 'GPU (CUDA)'
     else:  # cpu
         return 'Single-Core CPU'

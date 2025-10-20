@@ -20,9 +20,9 @@ typer = {version = "^0.12", extras = ["all"]}
 python-dotenv = "^1.0"
 rich = "^13.0"
 torch = "^2.8.0"
-torchvision = "^0.23.0"
 pyyaml = "^6.0.3"
 fastparquet = "^2024.11.0"
+spectre = { git = "https://github.com/Heerozh/spectre.git" }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

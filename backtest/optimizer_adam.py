@@ -28,6 +28,7 @@ from backtest.optimizer import (
     VALID_FIB_LEVELS,
 )
 from strategy.seller_exhaustion import SellerParams, build_features
+import config.settings as cfg_settings
 from core.models import BacktestParams, Timeframe, FitnessConfig
 from backtest.engine import run_backtest
 
@@ -114,7 +115,12 @@ def _evaluate_perturbed_parameter(
     backtest_params = BacktestParams(**backtest_dict)
     
     try:
-        feats = build_features(data, seller_params, timeframe)
+        feats = build_features(
+            data,
+            seller_params,
+            timeframe,
+            use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
+        )
         result = run_backtest(feats, backtest_params)
         fitness = calculate_fitness(result['metrics'], fitness_config)
     except Exception as e:
@@ -132,7 +138,7 @@ class AdamOptimizer(BaseOptimizer):
     - Adaptive learning rates per parameter
     - Momentum-based updates
     - Gradient clipping for stability
-    - Support for CPU/GPU acceleration
+    - Support for single-core or multi-core CPU evaluation
     
     Limitations:
     - Requires many fitness evaluations per step (one per parameter)
@@ -144,7 +150,7 @@ class AdamOptimizer(BaseOptimizer):
         self,
         learning_rate: float = 0.01,
         epsilon: float = 1e-3,  # For finite differences
-        acceleration: str = "cpu",  # cpu, multicore, or gpu
+        acceleration: str = "cpu",  # cpu or multicore
         max_grad_norm: float = 1.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.999,
@@ -157,7 +163,7 @@ class AdamOptimizer(BaseOptimizer):
         Args:
             learning_rate: Learning rate for ADAM updates
             epsilon: Step size for finite difference approximation
-            acceleration: Acceleration mode (cpu/multicore/gpu)
+            acceleration: Acceleration mode (cpu or multicore)
             max_grad_norm: Maximum gradient norm (for clipping)
             adam_beta1: ADAM beta1 parameter (momentum)
             adam_beta2: ADAM beta2 parameter (RMSprop-like)
@@ -175,14 +181,8 @@ class AdamOptimizer(BaseOptimizer):
         self.acceleration = acceleration.lower()
         self.n_workers = n_workers or multiprocessing.cpu_count()
         
-        # Set device
-        if self.acceleration == 'gpu' and torch.cuda.is_available():
-            self.device = torch.device('cuda')
-        else:
-            if self.acceleration == 'gpu':
-                print("⚠ GPU requested but not available, using CPU")
-                self.acceleration = 'cpu'
-            self.device = torch.device('cpu')
+        # Set device (CPU only)
+        self.device = torch.device('cpu')
         
         # Parameter tensors (will be initialized)
         self.params_tensor = None
@@ -342,7 +342,12 @@ class AdamOptimizer(BaseOptimizer):
         
         try:
             # Build features
-            feats = build_features(data, seller_params, self.timeframe)
+            feats = build_features(
+                data,
+                seller_params,
+                self.timeframe,
+                use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
+            )
             
             # Run backtest
             result = run_backtest(feats, backtest_params)
@@ -356,103 +361,6 @@ class AdamOptimizer(BaseOptimizer):
             print(f"⚠ Evaluation error: {e}")
             return -1000.0, {'n': 0, 'error': str(e)}
     
-    def _compute_gradient_gpu_batch(
-        self,
-        data,
-        fitness_config: FitnessConfig,
-        progress_callback: Optional[callable] = None
-    ) -> tuple[np.ndarray, float, dict]:
-        """
-        Compute gradient using GPU batch backtesting.
-        
-        Batches ALL parameter perturbations (current + N perturbed) in ONE GPU call.
-        This provides 8-13x speedup over sequential CPU evaluation.
-        
-        Args:
-            data: Historical OHLCV data
-            fitness_config: Fitness configuration
-            progress_callback: Optional progress callback
-        
-        Returns:
-            (gradient_array, current_fitness, current_metrics)
-        """
-        import torch
-        from backtest.engine_gpu_full import batch_backtest_full_gpu
-        from backtest.optimizer import calculate_fitness
-        
-        n_param_sets = len(self.param_names) + 1
-        print(f"\n🚀 GPU Batch Gradient Computation")
-        print(f"   Batching {n_param_sets} evaluations (current + {len(self.param_names)} perturbations)")
-        
-        # Get current parameters
-        current_vector = self.params_tensor.detach().cpu().numpy()
-        
-        # Step 1: Create parameter sets (current + all perturbations)
-        seller_params_list = []
-        backtest_params_list = []
-        
-        n_param_sets = len(self.param_names) + 1  # current + perturbed for each param
-        
-        if progress_callback:
-            progress_callback(0, 1, f"Preparing GPU batch ({n_param_sets} parameter sets)...")
-        
-        # Current parameters (for f_current)
-        seller_curr, backtest_curr = self._vector_to_params(current_vector)
-        seller_params_list.append(seller_curr)
-        backtest_params_list.append(backtest_curr)
-        
-        # Perturbed parameters (for gradients)
-        for i in range(len(current_vector)):
-            perturbed = current_vector.copy()
-            perturbed[i] = min(1.0, perturbed[i] + self.fd_epsilon)
-            seller_p, backtest_p = self._vector_to_params(perturbed)
-            seller_params_list.append(seller_p)
-            backtest_params_list.append(backtest_p)
-        
-        # Step 2: Batch evaluate ALL on GPU (N+1 backtests in parallel!)
-        try:
-            if progress_callback:
-                progress_callback(0, 1, f"Running GPU batch ({len(seller_params_list)} backtests)...")
-            
-            # Use full GPU pipeline
-            results, stats = batch_backtest_full_gpu(
-                data,
-                seller_params_list,
-                backtest_params_list,
-                self.timeframe,
-                fitness_config=fitness_config,
-                device=None,  # Auto-detect
-                verbose=False
-            )
-            
-            if progress_callback:
-                progress_callback(1, 1, "GPU batch complete! Computing gradients...")
-        
-        except Exception as e:
-            print(f"⚠ GPU batch failed, falling back to CPU: {e}")
-            # Fallback to sequential CPU implementation
-            return self._compute_gradient_cpu_sequential(
-                data, fitness_config, progress_callback, None
-            )
-        
-        # Step 3: Calculate fitness for all results
-        f_current = calculate_fitness(results[0]['metrics'], fitness_config)
-        metrics_current = results[0]['metrics']
-        
-        print(f"   Current fitness: {f_current:.4f} | Trades: {metrics_current.get('n', 0)}")
-        
-        # Step 4: Compute gradients (vectorized on CPU is fine, cheap operation)
-        gradient = np.zeros(len(current_vector))
-        
-        print(f"   Computing finite difference gradients...")
-        for i in range(len(current_vector)):
-            f_perturbed = calculate_fitness(results[i+1]['metrics'], fitness_config)
-            gradient[i] = (f_perturbed - f_current) / self.fd_epsilon
-            print(f"     [{i+1}/{len(current_vector)}] {self.param_names[i]}: grad={gradient[i]:.6f}")
-        
-        print(f"   ✓ GPU batch gradient computation complete")
-        
-        return gradient, f_current, metrics_current
     
     def _compute_gradient_cpu_sequential(
         self,
@@ -515,8 +423,6 @@ class AdamOptimizer(BaseOptimizer):
         """
         Compute gradient using finite differences.
         
-        Auto-selects GPU batch, multicore, or sequential CPU based on acceleration mode.
-        
         For each parameter i:
             grad_i ≈ (f(x + ε*e_i) - f(x)) / ε
         
@@ -529,17 +435,8 @@ class AdamOptimizer(BaseOptimizer):
         Returns:
             (gradient_tensor, current_fitness, current_metrics)
         """
-        # GPU batch mode (fastest, ~8-13x speedup for ADAM)
-        if self.acceleration == 'gpu' and torch.cuda.is_available():
-            gradient, f_current, metrics_current = self._compute_gradient_gpu_batch(
-                data, fitness_config, progress_callback
-            )
-            # Negate for maximization
-            gradient = -gradient
-            return torch.tensor(gradient, dtype=torch.float32, device=self.device), f_current, metrics_current
-        
         # Multi-core CPU mode
-        elif self.acceleration == 'multicore':
+        if self.acceleration == 'multicore':
             gradient = self._compute_gradient_parallel(
                 self.params_tensor.detach().cpu().numpy(),
                 None,  # Will be calculated inside
@@ -783,7 +680,5 @@ class AdamOptimizer(BaseOptimizer):
         """Return acceleration mode."""
         if self.acceleration == 'multicore':
             return f"Multi-Core CPU ({self.n_workers} workers)"
-        elif self.device.type == 'cuda':
-            return "GPU (CUDA)"
         else:
-            return "CPU"
+            return "Single-Core CPU"

@@ -11,7 +11,7 @@ _ENV_VARS_TO_CLEAR = [
     'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
     'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
     'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
-    'USE_SPECTRE', 'USE_SPECTRE_CUDA',
+    'USE_SPECTRE', 'USE_SPECTRE_CUDA', 'USE_SPECTRE_TRADING',
 ]
 
 for var in _ENV_VARS_TO_CLEAR:
@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Feature Engine
     use_spectre: bool = True
     use_spectre_cuda: bool = False
+    
+    # Spectre Trading (Experimental)
+    use_spectre_trading: bool = False
     
     # Chart View State
     chart_x_min: Optional[float] = None
@@ -199,6 +202,9 @@ class SettingsManager:
             f.write("# Feature Engine\n")
             f.write(f"USE_SPECTRE={existing.get('USE_SPECTRE', 'True')}\n")
             f.write(f"USE_SPECTRE_CUDA={existing.get('USE_SPECTRE_CUDA', 'False')}\n\n")
+            
+            f.write("# Spectre Trading (Experimental)\n")
+            f.write(f"USE_SPECTRE_TRADING={existing.get('USE_SPECTRE_TRADING', 'False')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

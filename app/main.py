@@ -27,6 +27,7 @@ from strategy.seller_exhaustion import build_features, SellerParams, _SPECTRE_AV
 from backtest.engine import BacktestParams
 from core.models import Timeframe
 from backtest.engine import run_backtest
+from backtest.spectre_trading import run_spectre_trading, _SPECTRE_AVAILABLE as SPECTRE_TRADING_AVAILABLE
 from data.provider import DataProvider
 from data.cache import DataCache
 from config.settings import settings, SettingsManager
@@ -144,7 +145,29 @@ class MainWindow(QMainWindow):
         self.statusBar().hide()
 
     def _engine_label(self) -> str:
-        """Return short label for current feature engine."""
+        """Return short label for current backtest engine."""
+        # Check if Spectre trading is enabled
+        try:
+            use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
+        except Exception:
+            use_spectre_trading = False
+        
+        if use_spectre_trading and SPECTRE_TRADING_AVAILABLE:
+            # Check CUDA flag
+            try:
+                use_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
+            except Exception:
+                use_cuda = False
+            if use_cuda:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        return "Spectre GPU"
+                except Exception:
+                    pass
+            return "Spectre"
+        
+        # Fall back to feature engine label (for reference in status)
         try:
             use = bool(getattr(cfg_settings.settings, 'use_spectre', self.use_spectre))
         except Exception:
@@ -162,8 +185,8 @@ class MainWindow(QMainWindow):
                         return "Spectre GPU"
                 except Exception:
                     pass
-            return "Spectre"
-        return "pandas"
+            return "Spectre (features)"
+        return "CPU"
 
     def _indicator_config_from_settings(self) -> dict[str, bool]:
         """Return chart indicator configuration based on saved settings."""
@@ -647,12 +670,29 @@ class MainWindow(QMainWindow):
             self.stats_panel.set_current_data(feats, self.current_tf, raw_data=self.raw_data)
             
             # Run backtest (in executor to avoid blocking)
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                run_backtest,
-                feats,
-                bt_params
-            )
+            # Route to Spectre or CPU engine based on settings
+            use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
+            use_spectre_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
+            
+            if use_spectre_trading and SPECTRE_TRADING_AVAILABLE:
+                # Use Spectre trading engine with raw OHLCV data
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    run_spectre_trading,
+                    raw,
+                    seller_params,
+                    bt_params,
+                    self.current_tf,
+                    use_spectre_cuda
+                )
+            else:
+                # Use standard CPU engine with pre-computed features
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    run_backtest,
+                    feats,
+                    bt_params
+                )
             
             # Update stats panel
             self.stats_panel.update_stats(result)

@@ -23,6 +23,7 @@ torch = "^2.8.0"
 pyyaml = "^6.0.3"
 fastparquet = "^2024.11.0"
 spectre = { git = "https://github.com/Heerozh/spectre.git" }
+tqdm = "^4.67.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

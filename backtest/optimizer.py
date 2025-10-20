@@ -529,16 +529,42 @@ def evaluate_individual(
         (fitness, metrics) tuple
     """
     try:
-        # Build features with individual's seller params
-        feats = build_features(
-            data,
-            individual.seller_params,
-            tf,
-            use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
-        )
+        # Check if GPU-accelerated Spectre trading should be used
+        use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
+        use_spectre_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
         
-        # Run backtest with individual's backtest params
-        result = run_backtest(feats, individual.backtest_params)
+        # Try GPU backtest if enabled
+        if use_spectre_trading and use_spectre_cuda:
+            try:
+                from backtest.spectre_trading import run_spectre_trading, _SPECTRE_AVAILABLE
+                if _SPECTRE_AVAILABLE:
+                    result = run_spectre_trading(
+                        data,
+                        individual.seller_params,
+                        individual.backtest_params,
+                        tf,
+                        use_cuda=True
+                    )
+                else:
+                    raise RuntimeError("Spectre not available")
+            except Exception as gpu_error:
+                # Fallback to CPU if GPU fails
+                feats = build_features(
+                    data,
+                    individual.seller_params,
+                    tf,
+                    use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
+                )
+                result = run_backtest(feats, individual.backtest_params)
+        else:
+            # Standard CPU backtest path
+            feats = build_features(
+                data,
+                individual.seller_params,
+                tf,
+                use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
+            )
+            result = run_backtest(feats, individual.backtest_params)
         
         # Calculate fitness with configurable weights and curriculum learning
         metrics = result['metrics']

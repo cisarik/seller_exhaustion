@@ -408,6 +408,14 @@ class SettingsDialog(QDialog):
             use_spectre_cuda = False
         if hasattr(self, 'use_spectre_cuda'):
             self.use_spectre_cuda.setChecked(use_spectre_cuda)
+        
+        # Spectre Trading (Experimental)
+        try:
+            use_spectre_trading = bool(getattr(settings, 'use_spectre_trading', False))
+        except Exception:
+            use_spectre_trading = False
+        if hasattr(self, 'use_spectre_trading'):
+            self.use_spectre_trading.setChecked(use_spectre_trading)
 
         # Optimizer parameters (common)
         self.optimizer_iterations.setValue(settings.optimizer_iterations)
@@ -478,6 +486,18 @@ class SettingsDialog(QDialog):
         if not cuda_ok:
             self.use_spectre_cuda.setToolTip("CUDA not available")
         fe_layout.addRow(self.use_spectre_cuda)
+        
+        # Spectre Trading (Experimental) toggle
+        fe_layout.addRow(QLabel(""))  # Spacer
+        self.use_spectre_trading = QCheckBox("Experimental: Use Spectre Trading API for backtests (CustomAlgorithm + blotter)")
+        self.use_spectre_trading.setChecked(False)
+        self.use_spectre_trading.setEnabled(_spectre_available())
+        self.use_spectre_trading.setToolTip(
+            "Runs the trading simulation inside Spectre (experimental).\n"
+            "The standard CPU backtester remains unchanged.\n"
+            "Optimization always uses CPU engine for parity."
+        )
+        fe_layout.addRow(self.use_spectre_trading)
         
         fe_group.setLayout(fe_layout)
         layout.addWidget(fe_group)
@@ -593,6 +613,7 @@ class SettingsDialog(QDialog):
                 # Feature engine
                 'use_spectre': bool(self.use_spectre.isChecked()) if hasattr(self, 'use_spectre') else True,
                 'use_spectre_cuda': bool(self.use_spectre_cuda.isChecked()) if hasattr(self, 'use_spectre_cuda') else False,
+                'use_spectre_trading': bool(self.use_spectre_trading.isChecked()) if hasattr(self, 'use_spectre_trading') else False,
                 
                 # Optimizer (Common)
                 'optimizer_iterations': self.optimizer_iterations.value(),

@@ -280,6 +280,13 @@ export USE_SPECTRE_CUDA=False
 2. Use smaller dataset for backtesting
 3. Set `enable_stream=False` to reduce VRAM usage
 
+### Symptom: "Cannot re-initialize CUDA in forked subprocess"
+**Cause**: GPU enabled with multiprocessing (incompatible combination)  
+**Solution**: 
+- ✅ This is now fixed automatically - worker processes disable GPU
+- Ensure `optimizer_multicore.py` is being used for multi-core optimization
+- No action needed - the fix is already applied
+
 ---
 
 ## Part 8: Performance Expectations
@@ -299,6 +306,59 @@ export USE_SPECTRE_CUDA=False
 - Repeated computations (optimization runs)
 
 For backtesting on 1-2 years of 15-minute data (60,000+ bars), GPU acceleration is very beneficial.
+
+---
+
+## Part 8b: GPU with Multiprocessing (Important!)
+
+### Multiprocessing Limitation
+
+CUDA has a fundamental limitation with Python's multiprocessing:
+
+**❌ Does NOT work:**
+```python
+# CUDA ERROR: Cannot re-initialize CUDA in forked subprocess
+result = run_spectre_trading(data, params, tf, use_cuda=True)  # In worker process!
+```
+
+**✅ Works:**
+```python
+# Main process (single-threaded)
+result = run_spectre_trading(data, params, tf, use_cuda=True)  # OK
+
+# Worker process (multiprocessing)
+result = run_spectre_trading(data, params, tf, use_cuda=False)  # Must be False
+```
+
+### Why?
+
+1. Parent process initializes CUDA context
+2. Multiprocessing creates child process via `fork()`
+3. Forked child cannot re-initialize CUDA in the same way
+4. Result: "Cannot re-initialize CUDA in forked subprocess" error
+
+### Solution Applied
+
+The application now **automatically disables GPU in worker processes**:
+
+- **Feature computation** (main process): GPU enabled if `USE_SPECTRE_CUDA=True`
+- **Backtesting** (worker processes): Always CPU-only due to multiprocessing
+- **Optimization** (worker processes): Always CPU-only due to multiprocessing
+
+### Practical Impact
+
+```
+Main Process (Single-threaded)  → GPU acceleration available ✅
+Worker Process (Multiprocessing) → Always CPU-only ⚠️
+Optimization (Multi-core GA)    → Always CPU-only ⚠️
+```
+
+**Recommendation**: GPU acceleration is most beneficial for:
+1. Single backtest runs (not optimization)
+2. Feature computation on large datasets
+3. Incremental testing during strategy development
+
+For large-scale optimization runs, multi-core CPU evaluation is more practical than GPU.
 
 ---
 

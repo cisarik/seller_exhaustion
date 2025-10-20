@@ -2,21 +2,30 @@
 Gemma 3 Evolution Coach LLM Client
 
 Handles async communication with local Gemma 3 model via LM Studio.
+Uses LM Studio CLI (lms) for model loading/unloading.
+Uses lmstudio Python SDK for inference.
 Robust JSON parsing and error handling.
 """
 
 import asyncio
-import httpx
 import json
 import re
+import subprocess
 from typing import Optional, List
 from datetime import datetime
 import logging
 
+try:
+    import lmstudio as lms
+    HAS_LMSTUDIO = True
+except ImportError:
+    HAS_LMSTUDIO = False
+
 from backtest.coach_protocol import (
     CoachAnalysis, CoachRecommendation, RecommendationCategory,
-    EvolutionState, EVOLUTION_COACH_SYSTEM_PROMPT
+    EvolutionState, load_coach_prompt
 )
+from core.coach_logging import coach_log_manager
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +35,20 @@ class GemmaCoachClient:
     LLM client for Gemma 3 12B Evolution Coach.
     
     Connects to local LM Studio instance and sends evolution logs for analysis.
+    Uses LM Studio Python SDK for model loading/unloading.
     Automatically parses JSON recommendations and applies them to GA.
     """
     
     def __init__(
         self,
         base_url: str = "http://localhost:1234",
-        model: str = "gemma-2-9b-it",
+        model: str = "google/gemma-3-12b",
         timeout: float = 120.0,
         temperature: float = 0.3,
+        prompt_version: str = "async_coach_v1",
+        system_prompt: Optional[str] = None,
+        context_length: int = 5000,  # Experimental: enough for 25 gens?
+        gpu: float = 0.6,  # GPU offload ratio 0.0-1.0
         verbose: bool = True
     ):
         """
@@ -42,16 +56,34 @@ class GemmaCoachClient:
         
         Args:
             base_url: LM Studio API endpoint (default localhost:1234)
-            model: Model name in LM Studio (e.g., "gemma-2-9b-it")
+            model: Model identifier (e.g., "google/gemma-3-12b")
             timeout: Request timeout in seconds
             temperature: LLM temperature (0.3 = deterministic)
+            prompt_version: Coach prompt version to load
+            system_prompt: Optional system prompt version (if None, uses prompt_version)
+            context_length: Model context window size (default: 5000 tokens)
+            gpu: GPU offload ratio 0.0-1.0 (default: 0.6 = 60% GPU)
             verbose: Print debug info
         """
+        if not HAS_LMSTUDIO:
+            raise ImportError("lmstudio package required. Install with: pip install lmstudio")
+        
         self.base_url = base_url.rstrip('/')
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
+        self.context_length = context_length
+        self.gpu = gpu
         self.verbose = verbose
+        
+        # Load system prompt - use system_prompt if provided, otherwise use prompt_version
+        prompt_key = system_prompt if system_prompt else prompt_version
+        self.system_prompt = load_coach_prompt(prompt_key)
+        coach_log_manager.append(f"[COACH  ] 🤖 Loaded system prompt: {prompt_key}")
+        
+        # Track if model is loaded
+        self._model_loaded = False
+        self._lms_client = None
     
     async def analyze_evolution(
         self,
@@ -101,9 +133,152 @@ class GemmaCoachClient:
             logger.exception("Evolution Coach error")
             return None
     
+    async def check_model_loaded(self) -> bool:
+        """
+        Check if the model is already loaded using 'lms ps'.
+        
+        Returns:
+            True if model is currently loaded, False otherwise
+        """
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["lms", "ps"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                # Look for the model name in the output
+                if self.model in output:
+                    self._model_loaded = True
+                    coach_log_manager.append(f"[LMS    ] ✅ Model already loaded: {self.model}")
+                    if self.verbose:
+                        print(f"✅ Model already loaded: {self.model}")
+                    return True
+                else:
+                    self._model_loaded = False
+                    coach_log_manager.append(f"[LMS    ] 📊 Model not loaded: {self.model}")
+                    if self.verbose:
+                        print(f"Model not loaded: {self.model}")
+                    return False
+            else:
+                coach_log_manager.append(f"[LMS    ] ⚠️  Failed to check model status")
+                return False
+        
+        except Exception as e:
+            logger.exception("Error checking model status")
+            coach_log_manager.append(f"[LMS    ] ⚠️  Error checking model: {e}")
+            return False
+    
+    async def load_model(self):
+        """Load model using lms CLI."""
+        # First check if model is already loaded
+        already_loaded = await self.check_model_loaded()
+        if already_loaded:
+            if self.verbose:
+                print(f"✅ Model already loaded: {self.model}")
+            coach_log_manager.append(f"[LMS    ] ✅ Model already loaded: {self.model}")
+            return
+        
+        try:
+            if self.verbose:
+                print(f"📦 Loading model: {self.model}")
+            coach_log_manager.append(f"[LMS    ] 📦 Loading model: {self.model}")
+            coach_log_manager.append(f"[LMS    ]   - GPU offload: {self.gpu:.1%}")
+            coach_log_manager.append(f"[LMS    ]   - Context length: {self.context_length}")
+            
+            # Build lms load command
+            cmd = ["lms", "load", self.model, f"--gpu={self.gpu}", f"--context-length={self.context_length}"]
+            
+            # Execute lms load command
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                self._model_loaded = True
+                if self.verbose:
+                    print(f"✅ Model loaded: {self.model}")
+                coach_log_manager.append(f"[LMS    ] ✅ Model loaded successfully")
+                if result.stdout:
+                    coach_log_manager.append(f"[LMS    ] {result.stdout.strip()}")
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                coach_log_manager.append(f"[LMS    ] ❌ Failed to load model: {error_msg}")
+                raise RuntimeError(f"lms load failed: {error_msg}")
+        
+        except subprocess.TimeoutExpired:
+            coach_log_manager.append(f"[LMS    ] ❌ Model loading timed out (120s)")
+            raise RuntimeError("Model loading timed out")
+        except FileNotFoundError:
+            coach_log_manager.append(f"[LMS    ] ❌ 'lms' command not found - is LM Studio installed?")
+            raise RuntimeError("'lms' command not found. Make sure LM Studio CLI is installed and in PATH.")
+        except Exception as e:
+            logger.exception("Model loading error")
+            coach_log_manager.append(f"[LMS    ] ❌ Error: {e}")
+            print(f"❌ Failed to load model {self.model}: {e}")
+            raise
+    
+    async def unload_model(self):
+        """
+        Unload model using lms CLI and reset client.
+        
+        CRITICAL: Always clears _lms_client so a fresh client can be created
+        on next load. This prevents "Default client is already created" errors
+        when reloading model to clear context window.
+        """
+        if not self._model_loaded:
+            if self.verbose:
+                print("Model not loaded, nothing to unload")
+            return
+        
+        try:
+            if self.verbose:
+                print(f"🗑️  Unloading model")
+            coach_log_manager.append(f"[LMS    ] 🗑️  Unloading model")
+            
+            # Execute lms unload command
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["lms", "unload"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                self._model_loaded = False
+                # CRITICAL: Clear client so fresh one can be created on reload
+                self._lms_client = None
+                if self.verbose:
+                    print(f"✅ Model unloaded, client cleared for fresh start")
+                coach_log_manager.append(f"[LMS    ] ✅ Model unloaded successfully")
+                coach_log_manager.append(f"[LMS    ] 🔄 Client reset for fresh context window on reload")
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                coach_log_manager.append(f"[LMS    ] ⚠️  Unload error: {error_msg}")
+                # Still mark as unloaded and clear client
+                self._model_loaded = False
+                self._lms_client = None
+        
+        except Exception as e:
+            logger.exception("Model unloading error")
+            coach_log_manager.append(f"[LMS    ] ⚠️  Error: {e}")
+            print(f"⚠️  Error unloading model: {e}")
+            # Still mark as unloaded and clear client
+            self._model_loaded = False
+            self._lms_client = None
+    
     async def _call_llm(self, user_message: str) -> Optional[str]:
         """
-        Call Gemma 3 model via LM Studio.
+        Call Gemma 3 model via LM Studio Python SDK.
         
         Args:
             user_message: Formatted user message
@@ -112,37 +287,54 @@ class GemmaCoachClient:
             Response text from model
         """
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": EVOLUTION_COACH_SYSTEM_PROMPT
-                            },
-                            {
-                                "role": "user",
-                                "content": user_message
-                            }
-                        ],
-                        "temperature": self.temperature,
-                        "max_tokens": 2000,
-                        "top_p": 0.95
-                    }
+            # Ensure model is loaded
+            await self.load_model()
+            
+            if self.verbose:
+                print(f"🤖 Sending {len(user_message)} chars to {self.model}...")
+            
+            coach_log_manager.append(f"[COACH  ] 📤 Sending {len(user_message)} chars to LLM")
+            
+            # Get LM Studio client (connects to already loaded model)
+            if not self._lms_client:
+                self._lms_client = await asyncio.to_thread(
+                    lms.get_default_client,
+                    self.base_url
                 )
-                response.raise_for_status()
-                
-                data = response.json()
-                return data['choices'][0]['message']['content']
+            
+            # Get the loaded model handle
+            model = await asyncio.to_thread(self._lms_client.llm.model)
+            
+            # Create chat with system prompt
+            chat = lms.Chat(self.system_prompt)
+            chat.add_user_message(user_message)
+            
+            # Generate response
+            response = await asyncio.to_thread(
+                model.respond,
+                chat,
+                config={
+                    "temperature": self.temperature,
+                    "maxTokens": 4000,  # Enough for structured response
+                }
+            )
+            
+            # Extract text content
+            response_text = response.content
+            
+            if self.verbose:
+                print(f"✅ Received {len(response_text)} chars from coach")
+            
+            coach_log_manager.append(f"[COACH  ] 📥 Received {len(response_text)} chars from LLM")
+            coach_log_manager.append(f"[COACH  ]   - Tokens: {response.stats.predicted_tokens_count}")
+            coach_log_manager.append(f"[COACH  ]   - Time to first token: {response.stats.time_to_first_token_sec:.2f}s")
+            
+            return response_text
         
-        except httpx.ConnectError:
-            print(f"❌ Cannot connect to Gemma Coach at {self.base_url}")
-            print("   Make sure LM Studio is running: lm-studio-server --port 1234")
-            return None
         except Exception as e:
+            logger.exception("LLM call error")
             print(f"❌ LLM call error: {e}")
+            coach_log_manager.append(f"[COACH  ] ❌ LLM call error: {e}")
             return None
     
     def _build_user_message(

@@ -85,8 +85,21 @@ class CoachAnalysis:
         """Reconstruct from dictionary (used after JSON parsing)."""
         recs = []
         for r in data.get("recommendations", []):
+            # Handle both uppercase (from LLM) and lowercase (proper values)
+            category_str = r["category"]
+            try:
+                category = RecommendationCategory(category_str.lower())
+            except ValueError:
+                # If still invalid, try uppercase to enum name mapping
+                for cat in RecommendationCategory:
+                    if cat.name == category_str.upper():
+                        category = cat
+                        break
+                else:
+                    raise ValueError(f"Unknown recommendation category: {category_str}")
+            
             rec = CoachRecommendation(
-                category=RecommendationCategory(r["category"]),
+                category=category,
                 parameter=r["parameter"],
                 current_value=r["current_value"],
                 suggested_value=r["suggested_value"],
@@ -105,6 +118,20 @@ class CoachAnalysis:
             diversity_concern=data.get("diversity_concern", False),
             overall_assessment=data.get("overall_assessment", "neutral")
         )
+
+
+@dataclass
+class RecommendationApplication:
+    """Record of when Coach recommendations were applied."""
+    
+    generation: int                               # Generation when applied
+    applied_count: int                            # Number of recommendations applied
+    recommendations: List[str]                    # List of parameter names changed
+    timestamp: str                                # ISO timestamp
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
 
 
 @dataclass
@@ -130,15 +157,28 @@ class EvolutionState:
     fitness_config_dict: Dict[str, Any]
     ga_config_dict: Dict[str, Any]
     
+    # Application tracking (NEW)
+    recent_applications: List[RecommendationApplication] = field(default_factory=list)
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return asdict(self)
 
 
 # GEMMA COACH SYSTEM PROMPT
-# This is the exact prompt to send to Gemma 3
+# Load from versioned prompt files for experimentation
 
-EVOLUTION_COACH_SYSTEM_PROMPT = """You are the Evolution Coach, an AI expert in genetic algorithms and trading strategy optimization.
+def load_coach_prompt(version: str = "async_coach_v1") -> str:
+    """Load coach system prompt from file."""
+    from pathlib import Path
+    prompt_path = Path(__file__).parent.parent / "coach_prompts" / f"{version}.txt"
+    try:
+        return prompt_path.read_text()
+    except FileNotFoundError:
+        # Fallback to default inline prompt
+        return _DEFAULT_PROMPT
+
+_DEFAULT_PROMPT = """You are the Evolution Coach, an AI expert in genetic algorithms and trading strategy optimization.
 
 Your role: Analyze evolution logs and recommend parameter adjustments to improve GA convergence and strategy performance.
 
@@ -267,6 +307,9 @@ IF std_fitness very low (all similar):
   → Recommend: increase mutation_rate, decrease elite_fraction, confidence=0.85
 
 TONE: Professional, specific, confidence-driven. No hedging. Quote actual metrics."""
+
+# Initialize default prompt
+EVOLUTION_COACH_SYSTEM_PROMPT = load_coach_prompt()
 
 
 # JSON SCHEMA for validation (optional, for strict parsing)

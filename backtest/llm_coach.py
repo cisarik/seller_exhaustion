@@ -228,11 +228,11 @@ class GemmaCoachClient:
     
     async def unload_model(self):
         """
-        Unload model using lms CLI and reset client.
+        Unload model using lms CLI to free context window.
         
-        CRITICAL: Always clears _lms_client so a fresh client can be created
-        on next load. This prevents "Default client is already created" errors
-        when reloading model to clear context window.
+        NOTE: Does NOT clear _lms_client because the lmstudio SDK's default
+        client is a singleton that can only be created once. We keep the client
+        alive and just reload the model on the LM Studio side.
         """
         if not self._model_loaded:
             if self.verbose:
@@ -241,8 +241,8 @@ class GemmaCoachClient:
         
         try:
             if self.verbose:
-                print(f"🗑️  Unloading model")
-            coach_log_manager.append(f"[LMS    ] 🗑️  Unloading model")
+                print(f"🗑️  Unloading model to free context window")
+            coach_log_manager.append(f"[LMS    ] 🗑️  Unloading model to free context window")
             
             # Execute lms unload command
             result = await asyncio.to_thread(
@@ -255,26 +255,22 @@ class GemmaCoachClient:
             
             if result.returncode == 0:
                 self._model_loaded = False
-                # CRITICAL: Clear client so fresh one can be created on reload
-                self._lms_client = None
                 if self.verbose:
-                    print(f"✅ Model unloaded, client cleared for fresh start")
+                    print(f"✅ Model unloaded successfully")
                 coach_log_manager.append(f"[LMS    ] ✅ Model unloaded successfully")
-                coach_log_manager.append(f"[LMS    ] 🔄 Client reset for fresh context window on reload")
+                coach_log_manager.append(f"[LMS    ] 💾 Context window freed (client reused on next load)")
             else:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 coach_log_manager.append(f"[LMS    ] ⚠️  Unload error: {error_msg}")
-                # Still mark as unloaded and clear client
+                # Still mark as unloaded
                 self._model_loaded = False
-                self._lms_client = None
         
         except Exception as e:
             logger.exception("Model unloading error")
             coach_log_manager.append(f"[LMS    ] ⚠️  Error: {e}")
             print(f"⚠️  Error unloading model: {e}")
-            # Still mark as unloaded and clear client
+            # Still mark as unloaded
             self._model_loaded = False
-            self._lms_client = None
     
     async def _call_llm(self, user_message: str) -> Optional[str]:
         """
@@ -295,12 +291,25 @@ class GemmaCoachClient:
             
             coach_log_manager.append(f"[COACH  ] 📤 Sending {len(user_message)} chars to LLM")
             
-            # Get LM Studio client (connects to already loaded model)
+            # Get LM Studio client (singleton - only created once)
+            # IMPORTANT: SDK's get_default_client() can only be called ONCE
+            # After first call, it returns the same client instance
+            # NOTE: Don't pass self.base_url - SDK finds localhost:1234 automatically
             if not self._lms_client:
-                self._lms_client = await asyncio.to_thread(
-                    lms.get_default_client,
-                    self.base_url
-                )
+                try:
+                    self._lms_client = await asyncio.to_thread(
+                        lms.get_default_client
+                    )
+                    coach_log_manager.append(f"[LMS    ] ✅ Created LM Studio default client")
+                except Exception as e:
+                    if "Default client is already created" in str(e):
+                        # Client already exists, get it without args
+                        self._lms_client = await asyncio.to_thread(
+                            lms.get_default_client
+                        )
+                        coach_log_manager.append(f"[LMS    ] ✅ Got existing default client")
+                    else:
+                        raise
             
             # Get the loaded model handle
             model = await asyncio.to_thread(self._lms_client.llm.model)

@@ -1060,6 +1060,70 @@ FIB_COLORS = {
 
 ---
 
+## v3.1 Highlights (January 2025) - Evolution Coach LM Studio Integration
+
+**Status**: ✅ Production Ready
+
+### Overview
+v3.1 introduces the **Evolution Coach** - an AI-powered optimizer using Gemma 3 LLM to analyze GA population and provide intelligent parameter recommendations. Connects to local LM Studio server for on-device LLM inference.
+
+### Key Features
+
+**LLM-Powered Analysis**:
+- ✅ Automatic population analysis at configurable generations (default: 5, 10, 15, ...)
+- ✅ Gemma 3 model analyzes evolution patterns and detects stagnation
+- ✅ JSON-based recommendations for GA parameters
+- ✅ Real-time application of recommendations (no manual intervention)
+
+**Context Window Management**:
+- ✅ Unload model after analysis to free context
+- ✅ Reload model for next analysis with fresh context
+- ✅ Smart client reuse: singleton LM Studio client persists across load/unload cycles
+- ✅ Unlimited analysis cycles (tested with 2+ consecutive analyses)
+
+**Recommendation Categories**:
+- GA Hyperparameters: `mutation_rate`, `sigma`, `population_size`
+- Diversity Controls: diversity settings, stagnation detection
+- Fitness Function: weight adjustments for different optimization goals
+- Parameter Bounds: expand/contract search space as needed
+
+**Critical Fix: SDK Singleton Pattern**:
+- ❌ **Original Issue**: "Default client is already created" error on model reload
+- ✅ **Root Cause**: lmstudio SDK's `get_default_client()` is a singleton
+- ✅ **Solution**: 
+  - Don't pass `base_url` to `get_default_client()` (SDK auto-detects localhost:1234)
+  - Keep single client alive across unload/reload cycles
+  - Manage model lifecycle separately via `lms` CLI
+
+**Test Coverage**:
+- `tests/test_coach_llm_client_lifecycle.py` - Unit tests for client lifecycle
+- `tests/test_coach_reload_cycle.py` - Full unload/reload/analyze cycles
+- `tests/test_coach_with_real_lm_studio.py` - Integration test with real LM Studio
+
+**Documentation**:
+- `docs/COACH_LM_STUDIO_INTEGRATION_COMPLETE.md` - Complete user guide
+- `docs/COACH_SDK_SINGLETON_PATTERN.md` - Technical deep-dive on SDK pattern
+
+### Quick Start
+
+```bash
+# 1. Start LM Studio server
+lms server start
+
+# 2. Load model
+lms load google/gemma-3-12b --gpu=0.6
+
+# 3. Configure .env
+COACH_MODEL=google/gemma-3-12b
+COACH_FIRST_ANALYSIS_GENERATION=5
+COACH_AUTO_RELOAD_MODEL=true
+
+# 4. Run with coach enabled
+poetry run python cli.py ui
+```
+
+At generation 5, coach analyzes and provides recommendations!
+
 ---
 
 ## v2.2 Highlights (January 2025)

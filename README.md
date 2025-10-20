@@ -843,6 +843,127 @@ User-defined weights for specific optimization goals.
 
 ---
 
-**Version**: 3.0.1  
+## 🤖 Evolution Coach (LLM-Powered Optimization)
+
+**NEW in v3.1**: AI-powered genetic algorithm coach using Gemma 3 LLM.
+
+### Overview
+The Evolution Coach automatically analyzes your GA population at configurable generations and provides AI-powered recommendations to improve optimization. Uses a local Gemma 3 model via LM Studio.
+
+**Key Features**:
+- ✅ **Automatic analysis** at generation 5, 10, 15, etc. (configurable)
+- ✅ **LLM recommendations** for GA parameters (mutation rate, diversity, population size)
+- ✅ **Context window management** - unload/reload model between analyses to free memory
+- ✅ **Real-time application** - recommendations automatically applied to GA config
+- ✅ **Comprehensive logging** - all coach decisions logged and visible in UI
+
+### Requirements
+- **LM Studio** running locally (https://lmstudio.ai/)
+- **Model**: `google/gemma-3-12b` (or compatible)
+- **GPU**: Recommended (runs on CPU but slow)
+
+### Quick Start
+
+1. **Install and start LM Studio**:
+   ```bash
+   # https://lmstudio.ai/
+   # Download, install, launch GUI
+   lms server start  # Start API server
+   ```
+
+2. **Load the model**:
+   ```bash
+   lms load google/gemma-3-12b --gpu=0.6
+   lms ps  # Verify STATUS = READY
+   ```
+
+3. **Configure in `.env`**:
+   ```bash
+   COACH_MODEL=google/gemma-3-12b
+   COACH_FIRST_ANALYSIS_GENERATION=5      # Analyze at gen 5
+   COACH_MAX_LOG_GENERATIONS=3            # Show last 3 gens
+   COACH_AUTO_RELOAD_MODEL=true           # Unload/reload between
+   COACH_CONTEXT_LENGTH=5000
+   COACH_GPU=0.6
+   ```
+
+4. **Run optimization**:
+   ```bash
+   poetry run python cli.py ui
+   ```
+   At generation 5, the coach will analyze and provide recommendations!
+
+### How It Works
+
+```
+Generation 5: Coach Triggers
+  ├─ Load model via lms CLI
+  ├─ Create LM Studio client (once, reused)
+  ├─ Send evolution state to Gemma 3
+  ├─ Receive JSON recommendations
+  └─ Apply to GA parameters (mutation_rate, sigma, etc.)
+
+Generation 5 Complete: Free Context Window
+  ├─ Unload model via lms CLI
+  ├─ Keep client alive (reuse on next analysis)
+  └─ Context window freed on LM Studio side
+
+Generation 10: Coach Triggers Again
+  ├─ Reload model via lms CLI
+  ├─ Reuse existing LM client (no recreation conflicts!)
+  ├─ Send new evolution state
+  ├─ Receive updated recommendations
+  └─ Apply changes
+```
+
+### Recommendation Categories
+
+The coach can recommend changes to:
+- **GA Hyperparameters**: `mutation_rate`, `sigma`, `population_size`
+- **Diversity Controls**: immigrant fraction, stagnation detection
+- **Fitness Function**: adjust weights for different trading styles
+- **Parameter Bounds**: expand search space if needed
+
+### Logs
+
+Watch the Coach Log window in the UI for messages like:
+```
+[COACH  ] 🤖 Loaded system prompt: async_coach_v1
+[LMS    ] ✅ Model already loaded: google/gemma-3-12b
+[COACH  ] 📤 Sending 1362 chars to LLM...
+[COACH  ] 📥 Received 1419 chars from coach
+[COACH  ] ✓ Recommendations: 2
+[COACH  ] ✅ Applied: ga.mutation_rate = 0.5 (was 0.28)
+[COACH  ] ✅ Applied: ga.sigma = 0.15 (was 0.12)
+```
+
+### Troubleshooting
+
+**"LM Studio is not reachable"**
+- Start server: `lms server start`
+- Check: `lms ps`
+
+**"Model not loaded"**
+- Load it: `lms load google/gemma-3-12b --gpu=0.6`
+
+**"Default client is already created"** ✅ **FIXED in v3.1**
+- This error is now handled correctly - client is reused across unload/reload
+
+**Coach doesn't run**
+- Check `COACH_FIRST_ANALYSIS_GENERATION` is set correctly
+- Verify model is READY (not IDLE) when analysis triggers
+- Monitor coach logs in UI
+
+### Documentation
+
+For detailed information:
+- **docs/EVOLUTION_COACH_GUIDE.md** - Complete user guide
+- **docs/COACH_LM_STUDIO_INTEGRATION_COMPLETE.md** - Full integration details
+- **docs/COACH_SDK_SINGLETON_PATTERN.md** - Technical deep-dive
+- **backtest/coach_protocol.py** - Coach input/output contract
+
+---
+
+**Version**: 3.1  
 **Last Updated**: 2025-01-17  
 **Status**: ✅ Production Ready ????????????????????????????????????

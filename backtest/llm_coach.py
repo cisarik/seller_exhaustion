@@ -154,15 +154,9 @@ class GemmaCoachClient:
                 # Look for the model name in the output
                 if self.model in output:
                     self._model_loaded = True
-                    coach_log_manager.append(f"[LMS    ] ✅ Model already loaded: {self.model}")
-                    if self.verbose:
-                        print(f"✅ Model already loaded: {self.model}")
                     return True
                 else:
                     self._model_loaded = False
-                    coach_log_manager.append(f"[LMS    ] 📊 Model not loaded: {self.model}")
-                    if self.verbose:
-                        print(f"Model not loaded: {self.model}")
                     return False
             else:
                 coach_log_manager.append(f"[LMS    ] ⚠️  Failed to check model status")
@@ -178,18 +172,10 @@ class GemmaCoachClient:
         # First check if model is already loaded
         already_loaded = await self.check_model_loaded()
         if already_loaded:
-            if self.verbose:
-                print(f"✅ Model already loaded: {self.model}")
-            coach_log_manager.append(f"[LMS    ] ✅ Model already loaded: {self.model}")
+            coach_log_manager.append(f"[LMS    ] ✅ Model already loaded")
             return
         
         try:
-            if self.verbose:
-                print(f"📦 Loading model: {self.model}")
-            coach_log_manager.append(f"[LMS    ] 📦 Loading model: {self.model}")
-            coach_log_manager.append(f"[LMS    ]   - GPU offload: {self.gpu:.1%}")
-            coach_log_manager.append(f"[LMS    ]   - Context length: {self.context_length}")
-            
             # Build lms load command
             cmd = ["lms", "load", self.model, f"--gpu={self.gpu}", f"--context-length={self.context_length}"]
             
@@ -204,11 +190,7 @@ class GemmaCoachClient:
             
             if result.returncode == 0:
                 self._model_loaded = True
-                if self.verbose:
-                    print(f"✅ Model loaded: {self.model}")
                 coach_log_manager.append(f"[LMS    ] ✅ Model loaded successfully")
-                if result.stdout:
-                    coach_log_manager.append(f"[LMS    ] {result.stdout.strip()}")
             else:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 coach_log_manager.append(f"[LMS    ] ❌ Failed to load model: {error_msg}")
@@ -223,7 +205,6 @@ class GemmaCoachClient:
         except Exception as e:
             logger.exception("Model loading error")
             coach_log_manager.append(f"[LMS    ] ❌ Error: {e}")
-            print(f"❌ Failed to load model {self.model}: {e}")
             raise
     
     async def unload_model(self):
@@ -240,10 +221,6 @@ class GemmaCoachClient:
             return
         
         try:
-            if self.verbose:
-                print(f"🗑️  Unloading model to free context window")
-            coach_log_manager.append(f"[LMS    ] 🗑️  Unloading model to free context window")
-            
             # Execute lms unload command
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -255,10 +232,7 @@ class GemmaCoachClient:
             
             if result.returncode == 0:
                 self._model_loaded = False
-                if self.verbose:
-                    print(f"✅ Model unloaded successfully")
                 coach_log_manager.append(f"[LMS    ] ✅ Model unloaded successfully")
-                coach_log_manager.append(f"[LMS    ] 💾 Context window freed (client reused on next load)")
             else:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 coach_log_manager.append(f"[LMS    ] ⚠️  Unload error: {error_msg}")
@@ -268,7 +242,6 @@ class GemmaCoachClient:
         except Exception as e:
             logger.exception("Model unloading error")
             coach_log_manager.append(f"[LMS    ] ⚠️  Error: {e}")
-            print(f"⚠️  Error unloading model: {e}")
             # Still mark as unloaded
             self._model_loaded = False
     
@@ -286,9 +259,6 @@ class GemmaCoachClient:
             # Ensure model is loaded
             await self.load_model()
             
-            if self.verbose:
-                print(f"🤖 Sending {len(user_message)} chars to {self.model}...")
-            
             coach_log_manager.append(f"[COACH  ] 📤 Sending {len(user_message)} chars to LLM")
             
             # Get LM Studio client (singleton - only created once)
@@ -300,14 +270,12 @@ class GemmaCoachClient:
                     self._lms_client = await asyncio.to_thread(
                         lms.get_default_client
                     )
-                    coach_log_manager.append(f"[LMS    ] ✅ Created LM Studio default client")
                 except Exception as e:
                     if "Default client is already created" in str(e):
                         # Client already exists, get it without args
                         self._lms_client = await asyncio.to_thread(
                             lms.get_default_client
                         )
-                        coach_log_manager.append(f"[LMS    ] ✅ Got existing default client")
                     else:
                         raise
             
@@ -331,18 +299,12 @@ class GemmaCoachClient:
             # Extract text content
             response_text = response.content
             
-            if self.verbose:
-                print(f"✅ Received {len(response_text)} chars from coach")
-            
-            coach_log_manager.append(f"[COACH  ] 📥 Received {len(response_text)} chars from LLM")
-            coach_log_manager.append(f"[COACH  ]   - Tokens: {response.stats.predicted_tokens_count}")
-            coach_log_manager.append(f"[COACH  ]   - Time to first token: {response.stats.time_to_first_token_sec:.2f}s")
+            coach_log_manager.append(f"[COACH  ] 📥 Received response from LLM")
             
             return response_text
         
         except Exception as e:
             logger.exception("LLM call error")
-            print(f"❌ LLM call error: {e}")
             coach_log_manager.append(f"[COACH  ] ❌ LLM call error: {e}")
             return None
     

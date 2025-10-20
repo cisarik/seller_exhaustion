@@ -203,11 +203,11 @@ def _build_features_spectre(
         use_cuda = False
     if use_cuda:
         try:
-            engine.to_cuda()
-            logger.info("Spectre engine moved to CUDA")
+            engine.to_cuda(enable_stream=True, gpu_id=0)
+            logger.info("Spectre engine moved to CUDA with streaming enabled")
         except Exception as e:
             logger.warning("Spectre CUDA requested but unavailable: %s", e)
-    # Note: We keep CPU by default. Advanced users can enable GPU via engine.to_cuda() in a custom fork.
+            use_cuda = False
 
     # Resolve window lengths
     ema_fast_bars = minutes_to_bars(p.ema_fast_minutes, tf) if p.ema_fast_minutes is not None else p.ema_fast

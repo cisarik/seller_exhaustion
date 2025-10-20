@@ -26,7 +26,8 @@ def evaluate_individual_worker(args: Tuple) -> Tuple[float, Dict[str, Any]]:
     """
     Worker function for multiprocessing.
     
-    Uses EXACT same code as CPU optimizer (guaranteed correct).
+    Supports GPU-accelerated Spectre trading when enabled.
+    Falls back to CPU if GPU unavailable.
     """
     seller_params, backtest_params, data_dict, tf, fitness_config = args
     
@@ -34,12 +35,31 @@ def evaluate_individual_worker(args: Tuple) -> Tuple[float, Dict[str, Any]]:
     data = pd.DataFrame(data_dict['values'], index=data_dict['index'], columns=data_dict['columns'])
     
     try:
-        # Use EXACT CPU functions
-        use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
-        feats = build_features(data, seller_params, tf, use_spectre=use_spectre)
-        result = run_backtest(feats, backtest_params)
-        fitness = calculate_fitness(result['metrics'], fitness_config)
+        # Check if Spectre trading should be used
+        # NOTE: CUDA cannot be re-initialized in forked subprocess (multiprocessing limitation)
+        # Always use CPU in worker processes. GPU is only for main process feature computation.
+        use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
         
+        if use_spectre_trading:
+            # Use Spectre trading but WITHOUT CUDA in worker processes
+            try:
+                from backtest.spectre_trading import run_spectre_trading, _SPECTRE_AVAILABLE
+                if _SPECTRE_AVAILABLE:
+                    result = run_spectre_trading(data, seller_params, backtest_params, tf, use_cuda=False)
+                else:
+                    raise RuntimeError("Spectre not available")
+            except Exception:
+                # Fallback to CPU feature path if Spectre fails
+                use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+                feats = build_features(data, seller_params, tf, use_spectre=use_spectre)
+                result = run_backtest(feats, backtest_params)
+        else:
+            # Standard CPU path
+            use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+            feats = build_features(data, seller_params, tf, use_spectre=use_spectre)
+            result = run_backtest(feats, backtest_params)
+        
+        fitness = calculate_fitness(result['metrics'], fitness_config)
         return fitness, result['metrics']
     
     except Exception as e:

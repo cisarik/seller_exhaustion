@@ -16,6 +16,8 @@ class CompactParamsEditor(QWidget):
     """Compact parameter editor widget for main window with time-based display."""
     
     params_changed = Signal()  # Emitted when any parameter changes
+    coach_load_requested = Signal(str, str)  # Emitted with (model, prompt_version) when load clicked
+    coach_unload_requested = Signal()  # Emitted when unload clicked
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,6 +25,9 @@ class CompactParamsEditor(QWidget):
         self.current_timeframe = Timeframe.m15  # Default to 15m
         self.timeframe_minutes = 15
         self.init_ui()
+        
+        # Load coach settings from config
+        self._load_coach_settings()
     
     def set_timeframe(self, timeframe: Timeframe):
         """Update the timeframe for time-based conversions."""
@@ -299,10 +304,198 @@ class CompactParamsEditor(QWidget):
         fitness_group.setLayout(fitness_layout)
         scroll_layout.addWidget(fitness_group)
         
+        # Evolution Coach Group (NEW - LLM coach configuration)
+        coach_group = QGroupBox("Evolution Coach 🤖")
+        coach_layout = QVBoxLayout()
+        coach_layout.setSpacing(6)
+        coach_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Model selection row
+        model_row = QHBoxLayout()
+        model_label = QLabel("Model:")
+        model_label.setMaximumWidth(60)
+        self.coach_model_combo = QComboBox()
+        self.coach_model_combo.addItem("google/gemma-3-12b", "google/gemma-3-12b")
+        self.coach_model_combo.addItem("gemma-2-9b-it", "gemma-2-9b-it")
+        self.coach_model_combo.setToolTip("LLM model for Evolution Coach")
+        self.coach_model_combo.currentIndexChanged.connect(self._on_coach_config_changed)
+        model_row.addWidget(model_label)
+        model_row.addWidget(self.coach_model_combo, 1)
+        coach_layout.addLayout(model_row)
+        
+        # Agent (prompt) selection row
+        agent_row = QHBoxLayout()
+        agent_label = QLabel("Agent:")
+        agent_label.setMaximumWidth(60)
+        self.coach_agent_combo = QComboBox()
+        self.coach_agent_combo.setToolTip("Coach prompt version")
+        self.coach_agent_combo.currentIndexChanged.connect(self._on_coach_config_changed)
+        
+        # Populate with coach prompts from directory
+        self._populate_coach_prompts()
+        
+        agent_row.addWidget(agent_label)
+        agent_row.addWidget(self.coach_agent_combo, 1)
+        coach_layout.addLayout(agent_row)
+        
+        # Load/Unload button
+        self.coach_load_btn = QPushButton("Load Model")
+        self.coach_load_btn.setToolTip("Load the selected LLM model in LM Studio")
+        self.coach_load_btn.clicked.connect(self._on_coach_load_clicked)
+        self._coach_model_loaded = False
+        self._update_coach_button_style()
+        coach_layout.addWidget(self.coach_load_btn)
+        
+        coach_group.setLayout(coach_layout)
+        scroll_layout.addWidget(coach_group)
+        
         scroll_layout.addStretch()
         
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
+    
+    def _populate_coach_prompts(self):
+        """Populate coach agent dropdown with available prompts from coach_prompts/."""
+        from pathlib import Path
+        
+        # Get coach_prompts directory
+        coach_prompts_dir = Path(__file__).parent.parent.parent / "coach_prompts"
+        
+        if not coach_prompts_dir.exists():
+            # Fallback to default
+            self.coach_agent_combo.addItem("async_coach_v1 (default)", "async_coach_v1")
+            return
+        
+        # List all .txt files in coach_prompts/
+        prompt_files = sorted(coach_prompts_dir.glob("*.txt"))
+        
+        if not prompt_files:
+            # Fallback to default
+            self.coach_agent_combo.addItem("async_coach_v1 (default)", "async_coach_v1")
+            return
+        
+        # Add each prompt file
+        for prompt_file in prompt_files:
+            # Get filename without extension
+            prompt_name = prompt_file.stem
+            display_name = prompt_name.replace("_", " ").title()
+            self.coach_agent_combo.addItem(display_name, prompt_name)
+            
+            # Set default to async_coach_v1
+            if prompt_name == "async_coach_v1":
+                self.coach_agent_combo.setCurrentIndex(self.coach_agent_combo.count() - 1)
+    
+    def _load_coach_settings(self):
+        """Load coach settings from config and update UI."""
+        from config.settings import settings
+        
+        # Set model
+        model = settings.coach_model
+        for i in range(self.coach_model_combo.count()):
+            if self.coach_model_combo.itemData(i) == model:
+                self.coach_model_combo.setCurrentIndex(i)
+                break
+        
+        # Set prompt version (already populated by _populate_coach_prompts)
+        prompt_version = settings.coach_prompt_version
+        for i in range(self.coach_agent_combo.count()):
+            if self.coach_agent_combo.itemData(i) == prompt_version:
+                self.coach_agent_combo.setCurrentIndex(i)
+                break
+    
+    def _on_coach_config_changed(self):
+        """Handle coach config change - save to settings."""
+        from config.settings import settings, SettingsManager
+        
+        # Update settings
+        settings.coach_model = self.coach_model_combo.currentData()
+        settings.coach_prompt_version = self.coach_agent_combo.currentData()
+        
+        # Convert settings to dict and save to .env
+        try:
+            settings_dict = settings.model_dump()  # Pydantic v2
+        except AttributeError:
+            settings_dict = settings.dict()  # Pydantic v1 fallback
+        
+        SettingsManager.save_to_env(settings_dict)
+    
+    def get_coach_config(self) -> dict:
+        """Get Evolution Coach configuration."""
+        return {
+            "model": self.coach_model_combo.currentData(),
+            "prompt_version": self.coach_agent_combo.currentData()
+        }
+    
+    def _on_coach_load_clicked(self):
+        """Handle coach load/unload button click."""
+        if self._coach_model_loaded:
+            # Unload model
+            self.coach_unload_requested.emit()
+        else:
+            # Load model
+            model = self.coach_model_combo.currentData()
+            prompt_version = self.coach_agent_combo.currentData()
+            self.coach_load_requested.emit(model, prompt_version)
+    
+    def set_coach_model_loaded(self, loaded: bool):
+        """Update coach model loaded state and button appearance."""
+        self._coach_model_loaded = loaded
+        self._update_coach_button_style()
+    
+    def set_coach_loading(self, loading: bool):
+        """Update button to show loading state."""
+        if loading:
+            self.coach_load_btn.setText("Loading...")
+            self.coach_load_btn.setEnabled(False)
+            self.coach_load_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2e2416;
+                    color: #ff9800;
+                    border: 1px solid #ff9800;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            self._update_coach_button_style()
+    
+    def _update_coach_button_style(self):
+        """Update button text and style based on loaded state."""
+        if self._coach_model_loaded:
+            # Model is loaded - show Unload button (red)
+            self.coach_load_btn.setText("Unload Model")
+            self.coach_load_btn.setToolTip("Unload the LLM model to free memory")
+            self.coach_load_btn.setEnabled(True)
+            self.coach_load_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2e1a1a;
+                    color: #f44336;
+                    border: 1px solid #f44336;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #f44336;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            # Model not loaded - show Load button (green)
+            self.coach_load_btn.setText("Load Model")
+            self.coach_load_btn.setToolTip("Load the selected LLM model in LM Studio")
+            self.coach_load_btn.setEnabled(True)
+            self.coach_load_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2f5c39;
+                    color: #e8f5e9;
+                    border: 1px solid #4caf50;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #4caf50;
+                }
+            """)
     
     def _on_param_changed(self):
         """Handle parameter change and update tooltips."""

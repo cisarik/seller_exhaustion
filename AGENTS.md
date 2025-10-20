@@ -1,6 +1,6 @@
 # AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion **BACKTESTING** Tool
 
-**Last Updated**: 2025-01-17 (v3.0.1 - ADAM optimizer fixes: epsilon 0.0007 → 0.02)  
+**Last Updated**: 2025-01-17 (v3.1 -  Evolution Coach wired)  
 **Project**: ADA Seller-Exhaustion **Backtesting & Strategy Development** Tool  
 **Owner**: Michal  
 **Python Version**: 3.10+ (tested on 3.13)

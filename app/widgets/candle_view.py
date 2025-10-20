@@ -230,6 +230,10 @@ class CandleChartWidget(QWidget):
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("background: transparent; color: #4caf50; font-size: 14px; font-weight: bold; padding: 0;")
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.status_label.setCursor(Qt.ArrowCursor)  # Default cursor
+        self.status_label.mousePressEvent = self._on_status_clicked
+        self._coach_analysis = None  # Store latest coach analysis
+        self._status_is_clickable = False
         status_layout.addWidget(self.status_label, stretch=1)
         
         # Progress bar for actions - aligned to the right
@@ -272,6 +276,49 @@ class CandleChartWidget(QWidget):
         self.action_progress.setVisible(False)
         if message:
             self.status_label.setText(message)
+    
+    def set_coach_status(self, message: str, analysis=None, is_recommendation: bool = False):
+        """
+        Update status bar with coach message.
+        
+        Args:
+            message: Status message to display
+            analysis: CoachAnalysis object (if recommendations applied)
+            is_recommendation: True if recommendations were applied (shows green bg + clickable)
+        """
+        self._coach_analysis = analysis
+        self._status_is_clickable = is_recommendation and analysis is not None
+        
+        if is_recommendation:
+            # Green background, clickable
+            self.status_label.setStyleSheet("""
+                background-color: #2f5c39;
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 12px;
+                border-radius: 4px;
+                border: 2px solid #4caf50;
+            """)
+            self.status_label.setCursor(Qt.PointingHandCursor)
+        else:
+            # Normal transparent background
+            self.status_label.setStyleSheet("""
+                background: transparent;
+                color: #4caf50;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 0;
+            """)
+            self.status_label.setCursor(Qt.ArrowCursor)
+        
+        self.status_label.setText(message)
+    
+    def _on_status_clicked(self, event):
+        """Handle status label click - show coach recommendations if available."""
+        if self._status_is_clickable and self._coach_analysis:
+            from app.widgets.coach_recommendations_dialog import show_coach_recommendations
+            show_coach_recommendations(self._coach_analysis, parent=self)
     
     def set_indicator_config(self, config):
         """Update indicator configuration and re-render."""

@@ -65,6 +65,9 @@ class SettingsDialog(QDialog):
         # Optimization Parameters Tab
         tabs.addTab(self.create_optimizer_tab(), "Optimization")
         
+        # Evolution Coach Tab
+        tabs.addTab(self.create_coach_tab(), "Evolution Coach")
+        
         layout.addWidget(tabs)
         
         # Bottom buttons
@@ -379,6 +382,122 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return widget
     
+    def create_coach_tab(self):
+        """Create Evolution Coach settings tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Coach Settings Group
+        coach_group = QGroupBox("Evolution Coach Settings")
+        coach_layout = QFormLayout()
+        
+        # System Prompt Selection
+        self.coach_system_prompt = QComboBox()
+        self.coach_system_prompt.addItem("async_coach_v1", "async_coach_v1")
+        self.coach_system_prompt.setToolTip("Select the system prompt version for the coach")
+        coach_layout.addRow("System Prompt:", self.coach_system_prompt)
+        
+        # First Analysis Generation
+        self.coach_first_gen = QSpinBox()
+        self.coach_first_gen.setRange(1, 1000)
+        self.coach_first_gen.setValue(10)
+        self.coach_first_gen.setSuffix(" gen")
+        self.coach_first_gen.setToolTip("Generation number when first coach analysis triggers")
+        coach_layout.addRow("First Analysis At:", self.coach_first_gen)
+        
+        # Max Log Generations
+        self.coach_max_log_gens = QSpinBox()
+        self.coach_max_log_gens.setRange(5, 100)
+        self.coach_max_log_gens.setValue(25)
+        self.coach_max_log_gens.setSuffix(" gens")
+        self.coach_max_log_gens.setToolTip("Keep last N generations in log history sent to coach")
+        coach_layout.addRow("Max Log Generations:", self.coach_max_log_gens)
+        
+        # Auto Reload Model
+        self.coach_auto_reload = QCheckBox("Auto reload model after recommendations")
+        self.coach_auto_reload.setChecked(True)
+        self.coach_auto_reload.setToolTip("Automatically unload and reload model to clear context window")
+        coach_layout.addRow("Auto Reload:", self.coach_auto_reload)
+        
+        # Context Length
+        self.coach_context_length = QSpinBox()
+        self.coach_context_length.setRange(1000, 131072)
+        self.coach_context_length.setValue(5000)
+        self.coach_context_length.setSingleStep(1000)
+        self.coach_context_length.setSuffix(" tokens")
+        self.coach_context_length.setToolTip("Model context window size (131072 = Gemma max)")
+        coach_layout.addRow("Context Length:", self.coach_context_length)
+        
+        # GPU Offload Ratio
+        self.coach_gpu = QDoubleSpinBox()
+        self.coach_gpu.setRange(0.0, 1.0)
+        self.coach_gpu.setSingleStep(0.1)
+        self.coach_gpu.setDecimals(1)
+        self.coach_gpu.setValue(0.6)
+        self.coach_gpu.setToolTip("GPU offload ratio: 0.0 = CPU only, 1.0 = max GPU")
+        coach_layout.addRow("GPU Offload:", self.coach_gpu)
+        
+        coach_group.setLayout(coach_layout)
+        layout.addWidget(coach_group)
+        
+        # CPU Workers Group (moved from Optimization)
+        cpu_group = QGroupBox("CPU Worker Settings")
+        cpu_layout = QFormLayout()
+        
+        cpu_count = multiprocessing.cpu_count()
+        self.cpu_workers = QSpinBox()
+        self.cpu_workers.setRange(1, cpu_count)
+        self.cpu_workers.setValue(7)
+        self.cpu_workers.setSuffix(f" workers (max: {cpu_count})")
+        self.cpu_workers.setToolTip("Worker processes for CPU-based operations")
+        cpu_layout.addRow("CPU Workers:", self.cpu_workers)
+        
+        # ADAM Epsilon Stability (related to ADAM optimizer)
+        self.adam_epsilon_stability_coach = QDoubleSpinBox()
+        self.adam_epsilon_stability_coach.setRange(1e-10, 1e-6)
+        self.adam_epsilon_stability_coach.setSingleStep(1e-9)
+        self.adam_epsilon_stability_coach.setDecimals(10)
+        self.adam_epsilon_stability_coach.setValue(1e-8)
+        self.adam_epsilon_stability_coach.setToolTip("ADAM optimizer epsilon stability parameter")
+        cpu_layout.addRow("ADAM Epsilon Stability:", self.adam_epsilon_stability_coach)
+        
+        cpu_group.setLayout(cpu_layout)
+        layout.addWidget(cpu_group)
+        
+        # Reset button
+        reset_btn = QPushButton("Reset Coach Defaults")
+        reset_btn.clicked.connect(self.reset_coach_params)
+        layout.addWidget(reset_btn)
+        
+        # Info
+        coach_info = QLabel(
+            "💡 Evolution Coach:\n"
+            "- Gemma 3 LLM analyzes GA evolution and recommends parameter changes\n"
+            "- First analysis triggers at specified generation\n"
+            "- Subsequent analyses trigger after model reload (when recommendations applied)\n"
+            "- Model reload clears context window for fresh analysis\n"
+            "- Logs are trimmed to last N generations to manage context size"
+        )
+        coach_info.setWordWrap(True)
+        coach_info.setProperty("variant", "secondary")
+        layout.addWidget(coach_info)
+        
+        layout.addStretch()
+        return widget
+    
+    def reset_coach_params(self):
+        """Reset Evolution Coach parameters to defaults."""
+        idx = self.coach_system_prompt.findData("async_coach_v1")
+        if idx >= 0:
+            self.coach_system_prompt.setCurrentIndex(idx)
+        self.coach_first_gen.setValue(10)
+        self.coach_max_log_gens.setValue(25)
+        self.coach_auto_reload.setChecked(True)
+        self.coach_context_length.setValue(5000)
+        self.coach_gpu.setValue(0.6)
+        self.cpu_workers.setValue(7)
+        self.adam_epsilon_stability_coach.setValue(1e-8)
+    
     def load_from_settings(self):
         """Load UI values from saved settings."""
         # Backtest parameters
@@ -416,6 +535,21 @@ class SettingsDialog(QDialog):
         self.show_volume.setChecked(settings.chart_volume)
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
+        
+        # Evolution Coach settings
+        if hasattr(settings, 'coach_system_prompt'):
+            idx = self.coach_system_prompt.findData(settings.coach_system_prompt)
+            if idx >= 0:
+                self.coach_system_prompt.setCurrentIndex(idx)
+        self.coach_first_gen.setValue(settings.coach_first_analysis_generation)
+        self.coach_max_log_gens.setValue(settings.coach_max_log_generations)
+        self.coach_auto_reload.setChecked(settings.coach_auto_reload_model)
+        self.coach_context_length.setValue(settings.coach_context_length)
+        self.coach_gpu.setValue(settings.coach_gpu)
+        
+        # CPU Workers and ADAM epsilon stability
+        self.cpu_workers.setValue(getattr(settings, 'cpu_workers', 7))
+        self.adam_epsilon_stability_coach.setValue(settings.adam_epsilon_stability)
     
 
     
@@ -460,6 +594,17 @@ class SettingsDialog(QDialog):
                 'chart_signals': self.show_signals.isChecked(),
                 'chart_entries': self.show_entries.isChecked(),
                 'chart_exits': True,  # Always true for backwards compatibility (not shown in UI)
+                
+                # Evolution Coach settings
+                'coach_system_prompt': self.coach_system_prompt.currentData(),
+                'coach_first_analysis_generation': self.coach_first_gen.value(),
+                'coach_max_log_generations': self.coach_max_log_gens.value(),
+                'coach_auto_reload_model': self.coach_auto_reload.isChecked(),
+                'coach_context_length': self.coach_context_length.value(),
+                'coach_gpu': self.coach_gpu.value(),
+                
+                # CPU Workers
+                'cpu_workers': self.cpu_workers.value(),
             }
             
             SettingsManager.save_to_env(settings_dict)

@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     # Optimizer execution
     optimizer_workers: int = max(1, multiprocessing.cpu_count() - 1)
     
+    # Evolution Coach Parameters
+    coach_model: str = "google/gemma-3-12b"
+    coach_prompt_version: str = "async_coach_v1"
+    coach_system_prompt: str = "async_coach_v1"  # System prompt selection
+    coach_first_analysis_generation: int = 10
+    coach_max_log_generations: int = 25
+    coach_auto_reload_model: bool = True
+    coach_context_length: int = 5000  # Experimental: testing if enough for 25 gens
+    coach_gpu: float = 0.6  # GPU offload ratio 0.0-1.0 (60% default)
+    
+    # CPU Workers
+    cpu_workers: int = 7  # CPU worker processes for optimization
+    
     # Chart Indicator Display
     chart_ema_fast: bool = True
     chart_ema_slow: bool = True
@@ -190,6 +203,16 @@ class SettingsManager:
             f.write(f"ADAM_BETA1={existing.get('ADAM_BETA1', '0.9')}\n")
             f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")
             f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
+            
+            f.write("# Evolution Coach Parameters\n")
+            f.write(f"COACH_MODEL={existing.get('COACH_MODEL', 'google/gemma-3-12b')}\n")
+            f.write(f"COACH_PROMPT_VERSION={existing.get('COACH_PROMPT_VERSION', 'async_coach_v1')}\n")
+            f.write(f"COACH_SYSTEM_PROMPT={existing.get('COACH_SYSTEM_PROMPT', 'async_coach_v1')}\n")
+            f.write(f"COACH_FIRST_ANALYSIS_GENERATION={existing.get('COACH_FIRST_ANALYSIS_GENERATION', '10')}\n")
+            f.write(f"COACH_MAX_LOG_GENERATIONS={existing.get('COACH_MAX_LOG_GENERATIONS', '25')}\n")
+            f.write(f"COACH_AUTO_RELOAD_MODEL={existing.get('COACH_AUTO_RELOAD_MODEL', 'True')}\n")
+            f.write(f"COACH_CONTEXT_LENGTH={existing.get('COACH_CONTEXT_LENGTH', '5000')}\n")
+            f.write(f"COACH_GPU={existing.get('COACH_GPU', '0.6')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

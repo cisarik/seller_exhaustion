@@ -126,6 +126,10 @@ class MainWindow(QMainWindow):
         # Connect param changes to trigger re-calculation
         self.param_editor.params_changed.connect(self.on_params_changed)
         
+        # Connect coach load/unload signals
+        self.param_editor.coach_load_requested.connect(self.on_coach_load_requested)
+        self.param_editor.coach_unload_requested.connect(self.on_coach_unload_requested)
+        
         # Set initial sizes: Chart 50%, Params 25%, Stats 25% (right panel with Optimize button bottom-right)
         splitter.setSizes([800, 400, 400])
         
@@ -583,6 +587,85 @@ class MainWindow(QMainWindow):
         
         finally:
             self.chart_view.hide_action_progress()
+    
+    def on_coach_load_requested(self, model: str, prompt_version: str):
+        """Handle coach model load request."""
+        # Run async load in event loop
+        if HAS_QASYNC:
+            asyncio.create_task(self._load_coach_model_async(model, prompt_version))
+        else:
+            QMessageBox.warning(
+                self,
+                "Async Not Available",
+                "qasync is required for Evolution Coach. Please install: pip install qasync"
+            )
+    
+    async def _load_coach_model_async(self, model: str, prompt_version: str):
+        """Async handler for loading coach model."""
+        from backtest.llm_coach import GemmaCoachClient
+        
+        # Show loading state
+        self.param_editor.set_coach_loading(True)
+        self.chart_view.set_coach_status(f"🔍 Checking if model is loaded...")
+        
+        try:
+            # Create coach client if needed
+            if not hasattr(self, 'coach_client') or self.coach_client is None:
+                self.coach_client = GemmaCoachClient(
+                    model=model,
+                    prompt_version=prompt_version,
+                    verbose=True
+                )
+            
+            # Check if model is already loaded
+            model_loaded = await self.coach_client.check_model_loaded()
+            
+            if model_loaded:
+                # Model already loaded, just update UI
+                self.chart_view.set_coach_status(f"✅ Model already loaded: {model}")
+                self.param_editor.set_coach_model_loaded(True)
+                return
+            
+            # Model not loaded, proceed with loading
+            self.chart_view.set_coach_status(f"📦 Loading model: {model}...")
+            await self.coach_client.load_model()
+            
+            # Update UI
+            self.param_editor.set_coach_model_loaded(True)
+            self.chart_view.set_coach_status(f"✅ Model loaded: {model}")
+            
+        except Exception as e:
+            # Handle error
+            self.param_editor.set_coach_loading(False)
+            self.chart_view.set_coach_status(f"❌ Failed to load model: {e}")
+            QMessageBox.critical(self, "Model Load Error", 
+                f"Failed to load Evolution Coach model:\n\n{str(e)}\n\n"
+                f"Make sure LM Studio is running on port 1234.")
+    
+    def on_coach_unload_requested(self):
+        """Handle coach model unload request."""
+        # Run async unload in event loop
+        if HAS_QASYNC:
+            asyncio.create_task(self._unload_coach_model_async())
+        else:
+            QMessageBox.warning(
+                self,
+                "Async Not Available",
+                "qasync is required for Evolution Coach."
+            )
+    
+    async def _unload_coach_model_async(self):
+        """Async handler for unloading coach model."""
+        if hasattr(self, 'coach_client') and self.coach_client:
+            try:
+                await self.coach_client.unload_model()
+                self.param_editor.set_coach_model_loaded(False)
+                self.chart_view.set_coach_status("🗑️ Model unloaded")
+            except Exception as e:
+                self.chart_view.set_coach_status(f"⚠️ Error unloading model: {e}")
+        else:
+            self.param_editor.set_coach_model_loaded(False)
+            self.chart_view.set_coach_status("Model already unloaded")
     
     def on_params_changed(self):
         """Handle parameter changes from the compact editor."""
@@ -1279,6 +1362,9 @@ class MainWindow(QMainWindow):
         # Reload settings to ensure .env values override any stale environment variables
         SettingsManager.reload_settings()
         
+        # Check if coach model is already loaded (on startup)
+        await self._check_coach_model_status_on_startup()
+        
         # Restore window state
         self.restore_window_state()
         
@@ -1334,6 +1420,45 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(200, _maybe_start)
             except Exception as e:
                 logger.exception("Failed to auto-start optimization from file: %s", e)
+    
+    async def _check_coach_model_status_on_startup(self):
+        """Check if Evolution Coach model is already loaded on app startup."""
+        try:
+            from backtest.llm_coach import GemmaCoachClient
+            from core.coach_logging import coach_log_manager
+            
+            model = settings.coach_model
+            
+            # Create temporary client to check model status
+            temp_client = GemmaCoachClient(
+                model=model,
+                prompt_version=settings.coach_prompt_version,
+                system_prompt=getattr(settings, 'coach_system_prompt', settings.coach_prompt_version),
+                verbose=False
+            )
+            
+            # Check if model is already loaded
+            is_loaded = await temp_client.check_model_loaded()
+            
+            if is_loaded:
+                # Model already loaded, update button state
+                self.param_editor.set_coach_model_loaded(True)
+                self.chart_view.set_coach_status(f"✅ Model already loaded: {model}")
+                coach_log_manager.append(f"[STARTUP] 🤖 Coach model detected as loaded: {model}")
+                logger.info("✅ Coach model already loaded on startup: %s", model)
+                
+                # Store client for later use
+                self.coach_client = temp_client
+            else:
+                # Model not loaded
+                self.param_editor.set_coach_model_loaded(False)
+                self.chart_view.set_coach_status(f"Ready to load model: {model}")
+                coach_log_manager.append(f"[STARTUP] 📊 Coach model not loaded: {model}")
+                logger.info("Coach model not loaded on startup: %s", model)
+        
+        except Exception as e:
+            # Non-critical, just log and continue
+            logger.debug("Could not check coach model status on startup: %s", e)
     
     def load_parameters_state(self):
         """Load saved parameters from .env into compact editor."""

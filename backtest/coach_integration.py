@@ -13,13 +13,63 @@ from backtest.coach_protocol import EvolutionState, CoachAnalysis, CoachRecommen
 from backtest.llm_coach import GemmaCoachClient
 from backtest.optimizer import Population
 from core.models import FitnessConfig, OptimizationConfig, Timeframe
+from core.coach_logging import coach_log_manager
+
+
+def trim_logs_to_n_generations(
+    logs: List[str],
+    current_gen: int,
+    n_generations: int = 25
+) -> List[str]:
+    """
+    Trim logs to last N generations to manage context window.
+    
+    Args:
+        logs: Full log history
+        current_gen: Current generation number
+        n_generations: Keep last N generations (default 25)
+    
+    Returns:
+        Trimmed log list
+    """
+    if not logs:
+        return []
+    
+    # Calculate cutoff generation
+    min_gen = max(0, current_gen - n_generations)
+    
+    # Filter logs that mention "Generation X" or "Gen X"
+    trimmed = []
+    for line in logs:
+        # Try to extract generation number
+        if "Generation" in line or "Gen " in line:
+            try:
+                # Parse "Generation X" or "Gen X"
+                import re
+                match = re.search(r'(?:Generation|Gen)\s+(\d+)', line)
+                if match:
+                    log_gen = int(match.group(1))
+                    if log_gen >= min_gen:
+                        trimmed.append(line)
+                else:
+                    # No gen number, keep it
+                    trimmed.append(line)
+            except:
+                # Parse error, keep the line
+                trimmed.append(line)
+        else:
+            # Not a generation marker, keep it
+            trimmed.append(line)
+    
+    return trimmed
 
 
 def build_evolution_state(
     population: Population,
     fitness_config: FitnessConfig,
     ga_config: OptimizationConfig,
-    raw_logs: Optional[List[str]] = None
+    raw_logs: Optional[List[str]] = None,
+    n_log_generations: int = 25
 ) -> EvolutionState:
     """
     Build EvolutionState from current GA population and configuration.
@@ -145,6 +195,8 @@ def apply_coach_recommendations(
     
     applied_count = 0
     
+    coach_log_manager.append(f"[PARAMS ] 🔧 Applying {len(analysis.recommendations)} recommendations...")
+    
     for rec in analysis.recommendations:
         try:
             if rec.category == RecommendationCategory.FITNESS_WEIGHTS:
@@ -153,6 +205,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_fitness, rec.parameter)
                     setattr(new_fitness, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: fitness.{rec.parameter} = {rec.suggested_value} (was {old_val})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ fitness.{rec.parameter}: {old_val} → {rec.suggested_value}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.FITNESS_PENALTIES:
@@ -161,6 +214,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_fitness, rec.parameter)
                     setattr(new_fitness, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: fitness.{rec.parameter} = {rec.suggested_value:.2f} (was {old_val:.2f})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ fitness.{rec.parameter}: {old_val:.2f} → {rec.suggested_value:.2f}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.FITNESS_FUNCTION_TYPE:
@@ -169,6 +223,7 @@ def apply_coach_recommendations(
                     old_val = new_fitness.fitness_function_type
                     new_fitness.fitness_function_type = rec.suggested_value
                     print(f"✅ Applied: fitness.fitness_function_type = '{rec.suggested_value}' (was '{old_val}')")
+                    coach_log_manager.append(f"[PARAMS ] ✅ fitness.fitness_function_type: '{old_val}' → '{rec.suggested_value}'")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.FITNESS_GATES:
@@ -177,6 +232,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_fitness, rec.parameter)
                     setattr(new_fitness, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: fitness.{rec.parameter} = {rec.suggested_value} (was {old_val})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ fitness.{rec.parameter}: {old_val} → {rec.suggested_value}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.CURRICULUM:
@@ -185,6 +241,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_fitness, rec.parameter)
                     setattr(new_fitness, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: fitness.{rec.parameter} = {rec.suggested_value} (was {old_val})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ fitness.{rec.parameter}: {old_val} → {rec.suggested_value}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.GA_HYPERPARAMS:
@@ -193,6 +250,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_ga, rec.parameter)
                     setattr(new_ga, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: ga.{rec.parameter} = {rec.suggested_value} (was {old_val})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ ga.{rec.parameter}: {old_val} → {rec.suggested_value}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.DIVERSITY:
@@ -201,6 +259,7 @@ def apply_coach_recommendations(
                     old_val = getattr(new_ga, rec.parameter)
                     setattr(new_ga, rec.parameter, rec.suggested_value)
                     print(f"✅ Applied: ga.{rec.parameter} = {rec.suggested_value} (was {old_val})")
+                    coach_log_manager.append(f"[PARAMS ] ✅ ga.{rec.parameter}: {old_val} → {rec.suggested_value}")
                     applied_count += 1
             
             elif rec.category == RecommendationCategory.BOUNDS:
@@ -208,12 +267,15 @@ def apply_coach_recommendations(
                 if rec.parameter == "bounds" and isinstance(rec.suggested_value, dict):
                     new_ga.override_bounds = rec.suggested_value
                     print(f"✅ Applied: bounds override for {len(rec.suggested_value)} parameters")
+                    coach_log_manager.append(f"[PARAMS ] ✅ bounds: Override for {len(rec.suggested_value)} parameters")
                     applied_count += 1
         
         except Exception as e:
             print(f"⚠️  Failed to apply recommendation {rec.parameter}: {e}")
+            coach_log_manager.append(f"[PARAMS ] ⚠️  Failed: {rec.parameter} - {e}")
     
     print(f"\n📊 Applied {applied_count}/{len(analysis.recommendations)} recommendations")
+    coach_log_manager.append(f"[PARAMS ] 📊 Applied {applied_count}/{len(analysis.recommendations)} recommendations")
     
     return new_fitness, new_ga
 

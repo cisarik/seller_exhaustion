@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from dataclasses import asdict
 
 from strategy.seller_exhaustion import SellerParams, build_features
-from core.models import BacktestParams
+from core.models import BacktestParams, FitnessConfig, OptimizationConfig
 from backtest.optimizer import Individual
 from backtest.engine import run_backtest
 import config.settings as config_settings
@@ -25,6 +25,10 @@ from backtest.optimizer_factory import (
     get_available_optimizers,
     get_optimizer_display_name,
 )
+
+# Evolution Coach integration
+from backtest.coach_manager import CoachManager
+
 import multiprocessing
 
 
@@ -66,14 +70,43 @@ class StatsPanel(QWidget):
         # Optional: path to an initial population JSON file
         self.initial_population_file: str | None = None
         
+        # Evolution Coach integration
+        self.coach_manager: Optional[CoachManager] = None
+        
         self.init_ui()
         
         # Connect generation_complete signal for thread-safe UI updates
         self.generation_complete.connect(self._update_after_generation)
+        
+        # Initialize coach manager
+        self._initialize_coach_manager()
 
     def set_initial_population_file(self, path: str | None):
         """Set a population file to initialize the optimizer from (one-time)."""
         self.initial_population_file = path
+
+    # -------- Evolution Coach Integration --------
+    def _initialize_coach_manager(self):
+        """Initialize Evolution Coach manager."""
+        try:
+            from config.settings import settings
+            self.coach_manager = CoachManager(
+                base_url="http://localhost:1234",
+                model=settings.coach_model,
+                prompt_version=settings.coach_prompt_version,
+                system_prompt=getattr(settings, 'coach_system_prompt', settings.coach_prompt_version),
+                first_analysis_generation=settings.coach_first_analysis_generation,
+                max_log_generations=settings.coach_max_log_generations,
+                auto_apply=True,
+                auto_reload_model=settings.coach_auto_reload_model,
+                verbose=True
+            )
+            coach_log_manager.append(f"[INIT   ] 🤖 Evolution Coach initialized")
+            logger.info("✅ Evolution Coach Manager initialized")
+        except Exception as e:
+            logger.exception("Failed to initialize coach manager: %s", e)
+            coach_log_manager.append(f"[ERROR  ] Failed to initialize coach: {e}")
+            self.coach_manager = None
 
     # ---------------- Auto Export Helpers ----------------
     def _get_process_id(self) -> int:
@@ -1224,6 +1257,68 @@ class StatsPanel(QWidget):
                         Qt.QueuedConnection,
                         Q_ARG(bool, new_best_found)
                     )
+                    
+                    # Check if Coach analysis should trigger this generation
+                    if self.coach_manager and self.coach_manager.should_analyze(gen + 1):
+                        coach_log_manager.append(f"[GEN    ] Generation {gen+1}: Coach analysis trigger met")
+                        logger.info("🤖 Triggering coach analysis at generation %s", gen + 1)
+                        
+                        # Get population from optimizer if available
+                        population = getattr(self.optimizer, 'population', None)
+                        if population:
+                            _, _, fitness_config = self.get_current_params()
+                            
+                            # Create GA config for coach (basic conversion)
+                            ga_config = OptimizationConfig(
+                                population_size=getattr(population, 'size', 24),
+                                stagnation_threshold=5,
+                                stagnation_fitness_tolerance=1e-4,
+                                track_diversity=True,
+                            )
+                            
+                            # Async analysis (non-blocking)
+                            import asyncio
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                # Run analysis asynchronously
+                                loop.run_until_complete(
+                                    self.coach_manager.analyze_async(
+                                        population,
+                                        fitness_config,
+                                        ga_config
+                                    )
+                                )
+                                coach_log_manager.append(f"[COACH  ] ⏳ Analysis queued for Gen {gen+1}")
+                                
+                                # Wait for analysis result
+                                analysis = loop.run_until_complete(
+                                    self.coach_manager.wait_for_analysis()
+                                )
+                                
+                                if analysis and analysis.recommendations:
+                                    coach_log_manager.append(f"[COACH  ] ✅ Received {len(analysis.recommendations)} recommendations")
+                                    logger.info("✅ Received %d recommendations from coach", len(analysis.recommendations))
+                                    
+                                    # Apply recommendations
+                                    new_fitness, new_ga = self.coach_manager.apply_recommendations(
+                                        analysis,
+                                        fitness_config,
+                                        ga_config
+                                    )
+                                    
+                                    # Reload model if enabled (CRITICAL for context window clearing)
+                                    if self.coach_manager.auto_reload_model:
+                                        loop.run_until_complete(
+                                            self.coach_manager.reload_model()
+                                        )
+                                        coach_log_manager.append(f"[COACH  ] 🔄 Model reloaded, context cleared")
+                                else:
+                                    coach_log_manager.append(f"[COACH  ] ⚠️  No analysis received")
+                            finally:
+                                loop.close()
+                        else:
+                            coach_log_manager.append(f"[COACH  ] ⚠️  No population available for analysis")
                     
                 except Exception as e:
                     logger.exception("Error in generation %s: %s", gen + 1, e)

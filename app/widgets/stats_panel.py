@@ -209,16 +209,22 @@ class StatsPanel(QWidget):
         logger.info("%sFitnessConfig: %s", prefix, items)
 
     def _log_optimizer_config(self, prefix: str = "") -> None:
-        """Log optimizer type, acceleration, and hyperparameters."""
+        """Log optimizer type, worker usage, and hyperparameters."""
         if self.optimizer is None:
             return
 
         try:
+            worker_info = ""
+            if hasattr(self.optimizer, "get_worker_count"):
+                try:
+                    worker_info = f" | workers={self.optimizer.get_worker_count()}"
+                except Exception:
+                    worker_info = ""
             logger.info(
-                "%sOptimizer: name=%s | acceleration=%s",
+                "%sOptimizer: name=%s%s",
                 prefix,
                 self.optimizer.get_optimizer_name(),
-                self.optimizer.get_acceleration_mode(),
+                worker_info,
             )
         except Exception:
             logger.info("%sOptimizer: %s", prefix, type(self.optimizer).__name__)
@@ -246,21 +252,31 @@ class StatsPanel(QWidget):
             logger.error("No data loaded.")
             return False
         
-        # Get optimizer type from UI, acceleration from Settings
+        # Get optimizer type from UI and desired worker count from settings
         optimizer_type = self.optimizer_type_combo.currentData()
         try:
-            acceleration = getattr(config_settings.settings, 'acceleration_mode', 'cpu')
+            worker_count = int(getattr(config_settings.settings, 'optimizer_workers', multiprocessing.cpu_count()))
         except Exception:
-            acceleration = 'cpu'
+            worker_count = multiprocessing.cpu_count()
+        worker_count = max(1, worker_count)
         
-        # If optimizer already exists with same type/acceleration, reuse it
+        # If optimizer already exists with same type/workers, reuse it
         if self.optimizer is not None:
-            if (self.optimizer.get_optimizer_name().lower().replace(' ', '_') == optimizer_type or
-                (optimizer_type == 'evolutionary' and 'evolutionary' in self.optimizer.get_optimizer_name().lower())):
+            same_type = (
+                self.optimizer.get_optimizer_name().lower().replace(' ', '_') == optimizer_type
+                or (optimizer_type == 'evolutionary' and 'evolutionary' in self.optimizer.get_optimizer_name().lower())
+            )
+            same_workers = True
+            if hasattr(self.optimizer, "get_worker_count"):
+                try:
+                    same_workers = int(self.optimizer.get_worker_count()) == worker_count
+                except Exception:
+                    same_workers = False
+            if same_type and same_workers:
                 logger.info("Reusing existing optimizer (%s)", self.optimizer.get_optimizer_name())
                 self._log_optimizer_config(prefix="  ")
                 coach_log_manager.append(
-                    f"OPT reuse name={self.optimizer.get_optimizer_name()} accel={self.optimizer.get_acceleration_mode()}"
+                    f"OPT reuse name={self.optimizer.get_optimizer_name()} workers={worker_count}"
                 )
                 return True
         
@@ -271,7 +287,7 @@ class StatsPanel(QWidget):
         try:
             self.optimizer = create_optimizer(
                 optimizer_type=optimizer_type,
-                acceleration=acceleration,
+                n_workers=worker_count,
                 # If provided, initialize from file (supported by EvolutionaryOptimizer)
                 initial_population_file=self.initial_population_file,
             )
@@ -289,14 +305,14 @@ class StatsPanel(QWidget):
             self.prev_best_fitness = None
             
             logger.info(
-                "Optimizer initialized | type=%s | acceleration=%s",
+                "Optimizer initialized | type=%s | workers=%s",
                 self.optimizer.get_optimizer_name(),
-                self.optimizer.get_acceleration_mode(),
+                worker_count,
             )
             self._log_parameter_snapshot(seller_params, backtest_params, prefix="Seed ")
             self._log_optimizer_config(prefix="  ")
             coach_log_manager.append(
-                f"OPT init name={self.optimizer.get_optimizer_name()} accel={self.optimizer.get_acceleration_mode()}"
+                f"OPT init name={self.optimizer.get_optimizer_name()} workers={worker_count}"
             )
             # Optimizer hyperparameters
             hp = getattr(self.optimizer, 'config', {}) or {}
@@ -479,13 +495,11 @@ class StatsPanel(QWidget):
         
         return combo
     
-    # Acceleration dropdown removed; Settings dialog controls acceleration
-    
+    # Worker count (parallelism) is configured via the Settings dialog
+   
     def _on_optimizer_type_changed(self, index):
-        """Handle optimizer type change - update available accelerations."""
+        """Handle optimizer type change."""
         optimizer_type = self.optimizer_type_combo.currentData()
-        
-        # Acceleration dropdown removed; nothing to update here
         
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
@@ -762,8 +776,12 @@ class StatsPanel(QWidget):
                 _, _, fitness_config = self.get_current_params()
                 self._log_fitness_config(fitness_config, prefix="  ")
                 self._log_optimizer_config(prefix="  ")
+                try:
+                    workers = self.optimizer.get_worker_count()
+                except Exception:
+                    workers = "unknown"
                 coach_log_manager.append(
-                    f"STEP begin accel={self.optimizer.get_acceleration_mode()} preset={getattr(fitness_config, 'preset', '--')}"
+                    f"STEP begin workers={workers} preset={getattr(fitness_config, 'preset', '--')}"
                 )
                 
                 # CRITICAL: Pass RAW data, not features!
@@ -814,7 +832,6 @@ class StatsPanel(QWidget):
                             self.raw_data,
                             best_seller,
                             self.current_tf,
-                            use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
                         )
                         
                         # Run backtest
@@ -1038,11 +1055,13 @@ class StatsPanel(QWidget):
         logger.info("=" * 70)
         logger.info("🚀 Starting Multi-Step Optimization: %s iterations", n_iters)
         logger.info("=" * 70)
+        try:
+            workers = self.optimizer.get_worker_count()
+        except Exception:
+            workers = "unknown"
         coach_log_manager.append(
-            f"RUN start iters={n_iters} accel={self.optimizer.get_acceleration_mode()}"
+            f"RUN start iters={n_iters} workers={workers}"
         )
-        
-        # (GPU recommendations removed; Spectre used for features, CPU for backtests)
         
         # Reset best fitness tracking for this optimization run
         self.prev_best_fitness = None
@@ -1179,12 +1198,7 @@ class StatsPanel(QWidget):
                                 coach_log_manager.append("WARN no_raw_data")
                             else:
                                 # Rebuild features from raw OHLCV data with new parameters
-                                feats = build_features(
-                                    self.raw_data,
-                                    best_seller,
-                                    self.current_tf,
-                                    use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
-                                )
+                                feats = build_features(self.raw_data, best_seller, self.current_tf)
                                 backtest_result = run_backtest(feats, best_backtest)
                                 
                                 logger.info("Backtest complete: %d trades", backtest_result['metrics']['n'])
@@ -1331,12 +1345,7 @@ class StatsPanel(QWidget):
                     logger.warning("No raw data available, skipping final backtest")
                 else:
                     # Build features from RAW data with best parameters
-                    feats = build_features(
-                        self.raw_data,
-                        best_seller,
-                        self.current_tf,
-                        use_spectre=bool(getattr(config_settings.settings, 'use_spectre', True)),
-                    )
+                    feats = build_features(self.raw_data, best_seller, self.current_tf)
                     backtest_result = run_backtest(feats, best_backtest)
                     
                     self.trades_df = backtest_result['trades']

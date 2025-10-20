@@ -300,7 +300,6 @@ print(f"All Exits: {result_all['metrics']}")
 
 ## 🔗 Related Documentation
 
-- **FIBONACCI_EXIT_IMPLEMENTATION.md** - Technical details of Fibonacci implementation
 - **AGENTS.md** - Full architecture and development guide
 - **README.md** - Project overview and quick start
 - **Strategy Editor UI** - In-app parameter explanations

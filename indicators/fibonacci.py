@@ -150,10 +150,12 @@ def add_fib_levels_to_df(
         col_name = f"fib_{int(level * 1000):04d}"
         out[col_name] = np.nan
     
-    # Process each signal
+    # Process each signal (or all bars if signal_col not in df)
     for i in range(len(out)):
-        if not bool(out.iloc[i].get(signal_col, False)):
-            continue
+        # Skip if signal column exists and is False
+        if signal_col in out.columns:
+            if not bool(out.iloc[i].get(signal_col, False)):
+                continue
         
         # Find swing high
         swing_high = find_swing_high(out, i, lookback, lookahead)

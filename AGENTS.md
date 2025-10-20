@@ -1,6 +1,6 @@
 # AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion **BACKTESTING** Tool
 
-**Last Updated**: 2025-01-15 (v2.1 - Strategy Export System)  
+**Last Updated**: 2025-01-17 (v2.2 - CPU Simplification)  
 **Project**: ADA Seller-Exhaustion **Backtesting & Strategy Development** Tool  
 **Owner**: Michal  
 **Python Version**: 3.10+ (tested on 3.13)
@@ -55,7 +55,7 @@ Intraday trading research and backtesting system for Cardano (ADAUSD) on 15-minu
 
 ## Acceleration Status
 
-As of v2.1, feature computation uses Spectre by default. Backtests and optimization run on CPU with optional multi‑core evaluation. Legacy CUDA/GPU code has been removed to simplify the stack and avoid duplicated logic.
+As of v2.2 the entire pipeline is CPU + pandas. The Spectre/GPU experiment was removed after benchmarking at 319× slower (51 s vs 0.16 s) and producing incorrect signals. Expect ~0.16 s feature builds, ~0.18 s backtests, and ~4–5 s GA generations on a 12-core CPU (~30 s single-core). Keep the codebase CPU-focused and profile before considering any GPU work.
 
 ---
 
@@ -159,7 +159,6 @@ ada-agent/
 ├── pyproject.toml           # Poetry dependencies
 ├── Makefile                 # Convenience commands
 ├── README.md                # User documentation
-├── QUICKSTART.md            # Quick reference
 ├── PRD.md                   # Product requirements document
 ├── .env.example             # Environment variables template
 └── .gitignore
@@ -472,8 +471,8 @@ zscore(series, window) -> pd.Series
 
 ---
 
-### 7. Spectre Indicators
-Spectre is used for fast factor/indicator computation where available. CPU fallbacks remain in `indicators/local.py`.
+### 7. Local Indicator Pipeline (Pandas Only)
+All factors/indicators run through `indicators/local.py` using pandas/numpy vectorization. The legacy Spectre implementation was removed in v2.2 after proving slower and incorrect; do not reintroduce GPU code without rock-solid benchmarks and test coverage.
 
 ---
 
@@ -679,8 +678,8 @@ This module ensures **temporal consistency** across timeframes. Without it, mult
 
 ---
 
-### 8b. Feature Builder (Spectre)
-Spectre‑based feature building is the default path. `strategy/seller_exhaustion.py` remains the single source of truth and falls back to pandas if Spectre is unavailable.
+### 8b. Feature Builder (Pandas Pipeline)
+`strategy/seller_exhaustion.py` delegates to `_build_features_pandas(...)` for everything. Spectre/GPU code was deleted in v2.2—pandas delivers 0.16 s feature builds for ~1,440 bars and matches backtest expectations. Treat this module as the single source of truth for features; there is no GPU fallback anymore.
 
 ---
 
@@ -897,7 +896,7 @@ class CandleChartWidget(QWidget):
         # 2. Create CandlestickItem
         # 3. Add EMA overlays
         # 4. Mark signal points
-        # 5. Draw Fibonacci ladders (NEW)
+        # 5. Draw Fibonacci ladders 
         # 6. Add entry/exit markers
         # 7. Add legend
     
@@ -919,7 +918,7 @@ class CandleChartWidget(QWidget):
         """
 ```
 
-**Fibonacci Colors** (NEW):
+**Fibonacci Colors** :
 ```python
 FIB_COLORS = {
     0.382: '#2196F3',  # Blue - Conservative
@@ -987,7 +986,7 @@ FIB_COLORS = {
 - Loads strategy/backtest params into editable controls; shares data with main UI.
 - Tracks population stats (generation, mean fitness, best fitness).
 - Keeps equity curve + fitness evolution charts up to date.
-- Emits `optimization_step_complete` to let chart view highlight trades from best individual.
+- Emits `optimization_step_complete` to let chart view highlight trades from best individual (v2.2 fix ensures charts/metrics refresh immediately).
 
 **Workflow**:
 1. `Initialize Population` seeds GA with current UI params and persisted population size.
@@ -1033,6 +1032,16 @@ FIB_COLORS = {
 - Stack traces shown in verbose mode
 
 ---
+
+---
+
+## v2.2 Highlights (January 2025)
+
+- **Spectre/GPU removal (~900 LOC deleted):** Feature computation is now exclusively pandas; the old GPU path was 319× slower (51 s → 0.16 s) and produced incorrect signals.
+- **CPU performance snapshot:** Expect 0.16 s feature builds, 0.18 s backtests, ~4–5 s GA generations on a 12-core CPU (~30 s single-core) → 100 generations ≈ 8 minutes.
+- **UI auto-update fix:** `app/main.py` now refreshes charts, metrics, equity curve, and status bar immediately whenever Stats Panel reports a new best individual.
+- **Documentation refresh:** README.md, PRD.md, and this guide now describe the CPU-only architecture; do not add GPU dependencies without profiling + tests.
+- **Settings cleanup:** Acceleration tab removed—worker processes are configured from the Optimization tab (set to 1 for sequential runs).
 
 ---
 
@@ -2810,8 +2819,7 @@ poetry run python -m agent.main
 ### Related Documentation
 
 **For Users**:
-- **STRATEGY_EXPORT_GUIDE.md** (650 lines) - Complete user guide
-- **DEPLOYMENT_OVERVIEW.md** (800 lines) - Architecture overview
+- **docs/STRATEGY_EXPORT_GUIDE.md** (650 lines) - Complete user guide
 - **PRD_TRADING_AGENT.md** (1,234 lines) - Trading agent specification
 
 **For Developers**:

@@ -117,11 +117,6 @@ class BaseOptimizer(ABC):
         pass
     
     @abstractmethod
-    def get_acceleration_mode(self) -> str:
-        """
-        Return current acceleration mode.
-        
-        Returns:
-            Acceleration mode (e.g., "Single-Core CPU", "Multi-Core CPU")
-        """
+    def get_worker_count(self) -> int:
+        """Return number of worker processes/threads used by optimizer."""
         pass

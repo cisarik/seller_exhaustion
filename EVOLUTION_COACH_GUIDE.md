@@ -76,7 +76,7 @@ Loop continues autonomously
 - Coach can narrow/expand parameter search space
 - Example: `{"ema_fast": (50, 240), "vol_z": (1.2, 1.6)}`
 
-### 3. **backtest/coach_protocol.py** (NEW)
+### 3. **backtest/coach_protocol.py** 
 
 Defines the evolution coach protocol:
 
@@ -92,7 +92,7 @@ Defines the evolution coach protocol:
 - Confidence scores (0.0-1.0) for each recommendation
 - Clear reasoning for each change
 
-### 4. **backtest/llm_coach.py** (NEW)
+### 4. **backtest/llm_coach.py** 
 
 Async client for Gemma 3 (local LM Studio):
 
@@ -114,7 +114,7 @@ analysis = await coach.analyze_evolution(evolution_state)
 # Returns: CoachAnalysis with recommendations
 ```
 
-### 5. **backtest/coach_integration.py** (NEW)
+### 5. **backtest/coach_integration.py** 
 
 Bridge between GA and Coach:
 

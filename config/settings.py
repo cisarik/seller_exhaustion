@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import Optional
 import os
+import multiprocessing
 
 # Clear environment variables on module import to prevent interference with .env file
 # This ensures Settings dialog is the ONLY source of truth
@@ -11,7 +12,7 @@ _ENV_VARS_TO_CLEAR = [
     'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
     'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
     'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
-    'USE_SPECTRE', 'USE_SPECTRE_CUDA', 'USE_SPECTRE_TRADING',
+    'ACCELERATION_MODE', 'CPU_WORKERS', 'OPTIMIZER_WORKERS',
 ]
 
 for var in _ENV_VARS_TO_CLEAR:
@@ -68,9 +69,8 @@ class Settings(BaseSettings):
     adam_beta2: float = 0.999
     adam_epsilon_stability: float = 1e-8
     
-    # Acceleration Settings
-    acceleration_mode: str = "cpu"  # cpu or multicore
-    cpu_workers: int = 7
+    # Optimizer execution
+    optimizer_workers: int = max(1, multiprocessing.cpu_count() - 1)
     
     # Chart Indicator Display
     chart_ema_fast: bool = True
@@ -82,13 +82,6 @@ class Settings(BaseSettings):
     chart_signals: bool = True
     chart_entries: bool = True
     chart_exits: bool = True
-    
-    # Feature Engine
-    use_spectre: bool = True
-    use_spectre_cuda: bool = False
-    
-    # Spectre Trading (Experimental)
-    use_spectre_trading: bool = False
     
     # Chart View State
     chart_x_min: Optional[float] = None
@@ -187,6 +180,9 @@ class SettingsManager:
             f.write(f"GA_TOURNAMENT_SIZE={existing.get('GA_TOURNAMENT_SIZE', '3')}\n")
             f.write(f"GA_MUTATION_PROBABILITY={existing.get('GA_MUTATION_PROBABILITY', '0.9')}\n\n")
             
+            f.write("# Optimizer Execution\n")
+            f.write(f"OPTIMIZER_WORKERS={existing.get('OPTIMIZER_WORKERS', str(max(1, multiprocessing.cpu_count() - 1)))}\n\n")
+            
             f.write("# ADAM Optimizer Parameters\n")
             f.write(f"ADAM_LEARNING_RATE={existing.get('ADAM_LEARNING_RATE', '0.01')}\n")
             f.write(f"ADAM_EPSILON={existing.get('ADAM_EPSILON', '0.001')}\n")
@@ -194,17 +190,6 @@ class SettingsManager:
             f.write(f"ADAM_BETA1={existing.get('ADAM_BETA1', '0.9')}\n")
             f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")
             f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
-            
-            f.write("# Acceleration Settings\n")
-            f.write(f"ACCELERATION_MODE={existing.get('ACCELERATION_MODE', 'cpu')}\n")
-            f.write(f"CPU_WORKERS={existing.get('CPU_WORKERS', '7')}\n\n")
-
-            f.write("# Feature Engine\n")
-            f.write(f"USE_SPECTRE={existing.get('USE_SPECTRE', 'True')}\n")
-            f.write(f"USE_SPECTRE_CUDA={existing.get('USE_SPECTRE_CUDA', 'False')}\n\n")
-            
-            f.write("# Spectre Trading (Experimental)\n")
-            f.write(f"USE_SPECTRE_TRADING={existing.get('USE_SPECTRE_TRADING', 'False')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")
@@ -242,7 +227,6 @@ class SettingsManager:
             'STRATEGY_VOL_Z', 'STRATEGY_TR_Z', 'STRATEGY_CLOC_MIN', 'STRATEGY_ATR_WINDOW',
             'BACKTEST_ATR_STOP_MULT', 'BACKTEST_REWARD_R', 'BACKTEST_MAX_HOLD',
             'BACKTEST_FEE_BP', 'BACKTEST_SLIPPAGE_BP',
-            'USE_SPECTRE', 'USE_SPECTRE_CUDA',
         ]
         
         for var in env_vars_to_clear:

@@ -1,9 +1,7 @@
 """
 Evolutionary Algorithm optimizer (wraps existing GA implementation).
 
-Supports multiple acceleration modes:
-- CPU: Single-core genetic algorithm
-- Multi-Core: Parallel evaluation across CPU cores
+Runs on CPU with optional multiprocessing for parallel evaluation.
 """
 
 import multiprocessing
@@ -18,13 +16,12 @@ from backtest.optimizer import (
 )
 from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams, Timeframe, FitnessConfig
-import config.settings as cfg_settings
 
 
 class EvolutionaryOptimizer(BaseOptimizer):
     """
-    Genetic Algorithm optimizer with flexible acceleration.
-    
+    Genetic Algorithm optimizer with configurable CPU worker count.
+
     Uses tournament selection, arithmetic crossover, and Gaussian mutation
     with configurable elitism.
     """
@@ -37,7 +34,6 @@ class EvolutionaryOptimizer(BaseOptimizer):
         elite_fraction: float = 0.1,
         tournament_size: int = 3,
         mutation_probability: float = 0.9,
-        acceleration: str = "cpu",  # cpu | multicore
         n_workers: Optional[int] = None,
         initial_population_file: Optional[str] = None,
     ):
@@ -51,8 +47,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
             elite_fraction: Fraction of population preserved as elite
             tournament_size: Tournament selection size
             mutation_probability: Probability that offspring undergoes mutation
-            acceleration: Acceleration mode (cpu/multicore)
-            n_workers: Number of workers for multicore (defaults to CPU count)
+            n_workers: Number of worker processes (defaults to CPU count)
         """
         self.config = {
             'population_size': population_size,
@@ -62,12 +57,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
             'tournament_size': tournament_size,
             'mutation_probability': mutation_probability,
         }
-        # Acceleration mode (validated later during step)
-        acc = (acceleration or 'cpu').lower()
-        if acc not in {"cpu", "multicore"}:
-            acc = "cpu"
-        self.acceleration = acc
-        self.n_workers = n_workers or multiprocessing.cpu_count()
+        # Parallel evaluation (>=1 worker)
+        self.n_workers = max(1, n_workers or multiprocessing.cpu_count())
+        self.config['n_workers'] = self.n_workers
         self.population = None
         self.timeframe = None
         self.initial_population_file = initial_population_file
@@ -145,61 +137,22 @@ class EvolutionaryOptimizer(BaseOptimizer):
         print(f"Fitness Preset: {fitness_config.preset}")
         print(f"{'='*60}")
         
-        # Choose evolution method based on acceleration
-        if self.acceleration == 'multicore':
-            # Check if GPU acceleration should be used
-            use_gpu = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
-            
-            if use_gpu:
-                # Use GPU-accelerated multiprocessing with proper CUDA context management
-                try:
-                    from backtest.optimizer_multicore_gpu import evolution_step_multicore_gpu
-                    self.population = evolution_step_multicore_gpu(
-                        self.population,
-                        data,
-                        timeframe,
-                        fitness_config=fitness_config,
-                        n_workers=self.n_workers,
-                        mutation_rate=self.config['mutation_rate'],
-                        sigma=self.config['sigma'],
-                        elite_fraction=self.config['elite_fraction'],
-                        tournament_size=self.config['tournament_size'],
-                        mutation_probability=self.config['mutation_probability'],
-                        use_gpu=True,
-                        gpu_id=0
-                    )
-                except Exception as e:
-                    print(f"⚠️  GPU multiprocessing failed: {e}")
-                    print("Falling back to CPU multiprocessing...")
-                    from backtest.optimizer_multicore import evolution_step_multicore
-                    self.population = evolution_step_multicore(
-                        self.population,
-                        data,
-                        timeframe,
-                        fitness_config=fitness_config,
-                        n_workers=self.n_workers,
-                        mutation_rate=self.config['mutation_rate'],
-                        sigma=self.config['sigma'],
-                        elite_fraction=self.config['elite_fraction'],
-                        tournament_size=self.config['tournament_size'],
-                        mutation_probability=self.config['mutation_probability']
-                    )
-            else:
-                # Standard CPU multiprocessing (no GPU)
-                from backtest.optimizer_multicore import evolution_step_multicore
-                self.population = evolution_step_multicore(
-                    self.population,
-                    data,
-                    timeframe,
-                    fitness_config=fitness_config,
-                    n_workers=self.n_workers,
-                    mutation_rate=self.config['mutation_rate'],
-                    sigma=self.config['sigma'],
-                    elite_fraction=self.config['elite_fraction'],
-                    tournament_size=self.config['tournament_size'],
-                    mutation_probability=self.config['mutation_probability']
-                )
-        else:  # cpu
+        # Choose evolution method based on worker count
+        if self.n_workers > 1:
+            from backtest.optimizer_multicore import evolution_step_multicore
+            self.population = evolution_step_multicore(
+                self.population,
+                data,
+                timeframe,
+                fitness_config=fitness_config,
+                n_workers=self.n_workers,
+                mutation_rate=self.config['mutation_rate'],
+                sigma=self.config['sigma'],
+                elite_fraction=self.config['elite_fraction'],
+                tournament_size=self.config['tournament_size'],
+                mutation_probability=self.config['mutation_probability']
+            )
+        else:
             self.population = evolution_step(
                 self.population,
                 data,
@@ -271,13 +224,10 @@ class EvolutionaryOptimizer(BaseOptimizer):
     def get_optimizer_name(self) -> str:
         """Return optimizer name."""
         return "Evolutionary Algorithm"
-    
-    def get_acceleration_mode(self) -> str:
-        """Return acceleration mode."""
-        if self.acceleration == 'multicore':
-            return f"Multi-Core CPU ({self.n_workers} workers)"
-        else:
-            return "Single-Core CPU"
+
+    def get_worker_count(self) -> int:
+        """Return configured worker count."""
+        return int(self.n_workers)
 
     # Convenience: export current population
     def export_population(self, path: str) -> None:

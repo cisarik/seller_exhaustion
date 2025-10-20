@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import multiprocessing
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QToolBar, QSplitter, QProgressBar,
     QMessageBox, QWidget, QVBoxLayout
@@ -23,15 +24,13 @@ from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
 from app.widgets.data_bar import DataBar
 from app.widgets.evolution_coach import EvolutionCoachWindow
-from strategy.seller_exhaustion import build_features, SellerParams, _SPECTRE_AVAILABLE as SPECTRE_AVAILABLE
+from strategy.seller_exhaustion import build_features, SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe
 from backtest.engine import run_backtest
-from backtest.spectre_trading import run_spectre_trading, _SPECTRE_AVAILABLE as SPECTRE_TRADING_AVAILABLE
 from data.provider import DataProvider
 from data.cache import DataCache
 from config.settings import settings, SettingsManager
-import config.settings as cfg_settings
 from app.session_store import (
     save_session_snapshot,
     load_session_snapshot,
@@ -77,11 +76,6 @@ class MainWindow(QMainWindow):
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
         self.current_range = (settings.last_date_from, settings.last_date_to)
-        # Feature engine preference
-        try:
-            self.use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
-        except Exception:
-            self.use_spectre = True
         
         # Optional: path to initial GA population file for auto-start optimization
         self.ga_init_from: str | None = ga_init_from
@@ -146,47 +140,11 @@ class MainWindow(QMainWindow):
 
     def _engine_label(self) -> str:
         """Return short label for current backtest engine."""
-        # Check if Spectre trading is enabled
-        try:
-            use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
-        except Exception:
-            use_spectre_trading = False
-        
-        if use_spectre_trading and SPECTRE_TRADING_AVAILABLE:
-            # Check CUDA flag
-            try:
-                use_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
-            except Exception:
-                use_cuda = False
-            if use_cuda:
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        return "Spectre GPU"
-                except Exception:
-                    pass
-            return "Spectre"
-        
-        # Fall back to feature engine label (for reference in status)
-        try:
-            use = bool(getattr(cfg_settings.settings, 'use_spectre', self.use_spectre))
-        except Exception:
-            use = self.use_spectre
-        if use and SPECTRE_AVAILABLE:
-            # Check CUDA flag
-            try:
-                use_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
-            except Exception:
-                use_cuda = False
-            if use_cuda:
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        return "Spectre GPU"
-                except Exception:
-                    pass
-            return "Spectre (features)"
-        return "CPU"
+        workers = getattr(settings, 'optimizer_workers', max(1, multiprocessing.cpu_count() - 1))
+        workers = max(1, int(workers))
+        if workers > 1:
+            return f"CPU ({workers} workers)"
+        return "CPU (1 worker)"
 
     def _indicator_config_from_settings(self) -> dict[str, bool]:
         """Return chart indicator configuration based on saved settings."""
@@ -426,7 +384,7 @@ class MainWindow(QMainWindow):
             else:
                 # Process the downloaded data
                 params, bt_params, _ = self.param_editor.get_params()
-                feats = build_features(df, params, tf, use_spectre=self.use_spectre)
+                feats = build_features(df, params, tf)
                 
                 # Update state
                 self.current_data = feats
@@ -571,7 +529,7 @@ class MainWindow(QMainWindow):
             self.param_editor.set_timeframe(tf)
             
             # Build features
-            feats = build_features(df, params, tf, use_spectre=self.use_spectre)
+            feats = build_features(df, params, tf)
             
             # Update chart
             self.chart_view.feats = feats
@@ -660,7 +618,7 @@ class MainWindow(QMainWindow):
             else:
                 raw = self.raw_data
             
-            feats = build_features(raw, seller_params, self.current_tf, use_spectre=self.use_spectre)
+            feats = build_features(raw, seller_params, self.current_tf)
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             self.chart_view.feats = feats
@@ -670,29 +628,12 @@ class MainWindow(QMainWindow):
             self.stats_panel.set_current_data(feats, self.current_tf, raw_data=self.raw_data)
             
             # Run backtest (in executor to avoid blocking)
-            # Route to Spectre or CPU engine based on settings
-            use_spectre_trading = bool(getattr(cfg_settings.settings, 'use_spectre_trading', False))
-            use_spectre_cuda = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
-            
-            if use_spectre_trading and SPECTRE_TRADING_AVAILABLE:
-                # Use Spectre trading engine with raw OHLCV data
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    run_spectre_trading,
-                    raw,
-                    seller_params,
-                    bt_params,
-                    self.current_tf,
-                    use_spectre_cuda
-                )
-            else:
-                # Use standard CPU engine with pre-computed features
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    run_backtest,
-                    feats,
-                    bt_params
-                )
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                run_backtest,
+                feats,
+                bt_params
+            )
             
             # Update stats panel
             self.stats_panel.update_stats(result)
@@ -791,7 +732,7 @@ class MainWindow(QMainWindow):
             
             # Rebuild features for chart display
             raw_data = self.current_data[['open', 'high', 'low', 'close', 'volume']].copy()
-            feats = build_features(raw_data, seller_params, self.current_tf, use_spectre=self.use_spectre)
+            feats = build_features(raw_data, seller_params, self.current_tf)
             
             # Update chart with features and backtest results
             self.chart_view.feats = feats
@@ -800,22 +741,29 @@ class MainWindow(QMainWindow):
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             
-            # Update status bar
+            # Update status bar with best individual info
             metrics = backtest_result['metrics']
+            gen_text = f"Gen {best_individual.generation}" if hasattr(best_individual, 'generation') and best_individual.generation else "Best"
             self.statusBar().showMessage(
-                f"🏆 Gen {best_individual.generation} Best: "
+                f"🏆 {gen_text}: "
                 f"{metrics['n']} trades | "
                 f"Win rate: {metrics['win_rate']:.1%} | "
                 f"Avg R: {metrics['avg_R']:.2f} | "
                 f"Fitness: {best_individual.fitness:.4f}"
             )
+            
+            # Update stats panel metrics display
+            self.stats_panel.trades_df = backtest_result['trades']
+            self.stats_panel.metrics = metrics
+            self.stats_panel.update_metrics()
+            self.stats_panel.update_equity_curve()
 
             self._persist_session(seller_params, best_individual.backtest_params, backtest_result)
             
-            print(f"✓ Chart updated with winning strategy")
+            print(f"✓ Chart and metrics updated with best strategy: {metrics['n']} trades, {metrics['win_rate']:.1%} win rate")
             
         except Exception as e:
-            print(f"Error updating chart: {e}")
+            print(f"❌ Error updating chart: {e}")
             import traceback
             traceback.print_exc()
     
@@ -833,29 +781,29 @@ class MainWindow(QMainWindow):
     def on_settings_saved(self):
         """Refresh runtime flags from settings after the dialog saves."""
         try:
-            self.use_spectre = bool(getattr(cfg_settings.settings, 'use_spectre', True))
+            SettingsManager.reload_settings()
         except Exception:
-            self.use_spectre = True
-        # Optionally update status message
+            pass
+
         status = self._engine_label()
-        self.statusBar().showMessage(f"Settings saved. Feature engine: {status}", 3000)
+        self.statusBar().showMessage(f"Settings saved. Engine: {status}", 3000)
         if hasattr(self, 'chart_view'):
             self.chart_view.status_label.setText(f"Engine: {status}")
         
         # Update param editor to reflect saved settings (best-effort)
         try:
             sp = SellerParams(
-                ema_fast=int(cfg_settings.settings.strategy_ema_fast),
-                ema_slow=int(cfg_settings.settings.strategy_ema_slow),
-                z_window=int(cfg_settings.settings.strategy_z_window),
-                vol_z=float(cfg_settings.settings.strategy_vol_z),
-                tr_z=float(cfg_settings.settings.strategy_tr_z),
-                cloc_min=float(cfg_settings.settings.strategy_cloc_min),
-                atr_window=int(cfg_settings.settings.strategy_atr_window),
+                ema_fast=int(settings.strategy_ema_fast),
+                ema_slow=int(settings.strategy_ema_slow),
+                z_window=int(settings.strategy_z_window),
+                vol_z=float(settings.strategy_vol_z),
+                tr_z=float(settings.strategy_tr_z),
+                cloc_min=float(settings.strategy_cloc_min),
+                atr_window=int(settings.strategy_atr_window),
             )
             bp = BacktestParams(
-                fee_bp=float(cfg_settings.settings.backtest_fee_bp),
-                slippage_bp=float(cfg_settings.settings.backtest_slippage_bp),
+                fee_bp=float(settings.backtest_fee_bp),
+                slippage_bp=float(settings.backtest_slippage_bp),
             )
             if hasattr(self, 'param_editor') and self.param_editor is not None:
                 self.param_editor.set_params(sp, bp)

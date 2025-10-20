@@ -28,7 +28,6 @@ from backtest.optimizer import (
     VALID_FIB_LEVELS,
 )
 from strategy.seller_exhaustion import SellerParams, build_features
-import config.settings as cfg_settings
 from core.models import BacktestParams, Timeframe, FitnessConfig
 from backtest.engine import run_backtest
 
@@ -115,12 +114,7 @@ def _evaluate_perturbed_parameter(
     backtest_params = BacktestParams(**backtest_dict)
     
     try:
-        feats = build_features(
-            data,
-            seller_params,
-            timeframe,
-            use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
-        )
+        feats = build_features(data, seller_params, timeframe)
         result = run_backtest(feats, backtest_params)
         fitness = calculate_fitness(result['metrics'], fitness_config)
     except Exception as e:
@@ -138,7 +132,7 @@ class AdamOptimizer(BaseOptimizer):
     - Adaptive learning rates per parameter
     - Momentum-based updates
     - Gradient clipping for stability
-    - Support for single-core or multi-core CPU evaluation
+    - Configurable multi-core CPU evaluation for gradient computation
     
     Limitations:
     - Requires many fitness evaluations per step (one per parameter)
@@ -150,7 +144,6 @@ class AdamOptimizer(BaseOptimizer):
         self,
         learning_rate: float = 0.01,
         epsilon: float = 1e-3,  # For finite differences
-        acceleration: str = "cpu",  # cpu or multicore
         max_grad_norm: float = 1.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.999,
@@ -163,12 +156,11 @@ class AdamOptimizer(BaseOptimizer):
         Args:
             learning_rate: Learning rate for ADAM updates
             epsilon: Step size for finite difference approximation
-            acceleration: Acceleration mode (cpu or multicore)
             max_grad_norm: Maximum gradient norm (for clipping)
             adam_beta1: ADAM beta1 parameter (momentum)
             adam_beta2: ADAM beta2 parameter (RMSprop-like)
             adam_epsilon: ADAM epsilon (numerical stability)
-            n_workers: Number of workers for multicore (defaults to CPU count)
+            n_workers: Number of worker processes for gradient evaluation (defaults to CPU count)
         """
         self.lr = learning_rate
         self.fd_epsilon = epsilon
@@ -177,9 +169,8 @@ class AdamOptimizer(BaseOptimizer):
         self.adam_beta2 = adam_beta2
         self.adam_epsilon = adam_epsilon
         
-        # Determine acceleration mode
-        self.acceleration = acceleration.lower()
-        self.n_workers = n_workers or multiprocessing.cpu_count()
+        # Parallel evaluation (>=1 worker)
+        self.n_workers = max(1, n_workers or multiprocessing.cpu_count())
         
         # Set device (CPU only)
         self.device = torch.device('cpu')
@@ -249,10 +240,10 @@ class AdamOptimizer(BaseOptimizer):
         self.iteration = 0
         self.history = []
         
-        if self.acceleration == 'multicore':
-            print(f"✓ ADAM initialized with learning_rate={self.lr}, fd_epsilon={self.fd_epsilon}, n_workers={self.n_workers}")
-        else:
-            print(f"✓ ADAM initialized with learning_rate={self.lr}, fd_epsilon={self.fd_epsilon}")
+        print(
+            f"✓ ADAM initialized with learning_rate={self.lr}, fd_epsilon={self.fd_epsilon}, "
+            f"n_workers={self.n_workers}"
+        )
     
     def _params_to_vector(self, seller_params: SellerParams, backtest_params: BacktestParams) -> np.ndarray:
         """Convert parameters to normalized vector (0-1 range)."""
@@ -342,12 +333,7 @@ class AdamOptimizer(BaseOptimizer):
         
         try:
             # Build features
-            feats = build_features(
-                data,
-                seller_params,
-                self.timeframe,
-                use_spectre=bool(getattr(cfg_settings.settings, 'use_spectre', True)),
-            )
+            feats = build_features(data, seller_params, self.timeframe)
             
             # Run backtest
             result = run_backtest(feats, backtest_params)
@@ -436,7 +422,7 @@ class AdamOptimizer(BaseOptimizer):
             (gradient_tensor, current_fitness, current_metrics)
         """
         # Multi-core CPU mode
-        if self.acceleration == 'multicore':
+        if self.n_workers > 1:
             gradient = self._compute_gradient_parallel(
                 self.params_tensor.detach().cpu().numpy(),
                 None,  # Will be calculated inside
@@ -572,7 +558,7 @@ class AdamOptimizer(BaseOptimizer):
         
         print(f"\n{'='*60}")
         print(f"ADAM Iteration {self.iteration}")
-        print(f"Acceleration: {self.get_acceleration_mode()}")
+        print(f"Workers: {self.get_worker_count()}")
         print(f"Fitness Preset: {fitness_config.preset}")
         print(f"{'='*60}")
         
@@ -676,9 +662,6 @@ class AdamOptimizer(BaseOptimizer):
         """Return optimizer name."""
         return "ADAM"
     
-    def get_acceleration_mode(self) -> str:
-        """Return acceleration mode."""
-        if self.acceleration == 'multicore':
-            return f"Multi-Core CPU ({self.n_workers} workers)"
-        else:
-            return "Single-Core CPU"
+    def get_worker_count(self) -> int:
+        """Return configured worker count."""
+        return int(self.n_workers)

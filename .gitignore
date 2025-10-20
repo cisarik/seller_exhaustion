@@ -68,3 +68,5 @@ Thumbs.db
 # Workspace data
 populations/
 processes/
+reports/
+.strategy_params/

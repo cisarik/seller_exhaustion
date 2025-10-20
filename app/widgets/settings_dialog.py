@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, Signal
 import asyncio
 from datetime import datetime
+import multiprocessing
 
 from config.settings import settings, SettingsManager
 from data.provider import DataProvider
@@ -14,15 +15,6 @@ from core.models import Timeframe
 from strategy.timeframe_defaults import get_defaults_for_timeframe
 from strategy.seller_exhaustion import SellerParams
 from backtest.engine import BacktestParams
-
-def _spectre_available() -> bool:
-    try:
-        # Import key submodules to ensure dependencies resolve
-        from spectre import factors  # noqa: F401
-        from spectre.data import MemoryLoader  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 # Timeframe mapping (multiplier, unit, label)
@@ -72,9 +64,6 @@ class SettingsDialog(QDialog):
 
         # Optimization Parameters Tab
         tabs.addTab(self.create_optimizer_tab(), "Optimization")
-        
-        # Acceleration Settings Tab (NEW)
-        tabs.addTab(self.create_acceleration_tab(), "⚡ Acceleration")
         
         layout.addWidget(tabs)
         
@@ -234,6 +223,14 @@ class SettingsDialog(QDialog):
         self.optimizer_iterations.setSuffix(" iterations")
         self.optimizer_iterations.setToolTip("Number of iterations for multi-step optimization (used by all optimizer types)")
         common_layout.addRow("Iterations:", self.optimizer_iterations)
+
+        cpu_count = multiprocessing.cpu_count()
+        self.optimizer_workers = QSpinBox()
+        self.optimizer_workers.setRange(1, cpu_count)
+        self.optimizer_workers.setValue(max(1, min(cpu_count, settings.optimizer_workers)))
+        self.optimizer_workers.setSuffix(f" workers (max: {cpu_count})")
+        self.optimizer_workers.setToolTip("Parallel worker processes used for optimization (set to 1 to run sequentially)")
+        common_layout.addRow("Worker Processes:", self.optimizer_workers)
         
         common_group.setLayout(common_layout)
         layout.addWidget(common_group)
@@ -387,38 +384,11 @@ class SettingsDialog(QDialog):
         self.fee_bp.setValue(settings.backtest_fee_bp)
         self.slippage_bp.setValue(settings.backtest_slippage_bp)
         
-        # Feature engine (Spectre)
-        try:
-            use_spectre = bool(getattr(settings, 'use_spectre', True))
-        except Exception:
-            use_spectre = True
-        if _spectre_available():
-            # If available, use saved preference
-            if hasattr(self, 'use_spectre'):
-                self.use_spectre.setChecked(use_spectre)
-        else:
-            # If not available, ensure checkbox is off/disabled
-            if hasattr(self, 'use_spectre'):
-                self.use_spectre.setChecked(False)
-                self.use_spectre.setEnabled(False)
-        # CUDA toggle
-        try:
-            use_spectre_cuda = bool(getattr(settings, 'use_spectre_cuda', False))
-        except Exception:
-            use_spectre_cuda = False
-        if hasattr(self, 'use_spectre_cuda'):
-            self.use_spectre_cuda.setChecked(use_spectre_cuda)
-        
-        # Spectre Trading (Experimental)
-        try:
-            use_spectre_trading = bool(getattr(settings, 'use_spectre_trading', False))
-        except Exception:
-            use_spectre_trading = False
-        if hasattr(self, 'use_spectre_trading'):
-            self.use_spectre_trading.setChecked(use_spectre_trading)
-
         # Optimizer parameters (common)
         self.optimizer_iterations.setValue(settings.optimizer_iterations)
+        # Clamp workers to available range
+        workers = getattr(settings, 'optimizer_workers', self.optimizer_workers.value())
+        self.optimizer_workers.setValue(max(1, min(self.optimizer_workers.maximum(), workers)))
         
         # Genetic algorithm parameters
         self.ga_population.setValue(settings.ga_population_size)
@@ -445,162 +415,8 @@ class SettingsDialog(QDialog):
         self.show_volume.setChecked(settings.chart_volume)
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
-        
-        # Acceleration settings (NEW)
-        accel_mode = getattr(settings, 'acceleration_mode', 'multicore')
-        for i in range(self.accel_mode_combo.count()):
-            if self.accel_mode_combo.itemData(i) == accel_mode:
-                self.accel_mode_combo.setCurrentIndex(i)
-                break
-        self.cpu_workers.setValue(getattr(settings, 'cpu_workers', self.cpu_workers.value()))
     
 
-    def create_acceleration_tab(self):
-        """Create acceleration settings tab."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # Feature Engine (Spectre vs pandas)
-        fe_group = QGroupBox("Feature Engine")
-        fe_layout = QFormLayout()
-        
-        self.use_spectre = QCheckBox("Use Spectre for feature computation (CPU by default)")
-        self.use_spectre.setChecked(True)
-        if not _spectre_available():
-            self.use_spectre.setChecked(False)
-            self.use_spectre.setEnabled(False)
-        fe_layout.addRow(self.use_spectre)
-        
-        availability = QLabel("Spectre status: Available" if _spectre_available() else "Spectre status: Not installed")
-        availability.setProperty("variant", "secondary")
-        fe_layout.addRow(availability)
-        # Optional CUDA toggle
-        self.use_spectre_cuda = QCheckBox("Use Spectre CUDA (GPU) for factor computation")
-        try:
-            import torch
-            cuda_ok = torch.cuda.is_available()
-        except Exception:
-            cuda_ok = False
-        self.use_spectre_cuda.setChecked(False)
-        self.use_spectre_cuda.setEnabled(cuda_ok and _spectre_available())
-        if not cuda_ok:
-            self.use_spectre_cuda.setToolTip("CUDA not available")
-        fe_layout.addRow(self.use_spectre_cuda)
-        
-        # Spectre Trading (Experimental) toggle
-        fe_layout.addRow(QLabel(""))  # Spacer
-        self.use_spectre_trading = QCheckBox("Experimental: Use Spectre Trading API for backtests (CustomAlgorithm + blotter)")
-        self.use_spectre_trading.setChecked(False)
-        self.use_spectre_trading.setEnabled(_spectre_available())
-        self.use_spectre_trading.setToolTip(
-            "Runs the trading simulation inside Spectre (experimental).\n"
-            "The standard CPU backtester remains unchanged.\n"
-            "Optimization always uses CPU engine for parity."
-        )
-        fe_layout.addRow(self.use_spectre_trading)
-        
-        fe_group.setLayout(fe_layout)
-        layout.addWidget(fe_group)
-        
-        # Acceleration Mode Group (CPU only)
-        mode_group = QGroupBox("Acceleration Mode")
-        mode_layout = QVBoxLayout()
-        
-        self.accel_mode_combo = QComboBox()
-        self.accel_mode_combo.addItem("🖥️  CPU (Single Core)", "cpu")
-        self.accel_mode_combo.addItem("🖥️ 🖥️  Multi-Core CPU", "multicore")
-        
-        mode_layout.addWidget(QLabel("Select acceleration method:"))
-        mode_layout.addWidget(self.accel_mode_combo)
-        self.accel_mode_combo.currentIndexChanged.connect(self._on_accel_mode_changed)
-        
-        mode_group.setLayout(mode_layout)
-        layout.addWidget(mode_group)
-        
-        # Multi-Core CPU Settings
-        self.multicore_group = QGroupBox("Multi-Core CPU Settings")
-        multicore_layout = QFormLayout()
-        
-        import multiprocessing
-        max_cores = multiprocessing.cpu_count()
-        
-        self.cpu_workers = QSpinBox()
-        self.cpu_workers.setRange(1, max_cores)
-        self.cpu_workers.setValue(max(1, max_cores - 1))  # Leave 1 core for system
-        self.cpu_workers.setSuffix(f" workers (max: {max_cores})")
-        multicore_layout.addRow("Worker Processes:", self.cpu_workers)
-        
-        info_label = QLabel(
-            f"<small>ℹ️ Your system has {max_cores} CPU cores.\n"
-            "Using N-1 cores is recommended to keep system responsive.\n"
-            "More workers = faster optimization, but higher CPU usage.</small>"
-        )
-        info_label.setWordWrap(True)
-        multicore_layout.addRow(info_label)
-        
-        self.multicore_group.setLayout(multicore_layout)
-        layout.addWidget(self.multicore_group)
-        
-        # GPU Settings removed (Spectre used for features; backtests run on CPU)
-        
-        # Performance Comparison
-        perf_group = QGroupBox("📊 Expected Performance")
-        perf_layout = QVBoxLayout()
-        
-        perf_text = QLabel(
-            "<b>Approximate Speedup (24 individuals, 1000 bars):</b><br><br>"
-            "🖥️  <b>CPU (Single Core)</b>: baseline<br>"
-            "🖥️ 🖥️  <b>Multi-Core CPU</b>: ~4-6x faster (hardware dependent)<br><br>"
-            "<small>Note: Actual speedup depends on hardware, data size, and parameter complexity.</small>"
-        )
-        perf_text.setWordWrap(True)
-        perf_layout.addWidget(perf_text)
-        
-        perf_group.setLayout(perf_layout)
-        layout.addWidget(perf_group)
-        
-        # Warning for GPU
-        warning_group = QGroupBox("⚠️ Important Notes")
-        warning_layout = QVBoxLayout()
-        
-        warning_text = QLabel(
-            "<b>Performance:</b><br>"
-            "• Spectre accelerates feature computation by leveraging vectorized backends<br>"
-            "• Use Multi-Core CPU for faster GA evaluation<br>"
-            "• Advanced users can enable Spectre CUDA outside the UI if desired"
-        )
-        warning_text.setWordWrap(True)
-        warning_layout.addWidget(warning_text)
-        
-        warning_group.setLayout(warning_layout)
-        layout.addWidget(warning_group)
-        
-        # Reset button
-        reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.clicked.connect(self.reset_acceleration_params)
-        layout.addWidget(reset_btn)
-        
-        layout.addStretch()
-        
-        # Initial state
-        self._on_accel_mode_changed(0)
-        
-        return widget
-    
-    def _on_accel_mode_changed(self, index):
-        """Handle acceleration mode change."""
-        mode = self.accel_mode_combo.currentData()
-        
-        # Show/hide relevant groups
-        self.multicore_group.setVisible(mode == "multicore")
-    
-    def reset_acceleration_params(self):
-        """Reset acceleration parameters to defaults."""
-        import multiprocessing
-        max_cores = multiprocessing.cpu_count()
-        
-        self.accel_mode_combo.setCurrentIndex(1)  # Multi-Core CPU default
-        self.cpu_workers.setValue(max(1, max_cores - 1))
     
     def save_settings(self):
         """Save all settings to .env file."""
@@ -610,10 +426,6 @@ class SettingsDialog(QDialog):
                 'backtest_fee_bp': self.fee_bp.value(),
                 'backtest_slippage_bp': self.slippage_bp.value(),
                 
-                # Feature engine
-                'use_spectre': bool(self.use_spectre.isChecked()) if hasattr(self, 'use_spectre') else True,
-                'use_spectre_cuda': bool(self.use_spectre_cuda.isChecked()) if hasattr(self, 'use_spectre_cuda') else False,
-                'use_spectre_trading': bool(self.use_spectre_trading.isChecked()) if hasattr(self, 'use_spectre_trading') else False,
                 
                 # Optimizer (Common)
                 'optimizer_iterations': self.optimizer_iterations.value(),
@@ -634,9 +446,8 @@ class SettingsDialog(QDialog):
                 'adam_beta2': self.adam_beta2.value(),
                 'adam_epsilon_stability': self.adam_epsilon_stability.value(),
                 
-                # Acceleration settings (NEW)
-                'acceleration_mode': self.accel_mode_combo.currentData(),
-                'cpu_workers': self.cpu_workers.value(),
+                # Optimizer execution
+                'optimizer_workers': self.optimizer_workers.value(),
                 
                 # Chart indicators
                 'chart_ema_fast': self.show_ema_fast.isChecked(),

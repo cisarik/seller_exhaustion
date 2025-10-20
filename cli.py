@@ -63,7 +63,6 @@ def backtest(
     fee_bp: float = typer.Option(5.0, help="Fee in basis points"),
     slippage_bp: float = typer.Option(5.0, help="Slippage in basis points"),
     output: str = typer.Option("trades.csv", help="Output CSV file for trades"),
-    no_spectre: bool = typer.Option(False, "--no-spectre", is_flag=True, help="Disable Spectre; use pandas features"),
 ):
     """Run backtest on historical data"""
     
@@ -89,8 +88,7 @@ def backtest(
                 tr_z=tr_z,
                 cloc_min=cloc_min,
             )
-            use_spectre = not no_spectre
-            feats = build_features(df, params, tf, use_spectre=use_spectre)
+            feats = build_features(df, params, tf)
             console.print(f"[green]✓ Detected {feats['exhaustion'].sum()} signals[/green]")
             
             # Run backtest

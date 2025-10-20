@@ -32,18 +32,22 @@ class Trade(BaseModel):
 
 
 class BacktestParams(BaseModel):
-    """
-    Backtest execution parameters.
-    
-    Pure Fibonacci Strategy:
-    - BUY: Seller exhaustion signals only
-    - SELL: Fibonacci target level hit ONLY
-    - No stop-loss, no traditional TP, no time exits
-    """
+    """Backtest execution parameters with optional exit toggles."""
     # Fibonacci parameters (ONLY exit mechanism)
     fib_swing_lookback: int = 96      # Bars to look back for swing high
     fib_swing_lookahead: int = 5       # Bars ahead for swing confirmation
     fib_target_level: float = 0.618    # Target Fib level (0.382-1.0)
+    
+    # Exit toggles
+    use_fib_exits: bool = True
+    use_stop_loss: bool = False
+    use_traditional_tp: bool = False
+    use_time_exit: bool = False
+    
+    # Exit parameters
+    atr_stop_mult: float = 0.7
+    reward_r: float = 2.0
+    max_hold: int = 96
     
     # Transaction costs
     fee_bp: float = 5.0      # Fees in basis points

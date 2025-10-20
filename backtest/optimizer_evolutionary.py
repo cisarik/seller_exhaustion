@@ -16,8 +16,9 @@ from backtest.optimizer import (
     get_param_bounds_for_timeframe,
     export_population as _export_population,
 )
-from strategy.seller_exhaustion import SellerParams
+from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams, Timeframe, FitnessConfig
+import config.settings as cfg_settings
 
 
 class EvolutionaryOptimizer(BaseOptimizer):
@@ -146,19 +147,58 @@ class EvolutionaryOptimizer(BaseOptimizer):
         
         # Choose evolution method based on acceleration
         if self.acceleration == 'multicore':
-            from backtest.optimizer_multicore import evolution_step_multicore
-            self.population = evolution_step_multicore(
-                self.population,
-                data,
-                timeframe,
-                fitness_config=fitness_config,
-                n_workers=self.n_workers,
-                mutation_rate=self.config['mutation_rate'],
-                sigma=self.config['sigma'],
-                elite_fraction=self.config['elite_fraction'],
-                tournament_size=self.config['tournament_size'],
-                mutation_probability=self.config['mutation_probability']
-            )
+            # Check if GPU acceleration should be used
+            use_gpu = bool(getattr(cfg_settings.settings, 'use_spectre_cuda', False))
+            
+            if use_gpu:
+                # Use GPU-accelerated multiprocessing with proper CUDA context management
+                try:
+                    from backtest.optimizer_multicore_gpu import evolution_step_multicore_gpu
+                    self.population = evolution_step_multicore_gpu(
+                        self.population,
+                        data,
+                        timeframe,
+                        fitness_config=fitness_config,
+                        n_workers=self.n_workers,
+                        mutation_rate=self.config['mutation_rate'],
+                        sigma=self.config['sigma'],
+                        elite_fraction=self.config['elite_fraction'],
+                        tournament_size=self.config['tournament_size'],
+                        mutation_probability=self.config['mutation_probability'],
+                        use_gpu=True,
+                        gpu_id=0
+                    )
+                except Exception as e:
+                    print(f"⚠️  GPU multiprocessing failed: {e}")
+                    print("Falling back to CPU multiprocessing...")
+                    from backtest.optimizer_multicore import evolution_step_multicore
+                    self.population = evolution_step_multicore(
+                        self.population,
+                        data,
+                        timeframe,
+                        fitness_config=fitness_config,
+                        n_workers=self.n_workers,
+                        mutation_rate=self.config['mutation_rate'],
+                        sigma=self.config['sigma'],
+                        elite_fraction=self.config['elite_fraction'],
+                        tournament_size=self.config['tournament_size'],
+                        mutation_probability=self.config['mutation_probability']
+                    )
+            else:
+                # Standard CPU multiprocessing (no GPU)
+                from backtest.optimizer_multicore import evolution_step_multicore
+                self.population = evolution_step_multicore(
+                    self.population,
+                    data,
+                    timeframe,
+                    fitness_config=fitness_config,
+                    n_workers=self.n_workers,
+                    mutation_rate=self.config['mutation_rate'],
+                    sigma=self.config['sigma'],
+                    elite_fraction=self.config['elite_fraction'],
+                    tournament_size=self.config['tournament_size'],
+                    mutation_probability=self.config['mutation_probability']
+                )
         else:  # cpu
             self.population = evolution_step(
                 self.population,

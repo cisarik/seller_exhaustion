@@ -990,16 +990,17 @@ class StatsPanel(QWidget):
                             logger.warning("Optimizer has no population attribute, skipping coach")
                             return
                         
-                        # Get GA config from optimizer
+                        # Get GA config from optimizer (use optimizer's config as source of truth)
                         from core.models import OptimizationConfig
+                        optimizer_config = getattr(self.optimizer, 'config', {})
                         ga_config = OptimizationConfig(
-                            population_size=len(population.individuals),
-                            mutation_probability=getattr(population, 'mutation_probability', 0.9),
-                            mutation_rate=getattr(population, 'mutation_rate', 0.55),
-                            sigma=getattr(population, 'sigma', 0.15),
-                            elite_fraction=getattr(population, 'elite_fraction', 0.1),
-                            tournament_size=getattr(population, 'tournament_size', 3),
-                            immigrant_fraction=getattr(population, 'immigrant_fraction', 0.0)
+                            population_size=optimizer_config.get('population_size', len(population.individuals)),
+                            mutation_probability=optimizer_config.get('mutation_probability', 0.9),
+                            mutation_rate=optimizer_config.get('mutation_rate', 0.55),
+                            sigma=optimizer_config.get('sigma', 0.15),
+                            elite_fraction=optimizer_config.get('elite_fraction', 0.1),
+                            tournament_size=optimizer_config.get('tournament_size', 3),
+                            immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
                         )
                         
                         # Run agent analysis (blocking call but in background thread)
@@ -1016,6 +1017,18 @@ class StatsPanel(QWidget):
                             )
                             
                             if success:
+                                # Coach may have modified ga_config - propagate changes back to optimizer
+                                if hasattr(self.optimizer, 'config'):
+                                    self.optimizer.config.update({
+                                        'mutation_probability': ga_config.mutation_probability,
+                                        'mutation_rate': ga_config.mutation_rate,
+                                        'sigma': ga_config.sigma,
+                                        'elite_fraction': ga_config.elite_fraction,
+                                        'tournament_size': ga_config.tournament_size,
+                                        'population_size': ga_config.population_size,
+                                    })
+                                    logger.info("Updated optimizer config with Coach modifications")
+                                
                                 logger.info("✅ Coach agent completed: %s", summary)
                                 # Update status bar if callback available
                                 if self.status_callback:
@@ -1488,16 +1501,17 @@ class StatsPanel(QWidget):
                                 # Run agent-based coach analysis
                                 _, _, fitness_config = self.get_current_params()
                                 
-                                # Get GA config from optimizer
+                                # Get GA config from optimizer (use optimizer's config as source of truth)
                                 from core.models import OptimizationConfig
+                                optimizer_config = getattr(self.optimizer, 'config', {})
                                 ga_config = OptimizationConfig(
-                                    population_size=len(population.individuals),
-                                    mutation_probability=getattr(population, 'mutation_probability', 0.9),
-                                    mutation_rate=getattr(population, 'mutation_rate', 0.55),
-                                    sigma=getattr(population, 'sigma', 0.15),
-                                    elite_fraction=getattr(population, 'elite_fraction', 0.1),
-                                    tournament_size=getattr(population, 'tournament_size', 3),
-                                    immigrant_fraction=getattr(population, 'immigrant_fraction', 0.0)
+                                    population_size=optimizer_config.get('population_size', len(population.individuals)),
+                                    mutation_probability=optimizer_config.get('mutation_probability', 0.9),
+                                    mutation_rate=optimizer_config.get('mutation_rate', 0.55),
+                                    sigma=optimizer_config.get('sigma', 0.15),
+                                    elite_fraction=optimizer_config.get('elite_fraction', 0.1),
+                                    tournament_size=optimizer_config.get('tournament_size', 3),
+                                    immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
                                 )
                                 
                                 # Use agent-based analysis (tool calls)
@@ -1510,6 +1524,18 @@ class StatsPanel(QWidget):
                                 )
                                 
                                 if success:
+                                    # Coach may have modified ga_config - propagate changes back to optimizer
+                                    if hasattr(self.optimizer, 'config'):
+                                        self.optimizer.config.update({
+                                            'mutation_probability': ga_config.mutation_probability,
+                                            'mutation_rate': ga_config.mutation_rate,
+                                            'sigma': ga_config.sigma,
+                                            'elite_fraction': ga_config.elite_fraction,
+                                            'tournament_size': ga_config.tournament_size,
+                                            'population_size': ga_config.population_size,
+                                        })
+                                        logger.info("Updated optimizer config with Coach modifications")
+                                    
                                     # Agent returns 'total_actions'
                                     action_count = summary.get('total_actions', 0)
                                     logger.info("✅ Coach agent completed: %s actions", action_count)
@@ -1696,8 +1722,65 @@ class StatsPanel(QWidget):
             self.stop_requested = True
             logger.info("⏹ Stop requested... will finish current iteration and keep best parameters")
             print("RUN stop_requested")
+            
+            # Save current evolution parameters to .env (Coach may have modified them)
+            self._save_evolution_params_to_env()
     
     @Slot(int, int, str)
     def _emit_progress_signal(self, current: int, total: int, message: str):
         """Emit progress signal from optimizer (thread-safe)."""
         self.progress_updated.emit(current, total, message)
+    
+    def _save_evolution_params_to_env(self):
+        """
+        Save current evolution parameters from optimizer to .env file.
+        
+        Coach Agent can modify these during optimization, so we save them
+        when Stop is clicked to persist any changes.
+        """
+        if self.optimizer is None:
+            logger.debug("No optimizer to save parameters from")
+            return
+        
+        try:
+            from config.settings import SettingsManager
+            
+            # Extract current config from optimizer
+            config = getattr(self.optimizer, 'config', {})
+            if not config:
+                logger.warning("Optimizer has no config to save")
+                return
+            
+            # Build settings dict for GA parameters
+            settings_dict = {}
+            
+            # Core GA parameters
+            if 'mutation_rate' in config:
+                settings_dict['ga_mutation_rate'] = float(config['mutation_rate'])
+            if 'sigma' in config:
+                settings_dict['ga_sigma'] = float(config['sigma'])
+            if 'elite_fraction' in config:
+                settings_dict['ga_elite_fraction'] = float(config['elite_fraction'])
+            if 'tournament_size' in config:
+                settings_dict['ga_tournament_size'] = int(config['tournament_size'])
+            if 'mutation_probability' in config:
+                settings_dict['ga_mutation_probability'] = float(config['mutation_probability'])
+            if 'population_size' in config:
+                settings_dict['ga_population_size'] = int(config['population_size'])
+            
+            if not settings_dict:
+                logger.debug("No GA parameters to save")
+                return
+            
+            # Save to .env
+            SettingsManager.save_to_env(settings_dict)
+            SettingsManager.reload_settings()
+            
+            logger.info("💾 Saved evolution parameters to .env:")
+            for key, value in settings_dict.items():
+                logger.info(f"  {key}={value}")
+            
+            print(f"ENV saved ga_params={len(settings_dict)}")
+            
+        except Exception as e:
+            logger.exception("Failed to save evolution parameters: %s", e)

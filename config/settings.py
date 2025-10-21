@@ -74,14 +74,17 @@ class Settings(BaseSettings):
     
     # Evolution Coach Parameters
     coach_model: str = "google/gemma-3-12b"
-    coach_prompt_version: str = "async_coach_v1"
-    coach_system_prompt: str = "async_coach_v1"  # System prompt selection
-    coach_first_analysis_generation: int = 10
+    coach_prompt_version: str = "blocking_coach_v1"  # Use blocking coach by default
+    coach_system_prompt: str = "blocking_coach_v1"  # System prompt selection
+    coach_analysis_interval: int = 10  # Analyze every N generations (10, 15, 20, etc)
+    coach_population_window: int = 10  # Last N generations for coach context
     coach_max_log_generations: int = 25
     coach_auto_reload_model: bool = True
     coach_context_length: int = 5000  # Experimental: testing if enough for 25 gens
     coach_gpu: float = 0.6  # GPU offload ratio 0.0-1.0 (60% default)
-    
+    coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses
+    coach_response_timeout: int = 3600  # LLM response timeout in seconds (3600 = 1 hour)
+   
     # CPU Workers
     cpu_workers: int = 7  # CPU worker processes for optimization
     
@@ -206,13 +209,16 @@ class SettingsManager:
             
             f.write("# Evolution Coach Parameters\n")
             f.write(f"COACH_MODEL={existing.get('COACH_MODEL', 'google/gemma-3-12b')}\n")
-            f.write(f"COACH_PROMPT_VERSION={existing.get('COACH_PROMPT_VERSION', 'async_coach_v1')}\n")
-            f.write(f"COACH_SYSTEM_PROMPT={existing.get('COACH_SYSTEM_PROMPT', 'async_coach_v1')}\n")
-            f.write(f"COACH_FIRST_ANALYSIS_GENERATION={existing.get('COACH_FIRST_ANALYSIS_GENERATION', '10')}\n")
+            f.write(f"COACH_PROMPT_VERSION={existing.get('COACH_PROMPT_VERSION', 'blocking_coach_v1')}\n")
+            f.write(f"COACH_SYSTEM_PROMPT={existing.get('COACH_SYSTEM_PROMPT', 'blocking_coach_v1')}\n")
+            f.write(f"COACH_ANALYSIS_INTERVAL={existing.get('COACH_ANALYSIS_INTERVAL', '10')}\n")
+            f.write(f"COACH_POPULATION_WINDOW={existing.get('COACH_POPULATION_WINDOW', '10')}\n")
             f.write(f"COACH_MAX_LOG_GENERATIONS={existing.get('COACH_MAX_LOG_GENERATIONS', '25')}\n")
             f.write(f"COACH_AUTO_RELOAD_MODEL={existing.get('COACH_AUTO_RELOAD_MODEL', 'True')}\n")
             f.write(f"COACH_CONTEXT_LENGTH={existing.get('COACH_CONTEXT_LENGTH', '5000')}\n")
-            f.write(f"COACH_GPU={existing.get('COACH_GPU', '0.6')}\n\n")
+            f.write(f"COACH_GPU={existing.get('COACH_GPU', '0.6')}\n")
+            f.write(f"COACH_DEBUG_PAYLOADS={existing.get('COACH_DEBUG_PAYLOADS', 'False')}\n")
+            f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

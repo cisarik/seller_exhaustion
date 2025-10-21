@@ -106,8 +106,13 @@ def evolution_step_multicore(
             for ind in unevaluated
         ]
         
-        # Parallel evaluation
-        with mp.Pool(n_workers) as pool:
+        # Parallel evaluation (use spawn to avoid Qt fork deadlocks)
+        try:
+            ctx = mp.get_context("spawn")
+        except ValueError:
+            # Fallback to default context if spawn unsupported
+            ctx = mp.get_context()
+        with ctx.Pool(processes=n_workers) as pool:
             results = pool.map(evaluate_individual_worker, args_list)
         
         # Update individuals with results

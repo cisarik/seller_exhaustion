@@ -25,7 +25,7 @@ from backtest.coach_protocol import (
     CoachAnalysis, CoachRecommendation, RecommendationCategory,
     EvolutionState, load_coach_prompt
 )
-from core.coach_logging import coach_log_manager
+from core.coach_logging import coach_log_manager, debug_log_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +43,14 @@ class GemmaCoachClient:
         self,
         base_url: str = "http://localhost:1234",
         model: str = "google/gemma-3-12b",
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
         temperature: float = 0.3,
         prompt_version: str = "async_coach_v1",
         system_prompt: Optional[str] = None,
         context_length: int = 5000,  # Experimental: enough for 25 gens?
         gpu: float = 0.6,  # GPU offload ratio 0.0-1.0
-        verbose: bool = True
+        verbose: bool = True,
+        debug_payloads: bool = False
     ):
         """
         Initialize Gemma Coach client.
@@ -64,9 +65,15 @@ class GemmaCoachClient:
             context_length: Model context window size (default: 5000 tokens)
             gpu: GPU offload ratio 0.0-1.0 (default: 0.6 = 60% GPU)
             verbose: Print debug info
+            debug_payloads: If True, log full request/response payloads
         """
         if not HAS_LMSTUDIO:
             raise ImportError("lmstudio package required. Install with: pip install lmstudio")
+        
+        # Load timeout from settings if not provided
+        if timeout is None:
+            from config.settings import settings
+            timeout = getattr(settings, 'coach_response_timeout', 3600)
         
         self.base_url = base_url.rstrip('/')
         self.model = model
@@ -75,11 +82,16 @@ class GemmaCoachClient:
         self.context_length = context_length
         self.gpu = gpu
         self.verbose = verbose
+        self.debug_payloads = debug_payloads
         
         # Load system prompt - use system_prompt if provided, otherwise use prompt_version
         prompt_key = system_prompt if system_prompt else prompt_version
         self.system_prompt = load_coach_prompt(prompt_key)
-        coach_log_manager.append(f"[COACH  ] 🤖 Loaded system prompt: {prompt_key}")
+        # Log to debug (not user-facing coach log) - use startup style
+        debug_log_manager.append(f"✓ 📋 Loaded coach prompt: {prompt_key}")
+        if self.debug_payloads:
+            logger.info("GemmaCoachClient debug payload logging ENABLED (full LLM traffic will be logged)")
+            debug_log_manager.append("✓ 🧪 GemmaCoachClient payload logging enabled")
         
         # Track if model is loaded
         self._model_loaded = False
@@ -132,6 +144,107 @@ class GemmaCoachClient:
             print(f"❌ Coach error: {e}")
             logger.exception("Evolution Coach error")
             return None
+    
+    async def analyze_evolution_with_session(
+        self,
+        session,  # CoachAnalysisSession
+        raw_logs: Optional[List[str]] = None
+    ) -> Optional[CoachAnalysis]:
+        """
+        NEW: Send frozen population session to Gemma Coach for detailed analysis.
+        
+        This is for BLOCKING coach semantics:
+        - Send FULL population data (all individuals + parameters)
+        - Coach can recommend direct mutations
+        - Recommendations apply to exact same population state
+        
+        Args:
+            session: CoachAnalysisSession with full population snapshot
+            raw_logs: Optional raw log lines for context
+        
+        Returns:
+            CoachAnalysis with recommendations (may include mutations)
+        """
+        try:
+            # Build user message with full population data
+            session_dict = session.to_dict_for_coach()
+            user_message = self._build_session_message(session_dict, raw_logs)
+            
+            if self.verbose:
+                print("📊 Sending frozen population session to Coach...")
+                print(f"   Session: {session.session_id}")
+                print(f"   Generation: {session.generation}")
+                print(f"   Population size: {session.population_size}")
+                print(f"   Diversity: {session.get_population_metrics()['diversity']:.2f}")
+            
+            # Call LLM
+            response_text = await self._call_llm(user_message)
+            
+            if not response_text:
+                print("❌ Empty response from coach")
+                return None
+            
+            # Parse JSON from response
+            analysis = self._parse_response(response_text, session.generation)
+            
+            if self.verbose and analysis:
+                print(f"✅ Coach analysis complete: {len(analysis.recommendations)} recommendations")
+                # Count mutation types
+                mutations = [r for r in analysis.recommendations if "mutate" in r.parameter or r.parameter.startswith("drop")]
+                if mutations:
+                    print(f"   🧬 {len(mutations)} mutations recommended")
+                if analysis.stagnation_detected:
+                    print("   ⚠️  Stagnation detected")
+                if analysis.diversity_concern:
+                    print("   ⚠️  Diversity concern flagged")
+            
+            return analysis
+        
+        except Exception as e:
+            print(f"❌ Coach error: {e}")
+            logger.exception("Evolution Coach error")
+            return None
+    
+    def _build_session_message(self, session_dict: dict, raw_logs: Optional[List[str]] = None) -> str:
+        """Build user message from session data."""
+        import json
+        
+        # Start with session overview
+        message = f"""You are analyzing a frozen population state for the Evolution Coach.
+
+CURRENT STATE:
+- Session ID: {session_dict.get('session_id')}
+- Generation: {session_dict.get('generation')}
+- Population Size: {session_dict.get('population_size')}
+
+POPULATION METRICS:
+"""
+        metrics = session_dict.get('population_metrics', {})
+        message += f"- Mean Fitness: {metrics.get('mean_fitness', 0):.4f} ± {metrics.get('std_fitness', 0):.4f}\n"
+        message += f"- Best Fitness: {metrics.get('best_fitness', 0):.4f}\n"
+        message += f"- Diversity: {metrics.get('diversity', 0):.2f} (0=homogeneous, 1=diverse)\n"
+        message += f"- Mean Trades: {metrics.get('mean_trades', 0):.1f} ± {metrics.get('std_trades', 0):.1f}\n"
+        
+        # Include full population data
+        message += f"\nPOPULATION DATA (all {len(session_dict.get('individuals', []))} individuals):\n"
+        individuals = session_dict.get('individuals', [])[:50]  # Limit for token budget
+        for ind in individuals:
+            message += f"\nIndividual #{ind['id']}:\n"
+            message += f"  Fitness: {ind.get('fitness', 0):.4f}\n"
+            message += f"  Metrics: {json.dumps(ind.get('metrics', {}), indent=2)}\n"
+            message += f"  Parameters (sample): {json.dumps({k: ind['parameters'].get(k) for k in list(ind['parameters'].keys())[:5]}, indent=2)}\n"
+        
+        if len(individuals) < len(session_dict.get('individuals', [])):
+            message += f"\n... and {len(session_dict.get('individuals', [])) - len(individuals)} more individuals\n"
+        
+        # Add recent logs
+        if raw_logs:
+            message += f"\n\nRECENT LOG HISTORY ({len(raw_logs)} lines):\n"
+            message += "\n".join(raw_logs[-50:])  # Last 50 lines
+        
+        message += "\n\nProvide recommendations in JSON format."
+        
+        return message
     
     async def check_model_loaded(self) -> bool:
         """
@@ -256,6 +369,16 @@ class GemmaCoachClient:
             Response text from model
         """
         try:
+            if self.debug_payloads:
+                logger.info("=" * 80)
+                logger.info("LLM REQUEST (Full Prompt + Payload)")
+                logger.info("=" * 80)
+                logger.info("SYSTEM PROMPT (%s chars):\n%s", len(self.system_prompt), self.system_prompt)
+                logger.info("-" * 80)
+                logger.info("USER MESSAGE (%s chars):\n%s", len(user_message), user_message)
+                logger.info("=" * 80)
+                debug_log_manager.append(f"🧪 LLM request: system={len(self.system_prompt)} chars, user={len(user_message)} chars")
+            
             # Ensure model is loaded
             await self.load_model()
             
@@ -286,26 +409,51 @@ class GemmaCoachClient:
             chat = lms.Chat(self.system_prompt)
             chat.add_user_message(user_message)
             
-            # Generate response
-            response = await asyncio.to_thread(
-                model.respond,
-                chat,
-                config={
-                    "temperature": self.temperature,
-                    "maxTokens": 4000,  # Enough for structured response
-                }
-            )
+            # Generate response WITH TIMEOUT
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        model.respond,
+                        chat,
+                        config={
+                            "temperature": self.temperature,
+                            "maxTokens": 4000,  # Enough for structured response
+                        }
+                    ),
+                    timeout=self.timeout
+                )
+                
+                # Extract text content
+                response_text = response.content
+                
+                coach_log_manager.append(f"[COACH  ] 📥 Received response from LLM ({len(response_text or '') or 0} chars)")
+                if self.debug_payloads:
+                    logger.info("=" * 80)
+                    logger.info("LLM RESPONSE (Full Payload)")
+                    logger.info("=" * 80)
+                    logger.info("RESPONSE TEXT (%s chars):\n%s", len(response_text or ""), response_text)
+                    logger.info("=" * 80)
+                    debug_log_manager.append(f"🧪 LLM response size={len(response_text or '')} chars")
+                
+                return response_text
             
-            # Extract text content
-            response_text = response.content
-            
-            coach_log_manager.append(f"[COACH  ] 📥 Received response from LLM")
-            
-            return response_text
+            except asyncio.TimeoutError:
+                # NEW: Handle timeout specifically with detailed logging
+                coach_log_manager.append(f"[COACH  ] ⏱️  LLM timeout after {self.timeout}s")
+                coach_log_manager.append(f"[COACH  ] → Check if LM Studio is responsive: lms ps")
+                raise TimeoutError(
+                    f"LLM response timeout after {self.timeout}s. "
+                    f"Check if LM Studio server is running and responsive."
+                )
+        
+        except asyncio.TimeoutError:
+            # Re-raise timeout for parent handler
+            logger.exception("LLM call timeout")
+            raise
         
         except Exception as e:
             logger.exception("LLM call error")
-            coach_log_manager.append(f"[COACH  ] ❌ LLM call error: {e}")
+            coach_log_manager.append(f"[COACH  ] ❌ LLM error: {type(e).__name__}: {str(e)[:80]}")
             return None
     
     def _build_user_message(
@@ -365,24 +513,51 @@ GA:
         
         Handles cases where LLM includes extra text before/after JSON.
         """
+        # NEW: Validate response is not empty
+        if not response_text or not response_text.strip():
+            coach_log_manager.append(f"[COACH  ] ❌ Empty response from LLM")
+            return None
+        
         # Try to extract JSON object from response
         json_str = self._extract_json(response_text)
         
         if not json_str:
-            print("⚠️  Could not find JSON in coach response")
+            # NEW: More detailed error logging
+            coach_log_manager.append(f"[COACH  ] ❌ No JSON found in response")
+            coach_log_manager.append(f"[COACH  ] Response start: {response_text[:100]}...")
             if self.verbose:
-                print(f"Response: {response_text[:200]}")
+                logger.error(f"Full LLM response (no JSON found):\n{response_text}")
             return None
         
         try:
+            # NEW: Log parsing attempt
+            coach_log_manager.append(f"[COACH  ] 🔍 Parsing JSON ({len(json_str)} chars)")
+            
             data = json.loads(json_str)
             analysis = CoachAnalysis.from_dict(data)
+            
+            # NEW: Validate that analysis has meaningful content
+            if not analysis.recommendations and not analysis.summary:
+                coach_log_manager.append(
+                    f"[COACH  ] ⚠️  Empty analysis (no recommendations, no summary)"
+                )
+            
             return analysis
         
         except json.JSONDecodeError as e:
-            print(f"❌ JSON parse error: {e}")
+            # NEW: Detailed JSON error logging
+            coach_log_manager.append(f"[COACH  ] ❌ JSON parse error at position {e.pos}: {e.msg}")
+            coach_log_manager.append(f"[COACH  ] Invalid JSON: {json_str[:80]}...")
             if self.verbose:
-                print(f"JSON: {json_str[:200]}")
+                logger.error(f"JSON parse error: {e}\nFull JSON:\n{json_str}")
+            return None
+        
+        except Exception as e:
+            # NEW: Catch CoachAnalysis validation errors
+            coach_log_manager.append(f"[COACH  ] ❌ Validation error: {type(e).__name__}")
+            coach_log_manager.append(f"[COACH  ] Details: {str(e)[:100]}")
+            if self.verbose:
+                logger.exception(f"Coach analysis validation error")
             return None
     
     @staticmethod

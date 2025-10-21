@@ -106,6 +106,11 @@ def get_param_bounds_for_timeframe(tf: Timeframe) -> Dict[str, Tuple[float, floa
     bounds['fee_bp'] = TIME_BOUNDS['fee_bp']
     bounds['slippage_bp'] = TIME_BOUNDS['slippage_bp']
     
+    # Add missing backtest parameters (not time-based)
+    bounds['atr_stop_mult'] = (0.3, 1.5)      # Stop loss multiplier
+    bounds['reward_r'] = (1.0, 5.0)           # Risk:Reward ratio
+    bounds['max_hold'] = (48, 288)            # Max hold time in bars (12h-72h on 15m)
+    
     return bounds
 
 

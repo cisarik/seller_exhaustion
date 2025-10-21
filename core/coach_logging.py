@@ -1,9 +1,14 @@
-"""Lightweight logging sink for Evolution Coach messages."""
+"""Logging sinks for Evolution Coach and debug messages.
+
+Two separate logs:
+- coach_log_manager: User-facing coach window (clean, relevant info only)
+- debug_log_manager: Internal debug log (initialization, diagnostics)
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List
+from typing import Callable, List, Literal
 from threading import Lock
 
 
@@ -11,9 +16,10 @@ Callback = Callable[[str], None]
 
 
 @dataclass
-class CoachLogManager:
+class LogManager:
     """Thread-safe log buffer with subscriber callbacks."""
 
+    name: str = "Log"
     max_lines: int = 5000
     _lines: List[str] = field(default_factory=list)
     _callbacks: List[Callback] = field(default_factory=list)
@@ -32,7 +38,12 @@ class CoachLogManager:
                 self._callbacks.remove(callback)
 
     def append(self, line: str) -> None:
-        """Append a log line and notify listeners."""
+        """
+        Append a log line and notify listeners.
+        
+        Args:
+            line: Log line to append
+        """
         if not line:
             return
 
@@ -51,15 +62,52 @@ class CoachLogManager:
                 # Ignore listener errors to avoid breaking logging flow
                 continue
 
-    def dump(self) -> List[str]:
-        """Return a copy of stored lines."""
+    def dump(self, n_lines: int = 0) -> List[str]:
+        """
+        Return a copy of stored lines.
+        
+        Args:
+            n_lines: If > 0, return only last N lines; if 0, return all
+        
+        Returns:
+            List of log lines
+        """
         with self._lock:
-            return list(self._lines)
+            lines = list(self._lines)
+        
+        if n_lines > 0:
+            return lines[-n_lines:]
+        return lines
 
     def clear(self) -> None:
         """Clear log lines."""
         with self._lock:
             self._lines.clear()
+    
+    def get_line_count(self) -> int:
+        """Get total number of lines."""
+        with self._lock:
+            return len(self._lines)
 
 
-coach_log_manager = CoachLogManager()
+# COACH LOG: User-facing coach window (clean, relevant)
+# Show:
+#   - What's sent to coach
+#   - Coach responses
+#   - Mutations applied
+#   - Recommendations accepted/rejected
+# Hide:
+#   - Initialization messages
+#   - Model loading status
+#   - Debug info
+coach_log_manager = LogManager(name="CoachLog", max_lines=1000)
+
+
+# DEBUG LOG: Internal diagnostic log (for developers)
+# Show:
+#   - Initialization messages
+#   - Model loading/unloading
+#   - Configuration changes
+#   - Error diagnostics
+#   - Performance metrics
+debug_log_manager = LogManager(name="DebugLog", max_lines=5000)

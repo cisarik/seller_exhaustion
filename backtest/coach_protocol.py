@@ -10,7 +10,7 @@ Coach recommendations are immediately applied without user intervention.
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from enum import Enum
 import json
 
@@ -25,6 +25,42 @@ class RecommendationCategory(str, Enum):
     DIVERSITY = "diversity"                       # Adjust immigrants, stagnation
     BOUNDS = "bounds"                             # Override parameter search space
     FITNESS_FUNCTION_TYPE = "fitness_function_type"  # Switch hard_gates ↔ soft_penalties
+    INDIVIDUAL_MUTATION = "individual_mutation"   # Mutate specific individual parameters
+    INDIVIDUAL_DROP = "individual_drop"           # Drop specific individuals
+    INDIVIDUAL_INSERT = "individual_insert"       # Insert new individuals (coach-designed or random)
+    MUTATIONS = "individual_mutation"             # Alias for backwards compatibility with prompts
+
+
+@dataclass
+class IndividualParameters:
+    """Complete parameter set for a new individual."""
+    
+    # Seller parameters (strategy entry logic)
+    ema_fast: int
+    ema_slow: int
+    z_window: int
+    atr_window: int
+    vol_z: float
+    tr_z: float
+    cloc_min: float
+    
+    # Backtest parameters (exit logic and costs)
+    fib_swing_lookback: int
+    fib_swing_lookahead: int
+    fib_target_level: float
+    use_fib_exits: bool
+    use_stop_loss: bool
+    use_traditional_tp: bool
+    use_time_exit: bool
+    atr_stop_mult: float
+    reward_r: float
+    max_hold: int
+    fee_bp: float
+    slippage_bp: float
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
 
 
 @dataclass
@@ -32,16 +68,20 @@ class CoachRecommendation:
     """Single recommendation from Evolution Coach."""
     
     category: RecommendationCategory
-    parameter: str                                # e.g., "min_trades", "tournament_size"
+    parameter: str                                # e.g., "min_trades", "tournament_size", "mutate_5_ema_fast"
     current_value: Any                            # Current value
     suggested_value: Any                          # Coach's recommended value
     reasoning: str                                # Why this change
     confidence: float = 0.8                       # 0.0-1.0 confidence level
     applies_at_generation: Optional[int] = None   # Generation to apply (None = next)
     
+    # For individual-level operations
+    individual_id: Optional[int] = None           # Target individual ID (for mutations/drops)
+    individual_params: Optional[IndividualParameters] = None  # For new individual creation
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "category": self.category.value,
             "parameter": self.parameter,
             "current_value": self.current_value,
@@ -50,6 +90,14 @@ class CoachRecommendation:
             "confidence": self.confidence,
             "applies_at_generation": self.applies_at_generation
         }
+        
+        # Add individual-level fields if present
+        if self.individual_id is not None:
+            result["individual_id"] = self.individual_id
+        if self.individual_params is not None:
+            result["individual_params"] = self.individual_params.to_dict()
+        
+        return result
 
 
 @dataclass
@@ -96,7 +144,16 @@ class CoachAnalysis:
                         category = cat
                         break
                 else:
-                    raise ValueError(f"Unknown recommendation category: {category_str}")
+                    # Special handling for MUTATIONS alias
+                    if category_str.upper() == "MUTATIONS":
+                        category = RecommendationCategory.INDIVIDUAL_MUTATION
+                    else:
+                        raise ValueError(f"Unknown recommendation category: {category_str}")
+            
+            # Handle individual parameters if present
+            individual_params = None
+            if "individual_params" in r and r["individual_params"]:
+                individual_params = IndividualParameters(**r["individual_params"])
             
             rec = CoachRecommendation(
                 category=category,
@@ -105,7 +162,9 @@ class CoachAnalysis:
                 suggested_value=r["suggested_value"],
                 reasoning=r["reasoning"],
                 confidence=r.get("confidence", 0.8),
-                applies_at_generation=r.get("applies_at_generation")
+                applies_at_generation=r.get("applies_at_generation"),
+                individual_id=r.get("individual_id"),
+                individual_params=individual_params
             )
             recs.append(rec)
         
@@ -168,15 +227,20 @@ class EvolutionState:
 # GEMMA COACH SYSTEM PROMPT
 # Load from versioned prompt files for experimentation
 
-def load_coach_prompt(version: str = "async_coach_v1") -> str:
+def load_coach_prompt(version: str = "blocking_coach_v1") -> str:
     """Load coach system prompt from file."""
     from pathlib import Path
     prompt_path = Path(__file__).parent.parent / "coach_prompts" / f"{version}.txt"
     try:
         return prompt_path.read_text()
     except FileNotFoundError:
-        # Fallback to default inline prompt
-        return _DEFAULT_PROMPT
+        # Try old version for backwards compatibility
+        try:
+            prompt_path = Path(__file__).parent.parent / "coach_prompts" / "async_coach_v1.txt"
+            return prompt_path.read_text()
+        except FileNotFoundError:
+            # Fallback to default inline prompt
+            return _DEFAULT_PROMPT
 
 _DEFAULT_PROMPT = """You are the Evolution Coach, an AI expert in genetic algorithms and trading strategy optimization.
 
@@ -280,6 +344,50 @@ DIVERSITY:
 BOUNDS OVERRIDE:
   - bounds: {"ema_fast": [50, 240], "vol_z": [1.2, 1.6], ...}
 
+INDIVIDUAL-LEVEL OPERATIONS:
+  - mutate_<individual_id>_<param_name>: Mutate specific parameter of specific individual
+  - drop_<individual_id>: Remove individual from population
+  - insert_coach_<params>: Insert new individual with coach-designed parameters
+  - insert_random: Insert new individual with random parameters
+
+EXAMPLE INDIVIDUAL OPERATIONS:
+{
+  "category": "individual_mutation",
+  "parameter": "mutate_5_ema_fast",
+  "current_value": 48,
+  "suggested_value": 72,
+  "reasoning": "Individual 5 has good performance but EMA fast too short, extend to 72 bars for better trend detection",
+  "confidence": 0.8,
+  "individual_id": 5
+}
+
+{
+  "category": "individual_drop",
+  "parameter": "drop_3",
+  "current_value": 0.0001,
+  "suggested_value": null,
+  "reasoning": "Individual 3 has extremely low fitness and no trades, remove to make room for better candidates",
+  "confidence": 0.9,
+  "individual_id": 3
+}
+
+{
+  "category": "individual_insert",
+  "parameter": "insert_coach_explore_high_vol",
+  "current_value": null,
+  "suggested_value": null,
+  "reasoning": "Population lacks high volume threshold exploration, insert individual with vol_z=2.5",
+  "confidence": 0.7,
+  "individual_params": {
+    "ema_fast": 96, "ema_slow": 672, "z_window": 672, "atr_window": 96,
+    "vol_z": 2.5, "tr_z": 1.2, "cloc_min": 0.6,
+    "fib_swing_lookback": 96, "fib_swing_lookahead": 5, "fib_target_level": 0.618,
+    "use_fib_exits": true, "use_stop_loss": false, "use_traditional_tp": false, "use_time_exit": false,
+    "atr_stop_mult": 0.7, "reward_r": 2.0, "max_hold": 96,
+    "fee_bp": 5.0, "slippage_bp": 5.0
+  }
+}
+
 RESPONSE RULES:
 
 1. ALWAYS return valid JSON (no markdown, no code blocks, pure JSON)
@@ -305,6 +413,29 @@ IF population clustering at bounds:
 
 IF std_fitness very low (all similar):
   → Recommend: increase mutation_rate, decrease elite_fraction, confidence=0.85
+
+INDIVIDUAL-LEVEL DECISION LOGIC:
+
+IF individual has very low fitness (< 0.01) AND poor metrics:
+  → Recommend: drop_<individual_id>, confidence=0.9
+
+IF individual has promising parameters but poor performance:
+  → Recommend: mutate_<individual_id>_<param_name> with specific value, confidence=0.8
+
+IF population lacks diversity in specific parameter ranges:
+  → Recommend: insert_coach with parameters in unexplored range, confidence=0.7
+
+IF population size below target and stagnation detected:
+  → Recommend: insert_random to inject fresh genetic material, confidence=0.6
+
+INDIVIDUAL PARAMETER DESIGN:
+When creating new individuals, consider:
+- EMA Fast: 48-192 (24h-48h on 15m), avoid extremes
+- EMA Slow: 336-1008 (7d-21d on 15m), ensure > ema_fast
+- Volume Z: 1.5-2.5, higher = more selective
+- TR Z: 1.0-1.5, higher = more volatile conditions
+- Fibonacci: 0.382-0.786, 0.618 is golden ratio
+- Costs: fee_bp 3-10, slippage_bp 3-10
 
 TONE: Professional, specific, confidence-driven. No hedging. Quote actual metrics."""
 

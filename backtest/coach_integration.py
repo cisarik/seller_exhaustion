@@ -132,8 +132,16 @@ def build_evolution_state(
         diversity_metric=float(diversity),
         recent_improvement=recent_improvement,
         is_stagnant=is_stagnant,
-        fitness_config_dict=fitness_config.dict(),
-        ga_config_dict=ga_config.dict()
+        fitness_config_dict=(
+            fitness_config.model_dump() if hasattr(fitness_config, 'model_dump')
+            else fitness_config.dict() if hasattr(fitness_config, 'dict')
+            else getattr(fitness_config, '__dict__', {})
+        ),
+        ga_config_dict=(
+            ga_config.model_dump() if hasattr(ga_config, 'model_dump')
+            else ga_config.dict() if hasattr(ga_config, 'dict')
+            else getattr(ga_config, '__dict__', {})
+        )
     )
     
     return state

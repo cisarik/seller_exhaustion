@@ -388,19 +388,20 @@ class CoachManager:
         if not analysis:
             return fitness_config, ga_config
         
+        updated_fitness = fitness_config
+        updated_ga = ga_config
+        
         # Apply if enabled
         if self.auto_apply and analysis.recommendations:
-            new_fitness, new_ga = self.apply_recommendations(
+            updated_fitness, updated_ga = self.apply_recommendations(
                 analysis, fitness_config, ga_config
             )
-            
-            # Reload model to clear context window (CRITICAL)
-            if self.auto_reload_model:
-                await self.reload_model()
-            
-            return new_fitness, new_ga
-        else:
-            return fitness_config, ga_config
+        
+        # Reload model to clear context window (CRITICAL)
+        if self.auto_reload_model:
+            await self.reload_model()
+        
+        return updated_fitness, updated_ga
     
     def unload_model(self):
         """

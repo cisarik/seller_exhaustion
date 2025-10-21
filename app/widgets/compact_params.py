@@ -323,20 +323,7 @@ class CompactParamsEditor(QWidget):
         model_row.addWidget(self.coach_model_combo, 1)
         coach_layout.addLayout(model_row)
         
-        # Agent (prompt) selection row
-        agent_row = QHBoxLayout()
-        agent_label = QLabel("Agent:")
-        agent_label.setMaximumWidth(60)
-        self.coach_agent_combo = QComboBox()
-        self.coach_agent_combo.setToolTip("Coach prompt version")
-        self.coach_agent_combo.currentIndexChanged.connect(self._on_coach_config_changed)
-        
-        # Populate with coach prompts from directory
-        self._populate_coach_prompts()
-        
-        agent_row.addWidget(agent_label)
-        agent_row.addWidget(self.coach_agent_combo, 1)
-        coach_layout.addLayout(agent_row)
+        # Note: System Prompt is configured in Settings → Evolution Coach Settings
         
         # Load/Unload button
         self.coach_load_btn = QPushButton("Load Model")
@@ -354,37 +341,7 @@ class CompactParamsEditor(QWidget):
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
     
-    def _populate_coach_prompts(self):
-        """Populate coach agent dropdown with available prompts from coach_prompts/."""
-        from pathlib import Path
-        
-        # Get coach_prompts directory
-        coach_prompts_dir = Path(__file__).parent.parent.parent / "coach_prompts"
-        
-        if not coach_prompts_dir.exists():
-            # Fallback to default
-            self.coach_agent_combo.addItem("async_coach_v1 (default)", "async_coach_v1")
-            return
-        
-        # List all .txt files in coach_prompts/
-        prompt_files = sorted(coach_prompts_dir.glob("*.txt"))
-        
-        if not prompt_files:
-            # Fallback to default
-            self.coach_agent_combo.addItem("async_coach_v1 (default)", "async_coach_v1")
-            return
-        
-        # Add each prompt file
-        for prompt_file in prompt_files:
-            # Get filename without extension
-            prompt_name = prompt_file.stem
-            display_name = prompt_name.replace("_", " ").title()
-            self.coach_agent_combo.addItem(display_name, prompt_name)
-            
-            # Set default to async_coach_v1
-            if prompt_name == "async_coach_v1":
-                self.coach_agent_combo.setCurrentIndex(self.coach_agent_combo.count() - 1)
-    
+
     def _load_coach_settings(self):
         """Load coach settings from config and update UI."""
         from config.settings import settings
@@ -396,20 +353,14 @@ class CompactParamsEditor(QWidget):
                 self.coach_model_combo.setCurrentIndex(i)
                 break
         
-        # Set prompt version (already populated by _populate_coach_prompts)
-        prompt_version = settings.coach_prompt_version
-        for i in range(self.coach_agent_combo.count()):
-            if self.coach_agent_combo.itemData(i) == prompt_version:
-                self.coach_agent_combo.setCurrentIndex(i)
-                break
+        # Note: System Prompt setting is managed in Settings → Evolution Coach Settings
     
     def _on_coach_config_changed(self):
-        """Handle coach config change - save to settings."""
+        """Handle coach model change - save to settings."""
         from config.settings import settings, SettingsManager
         
-        # Update settings
+        # Update model setting only (prompt version is set in Settings dialog)
         settings.coach_model = self.coach_model_combo.currentData()
-        settings.coach_prompt_version = self.coach_agent_combo.currentData()
         
         # Convert settings to dict and save to .env
         try:
@@ -420,21 +371,23 @@ class CompactParamsEditor(QWidget):
         SettingsManager.save_to_env(settings_dict)
     
     def get_coach_config(self) -> dict:
-        """Get Evolution Coach configuration."""
+        """Get Evolution Coach configuration (model only; prompt is in Settings)."""
+        from config.settings import settings
         return {
             "model": self.coach_model_combo.currentData(),
-            "prompt_version": self.coach_agent_combo.currentData()
+            "prompt_version": getattr(settings, 'coach_system_prompt', 'blocking_coach_v1')
         }
     
     def _on_coach_load_clicked(self):
         """Handle coach load/unload button click."""
+        from config.settings import settings
         if self._coach_model_loaded:
             # Unload model
             self.coach_unload_requested.emit()
         else:
-            # Load model
+            # Load model with system prompt from Settings
             model = self.coach_model_combo.currentData()
-            prompt_version = self.coach_agent_combo.currentData()
+            prompt_version = getattr(settings, 'coach_system_prompt', 'blocking_coach_v1')
             self.coach_load_requested.emit(model, prompt_version)
     
     def set_coach_model_loaded(self, loaded: bool):

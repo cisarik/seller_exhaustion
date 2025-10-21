@@ -1444,7 +1444,6 @@ class MainWindow(QMainWindow):
                 # Model already loaded, update button state
                 self.param_editor.set_coach_model_loaded(True)
                 self.chart_view.set_coach_status(f"✅ Model already loaded: {model}")
-                coach_log_manager.append(f"[STARTUP] 🤖 Coach model detected as loaded: {model}")
                 logger.info("✅ Coach model already loaded on startup: %s", model)
                 
                 # Store client for later use
@@ -1453,7 +1452,6 @@ class MainWindow(QMainWindow):
                 # Model not loaded
                 self.param_editor.set_coach_model_loaded(False)
                 self.chart_view.set_coach_status(f"Ready to load model: {model}")
-                coach_log_manager.append(f"[STARTUP] 📊 Coach model not loaded: {model}")
                 logger.info("Coach model not loaded on startup: %s", model)
         
         except Exception as e:

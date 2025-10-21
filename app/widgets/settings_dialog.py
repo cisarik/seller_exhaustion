@@ -393,17 +393,27 @@ class SettingsDialog(QDialog):
         
         # System Prompt Selection
         self.coach_system_prompt = QComboBox()
+        self.coach_system_prompt.addItem("blocking_coach_v1", "blocking_coach_v1")
         self.coach_system_prompt.addItem("async_coach_v1", "async_coach_v1")
+        self.coach_system_prompt.setCurrentIndex(0)  # Default to blocking_coach_v1
         self.coach_system_prompt.setToolTip("Select the system prompt version for the coach")
         coach_layout.addRow("System Prompt:", self.coach_system_prompt)
         
-        # First Analysis Generation
-        self.coach_first_gen = QSpinBox()
-        self.coach_first_gen.setRange(1, 1000)
-        self.coach_first_gen.setValue(10)
-        self.coach_first_gen.setSuffix(" gen")
-        self.coach_first_gen.setToolTip("Generation number when first coach analysis triggers")
-        coach_layout.addRow("First Analysis At:", self.coach_first_gen)
+        # Coach Analysis Interval
+        self.coach_interval = QSpinBox()
+        self.coach_interval.setRange(1, 100)
+        self.coach_interval.setValue(10)
+        self.coach_interval.setSuffix(" gens")
+        self.coach_interval.setToolTip("Coach analyzes every N generations (10, 20, 30, etc)")
+        coach_layout.addRow("Analysis Interval:", self.coach_interval)
+        
+        # Population Context Window (how many generations coach sees)
+        self.coach_pop_window = QSpinBox()
+        self.coach_pop_window.setRange(1, 100)
+        self.coach_pop_window.setValue(10)
+        self.coach_pop_window.setSuffix(" gens")
+        self.coach_pop_window.setToolTip("Coach sees stats from last N generations for context")
+        coach_layout.addRow("Population Context Window:", self.coach_pop_window)
         
         # Max Log Generations
         self.coach_max_log_gens = QSpinBox()
@@ -436,6 +446,18 @@ class SettingsDialog(QDialog):
         self.coach_gpu.setValue(0.6)
         self.coach_gpu.setToolTip("GPU offload ratio: 0.0 = CPU only, 1.0 = max GPU")
         coach_layout.addRow("GPU Offload:", self.coach_gpu)
+        
+        # LLM Response Timeout
+        self.coach_response_timeout = QSpinBox()
+        self.coach_response_timeout.setRange(30, 36000)  # 30 seconds to 10 hours
+        self.coach_response_timeout.setValue(3600)  # Default 1 hour
+        self.coach_response_timeout.setSingleStep(60)  # Step by 60 seconds
+        self.coach_response_timeout.setSuffix(" sec")
+        self.coach_response_timeout.setToolTip(
+            "LLM response timeout in seconds (default: 3600 = 1 hour)\n"
+            "Increase if LM Studio is slow or model is large"
+        )
+        coach_layout.addRow("LLM Response Timeout:", self.coach_response_timeout)
         
         coach_group.setLayout(coach_layout)
         layout.addWidget(coach_group)
@@ -487,14 +509,16 @@ class SettingsDialog(QDialog):
     
     def reset_coach_params(self):
         """Reset Evolution Coach parameters to defaults."""
-        idx = self.coach_system_prompt.findData("async_coach_v1")
+        idx = self.coach_system_prompt.findData("blocking_coach_v1")
         if idx >= 0:
             self.coach_system_prompt.setCurrentIndex(idx)
-        self.coach_first_gen.setValue(10)
+        self.coach_interval.setValue(10)
+        self.coach_pop_window.setValue(10)
         self.coach_max_log_gens.setValue(25)
         self.coach_auto_reload.setChecked(True)
         self.coach_context_length.setValue(5000)
         self.coach_gpu.setValue(0.6)
+        self.coach_response_timeout.setValue(3600)  # 1 hour default
         self.cpu_workers.setValue(7)
         self.adam_epsilon_stability_coach.setValue(1e-8)
     
@@ -541,11 +565,13 @@ class SettingsDialog(QDialog):
             idx = self.coach_system_prompt.findData(settings.coach_system_prompt)
             if idx >= 0:
                 self.coach_system_prompt.setCurrentIndex(idx)
-        self.coach_first_gen.setValue(settings.coach_first_analysis_generation)
+        self.coach_interval.setValue(getattr(settings, 'coach_analysis_interval', 10))
+        self.coach_pop_window.setValue(getattr(settings, 'coach_population_window', 10))
         self.coach_max_log_gens.setValue(settings.coach_max_log_generations)
         self.coach_auto_reload.setChecked(settings.coach_auto_reload_model)
         self.coach_context_length.setValue(settings.coach_context_length)
         self.coach_gpu.setValue(settings.coach_gpu)
+        self.coach_response_timeout.setValue(getattr(settings, 'coach_response_timeout', 3600))
         
         # CPU Workers and ADAM epsilon stability
         self.cpu_workers.setValue(getattr(settings, 'cpu_workers', 7))
@@ -597,11 +623,13 @@ class SettingsDialog(QDialog):
                 
                 # Evolution Coach settings
                 'coach_system_prompt': self.coach_system_prompt.currentData(),
-                'coach_first_analysis_generation': self.coach_first_gen.value(),
+                'coach_analysis_interval': self.coach_interval.value(),
+                'coach_population_window': self.coach_pop_window.value(),
                 'coach_max_log_generations': self.coach_max_log_gens.value(),
                 'coach_auto_reload_model': self.coach_auto_reload.isChecked(),
                 'coach_context_length': self.coach_context_length.value(),
                 'coach_gpu': self.coach_gpu.value(),
+                'coach_response_timeout': self.coach_response_timeout.value(),
                 
                 # CPU Workers
                 'cpu_workers': self.cpu_workers.value(),

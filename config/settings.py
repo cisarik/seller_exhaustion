@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     coach_gpu: float = 0.6  # GPU offload ratio 0.0-1.0 (60% default)
     coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses
     coach_response_timeout: int = 3600  # LLM response timeout in seconds (3600 = 1 hour)
+    coach_agent_max_iterations: int = 10  # Max tool calls per agent analysis session
    
     # CPU Workers
     cpu_workers: int = 7  # CPU worker processes for optimization
@@ -218,7 +219,8 @@ class SettingsManager:
             f.write(f"COACH_CONTEXT_LENGTH={existing.get('COACH_CONTEXT_LENGTH', '5000')}\n")
             f.write(f"COACH_GPU={existing.get('COACH_GPU', '0.6')}\n")
             f.write(f"COACH_DEBUG_PAYLOADS={existing.get('COACH_DEBUG_PAYLOADS', 'False')}\n")
-            f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n\n")
+            f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n")
+            f.write(f"COACH_AGENT_MAX_ITERATIONS={existing.get('COACH_AGENT_MAX_ITERATIONS', '10')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

@@ -974,6 +974,69 @@ class StatsPanel(QWidget):
             stats = self.optimizer.get_stats()
             iteration = stats.get('iteration', stats.get('generation', 0))
             
+            # Check if coach should analyze (agent-based coach)
+            if self.coach_manager and self.coach_manager.should_analyze(iteration):
+                logger.info("🤖 Evolution Coach Agent triggering at generation %s", iteration)
+                # Run coach analysis in background thread to avoid blocking UI
+                from threading import Thread
+                
+                def run_coach_analysis():
+                    try:
+                        # Get current configs
+                        _, _, fitness_config = self.get_current_params()
+                        
+                        # Get population from optimizer
+                        population = getattr(self.optimizer, 'population', None)
+                        if population is None:
+                            logger.warning("Optimizer has no population attribute, skipping coach")
+                            return
+                        
+                        # Get GA config from optimizer
+                        from core.models import OptimizationConfig
+                        ga_config = OptimizationConfig(
+                            population_size=len(population.individuals),
+                            mutation_probability=getattr(population, 'mutation_probability', 0.9),
+                            mutation_rate=getattr(population, 'mutation_rate', 0.55),
+                            sigma=getattr(population, 'sigma', 0.15),
+                            elite_fraction=getattr(population, 'elite_fraction', 0.1),
+                            tournament_size=getattr(population, 'tournament_size', 3),
+                            immigrant_fraction=getattr(population, 'immigrant_fraction', 0.0)
+                        )
+                        
+                        # Run agent analysis (blocking call but in background thread)
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            success, summary = loop.run_until_complete(
+                                self.coach_manager.analyze_and_apply_with_agent(
+                                    population=population,
+                                    fitness_config=fitness_config,
+                                    ga_config=ga_config
+                                )
+                            )
+                            
+                            if success:
+                                logger.info("✅ Coach agent completed: %s", summary)
+                                # Update status bar if callback available
+                                if self.status_callback:
+                                    action_count = summary.get('total_actions', 0)
+                                    self.status_callback(f"✅ Coach: {action_count} actions taken at gen {iteration}")
+                            else:
+                                logger.warning("⚠ Coach agent failed: %s", summary.get('error', 'Unknown'))
+                                if self.status_callback:
+                                    self.status_callback(f"⚠ Coach failed at gen {iteration}")
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        logger.exception("Error during coach analysis: %s", e)
+                        if self.status_callback:
+                            self.status_callback(f"❌ Coach error: {str(e)[:50]}")
+                
+                # Start coach thread
+                coach_thread = Thread(target=run_coach_analysis, daemon=True)
+                coach_thread.start()
+            
             # Update fitness evolution plot
             self.update_fitness_plot()
             

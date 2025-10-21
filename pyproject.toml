@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{include = "app"}, {include = "core"}, {include = "data"}, {include = "indicators"}, {include = "strategy"}, {include = "backtest"}, {include = "exec"}, {include = "config"}]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.14"
+python = ">=3.11,<3.14"
 httpx = "^0.27"
 pydantic = "^2.7"
 pydantic-settings = "^2.0"
@@ -23,9 +23,10 @@ rich = "^13.0"
 torch = "^2.8.0"
 pyyaml = "^6.0.3"
 fastparquet = "^2024.11.0"
-spectre = { git = "https://github.com/Heerozh/spectre.git" }
 tqdm = "^4.67.1"
-
+openai = "^1.54.0" 
+lmstudio = "^1.5.0"
+scipy = "^1.16.2"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
 ruff = "^0.4"

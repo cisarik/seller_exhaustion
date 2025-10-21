@@ -27,6 +27,8 @@ from backtest.coach_protocol import (
     CoachAnalysis, EvolutionState, load_coach_prompt
 )
 from backtest.llm_coach import GemmaCoachClient
+from backtest.coach_tools import CoachToolkit
+from backtest.coach_agent_executor import AgentExecutor
 from backtest.optimizer import Population
 from core.models import FitnessConfig, OptimizationConfig
 from core.coach_logging import coach_log_manager, debug_log_manager
@@ -543,6 +545,228 @@ class BlockingCoachManager:
         self.clear_coach_log()
         
         return True, summary
+    
+    async def analyze_and_apply_with_agent(
+        self,
+        population: Population,
+        fitness_config: FitnessConfig,
+        ga_config: OptimizationConfig,
+        current_data=None  # Unused, kept for API compatibility
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Full agent-based analysis workflow with tool-calling agent.
+        
+        This is the AGENT MODE alternative to analyze_and_apply_blocking.
+        Instead of single-shot JSON response, agent makes multiple tool calls to:
+        - Analyze population
+        - Diagnose problems
+        - Take corrective actions (mutate, adjust params, inject diversity)
+        - Finish when done
+        
+        Workflow:
+        1. FREEZE population (create session)
+        2. CREATE toolkit and agent
+        3. RUN agent analysis (agent makes tool calls)
+        4. RETURN to caller (GA resumes with modified population)
+        
+        Args:
+            population: Population to analyze and modify
+            fitness_config: Fitness configuration  
+            ga_config: GA configuration
+            current_data: Unused (kept for API compatibility)
+        
+        Returns:
+            (success, summary_dict)
+        """
+        from config.settings import settings
+        
+        coach_log_manager.append(
+            f"[AGENT  ] 🤖 Starting agent-based analysis at Gen {population.generation}"
+        )
+        
+        # Step 1: FREEZE population
+        session = await self.create_analysis_session(
+            population, fitness_config, ga_config
+        )
+        
+        # Step 2: Initialize client if needed
+        await self._initialize_client()
+        
+        # Step 3: Create toolkit for agent
+        toolkit = CoachToolkit(
+            population=population,
+            session=session,
+            fitness_config=fitness_config,
+            ga_config=ga_config,
+            mutation_manager=self.mutation_manager
+        )
+        
+        # Step 4: Create agent executor
+        max_iterations = getattr(settings, 'coach_agent_max_iterations', 10)
+        agent = AgentExecutor(
+            llm_client=self.coach_client,
+            toolkit=toolkit,
+            max_iterations=max_iterations,
+            verbose=self.verbose
+        )
+        
+        coach_log_manager.append(
+            f"[AGENT  ] 🔧 Agent created with max_iterations={max_iterations}"
+        )
+        
+        # Step 5: Build initial observation
+        observation = self._build_agent_observation(session, fitness_config, ga_config)
+        
+        # Step 6: RUN agent analysis
+        coach_log_manager.append(f"[AGENT  ] 🚀 Running agent analysis...")
+        
+        try:
+            result = await agent.run_analysis(observation)
+            
+            if result.get("success"):
+                coach_log_manager.append(
+                    f"[AGENT  ] ✅ Agent completed: "
+                    f"{result['iterations']} iterations, "
+                    f"{result['tool_calls_count']} tool calls"
+                )
+                
+                # Log actions taken
+                if toolkit.actions_log:
+                    coach_log_manager.append(
+                        f"[AGENT  ] 📋 Actions taken: {len(toolkit.actions_log)}"
+                    )
+                    for i, action in enumerate(toolkit.actions_log[:5], 1):
+                        action_name = action.get("action", "unknown")
+                        coach_log_manager.append(f"[AGENT  ]   {i}. {action_name}")
+                    
+                    if len(toolkit.actions_log) > 5:
+                        coach_log_manager.append(
+                            f"[AGENT  ]   ... and {len(toolkit.actions_log) - 5} more actions"
+                        )
+                else:
+                    coach_log_manager.append("[AGENT  ] ⚠️  No actions logged")
+                
+                # Store toolkit for later inspection
+                self.last_toolkit = toolkit
+                
+                # Step 7: Optionally reload model to clear context
+                if self.auto_reload_model:
+                    coach_log_manager.append(
+                        f"[AGENT  ] 🔄 Reloading model to clear context window"
+                    )
+                    try:
+                        await self.coach_client.reload_model()
+                        coach_log_manager.append(f"[AGENT  ] ✅ Model reloaded")
+                    except Exception as e:
+                        logger.warning(f"Failed to reload model: {e}")
+                
+                coach_log_manager.append(
+                    f"[AGENT  ] ✅ Agent workflow complete - "
+                    f"GA will resume with modified population"
+                )
+                
+                # Clear coach log
+                self.clear_coach_log()
+                
+                return True, {
+                    "total_actions": len(toolkit.actions_log),
+                    "iterations": result['iterations'],
+                    "tool_calls": result['tool_calls_count'],
+                    "actions_log": toolkit.actions_log
+                }
+            else:
+                error = result.get("error", "Unknown error")
+                coach_log_manager.append(f"[AGENT  ] ❌ Agent failed: {error}")
+                return False, {"error": error}
+                
+        except Exception as e:
+            logger.exception("Agent analysis failed: %s", e)
+            coach_log_manager.append(f"[AGENT  ] ❌ Exception: {str(e)}")
+            debug_log_manager.append(f"❌ Agent exception: {e}")
+            return False, {"error": str(e)}
+    
+    def _build_agent_observation(self, session: CoachAnalysisSession, fitness_config: FitnessConfig, ga_config: OptimizationConfig) -> str:
+        """
+        Build initial observation message for agent.
+        
+        Args:
+            session: Frozen session with population data
+            fitness_config: Current fitness configuration
+            ga_config: Current GA configuration
+        
+        Returns:
+            Formatted observation message for agent
+        """
+        pop_metrics = session.get_population_metrics()
+        
+        obs = f"""POPULATION STATE - Generation {session.generation}
+
+OVERVIEW:
+- Population size: {session.population_size}
+- Mean fitness: {pop_metrics['mean_fitness']:.4f}
+- Std fitness: {pop_metrics['std_fitness']:.4f}
+- Diversity: {pop_metrics['diversity']:.2f} ({self._interpret_diversity_level(pop_metrics['diversity'])})
+
+GATE COMPLIANCE:
+- Min trades required: {fitness_config.min_trades}
+- Individuals below min_trades: {pop_metrics.get('below_min_trades_count', 0)} ({pop_metrics.get('below_min_trades_pct', 0):.1f}%)
+
+TOP PERFORMERS:
+"""
+        
+        # Add top 3 individuals
+        sorted_inds = sorted(session.individuals_snapshot, key=lambda x: x.fitness, reverse=True)
+        for i, ind in enumerate(sorted_inds[:3], 1):
+            obs += f"""  {i}. Individual #{ind.id}: fitness={ind.fitness:.4f}
+     Metrics: trades={ind.metrics.get('n', 0)}, win_rate={ind.metrics.get('win_rate', 0):.2f}, avg_R={ind.metrics.get('avg_R', 0):.2f}
+     Key params: {str(ind.parameters)[:80]}
+
+"""
+        
+        obs += "\nBOTTOM PERFORMERS:\n"
+        for i, ind in enumerate(sorted_inds[-3:], 1):
+            obs += f"""  {i}. Individual #{ind.id}: fitness={ind.fitness:.4f}
+     Metrics: trades={ind.metrics.get('n', 0)}, win_rate={ind.metrics.get('win_rate', 0):.2f}
+     Key params: {str(ind.parameters)[:80]}
+
+"""
+        
+        obs += f"""
+GA CONFIGURATION:
+- Mutation rate: {ga_config.mutation_rate}
+- Elite fraction: {ga_config.elite_fraction}
+- Tournament size: {ga_config.tournament_size}
+- Immigrant fraction: {ga_config.immigrant_fraction}
+
+Your task: Analyze this population state and take actions to improve evolution.
+Start by calling analyze_population() to get detailed statistics.
+"""
+        
+        return obs
+    
+    def _interpret_diversity_level(self, diversity: float) -> str:
+        """Interpret diversity metric."""
+        if diversity < 0.1:
+            return "VERY LOW - converged"
+        elif diversity < 0.2:
+            return "LOW"
+        elif diversity < 0.4:
+            return "MODERATE"
+        else:
+            return "HIGH"
+    
+    async def _initialize_client(self):
+        """Initialize coach client if not already done."""
+        if not self.coach_client:
+            self.coach_client = GemmaCoachClient(
+                base_url=self.base_url,
+                model=self.model,
+                prompt_version="agent01",  # Use agent prompt
+                system_prompt="agent01",
+                verbose=self.verbose,
+                debug_payloads=self.debug_payloads
+            )
+            debug_log_manager.append(f"✓ 🔌 LM Studio agent client initialized")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get coach manager statistics."""

@@ -393,10 +393,11 @@ class SettingsDialog(QDialog):
         
         # System Prompt Selection
         self.coach_system_prompt = QComboBox()
+        self.coach_system_prompt.addItem("🤖 Agent Mode (agent01)", "agent01")
         self.coach_system_prompt.addItem("blocking_coach_v1", "blocking_coach_v1")
         self.coach_system_prompt.addItem("async_coach_v1", "async_coach_v1")
-        self.coach_system_prompt.setCurrentIndex(0)  # Default to blocking_coach_v1
-        self.coach_system_prompt.setToolTip("Select the system prompt version for the coach")
+        self.coach_system_prompt.setCurrentIndex(0)  # Default to agent01
+        self.coach_system_prompt.setToolTip("Select the system prompt version for the coach\nagent01 = Full agent with tool-calling capabilities")
         coach_layout.addRow("System Prompt:", self.coach_system_prompt)
         
         # Coach Analysis Interval
@@ -459,6 +460,18 @@ class SettingsDialog(QDialog):
         )
         coach_layout.addRow("LLM Response Timeout:", self.coach_response_timeout)
         
+        # Agent Max Iterations
+        self.coach_agent_max_iterations = QSpinBox()
+        self.coach_agent_max_iterations.setRange(1, 20)
+        self.coach_agent_max_iterations.setValue(10)
+        self.coach_agent_max_iterations.setSuffix(" iterations")
+        self.coach_agent_max_iterations.setToolTip(
+            "Maximum tool calls allowed for agent per analysis session\n"
+            "Typical: 5-7 tool calls (3-5 iterations)\n"
+            "Agent will diagnose problems and take corrective actions"
+        )
+        coach_layout.addRow("Agent Max Iterations:", self.coach_agent_max_iterations)
+        
         coach_group.setLayout(coach_layout)
         layout.addWidget(coach_group)
         
@@ -493,12 +506,13 @@ class SettingsDialog(QDialog):
         
         # Info
         coach_info = QLabel(
-            "💡 Evolution Coach:\n"
-            "- Gemma 3 LLM analyzes GA evolution and recommends parameter changes\n"
-            "- First analysis triggers at specified generation\n"
-            "- Subsequent analyses trigger after model reload (when recommendations applied)\n"
-            "- Model reload clears context window for fresh analysis\n"
-            "- Logs are trimmed to last N generations to manage context size"
+            "💡 Evolution Coach Agent:\n"
+            "- AI agent using tool-calling LLM (Gemma 3 via LM Studio)\n"
+            "- Analyzes population state and diagnoses problems\n"
+            "- Takes direct actions: mutate individuals, adjust parameters, inject diversity\n"
+            "- Agent mode (agent01): Full autonomy with 27 tools available\n"
+            "- Analyzes every N generations (e.g., gen 10, 20, 30...)\n"
+            "- Typical session: 5-7 tool calls in 3-5 iterations (30-90 seconds)"
         )
         coach_info.setWordWrap(True)
         coach_info.setProperty("variant", "secondary")
@@ -509,7 +523,7 @@ class SettingsDialog(QDialog):
     
     def reset_coach_params(self):
         """Reset Evolution Coach parameters to defaults."""
-        idx = self.coach_system_prompt.findData("blocking_coach_v1")
+        idx = self.coach_system_prompt.findData("agent01")
         if idx >= 0:
             self.coach_system_prompt.setCurrentIndex(idx)
         self.coach_interval.setValue(10)
@@ -519,6 +533,7 @@ class SettingsDialog(QDialog):
         self.coach_context_length.setValue(5000)
         self.coach_gpu.setValue(0.6)
         self.coach_response_timeout.setValue(3600)  # 1 hour default
+        self.coach_agent_max_iterations.setValue(10)
         self.cpu_workers.setValue(7)
         self.adam_epsilon_stability_coach.setValue(1e-8)
     
@@ -565,13 +580,14 @@ class SettingsDialog(QDialog):
             idx = self.coach_system_prompt.findData(settings.coach_system_prompt)
             if idx >= 0:
                 self.coach_system_prompt.setCurrentIndex(idx)
-        self.coach_interval.setValue(getattr(settings, 'coach_analysis_interval', 10))
-        self.coach_pop_window.setValue(getattr(settings, 'coach_population_window', 10))
-        self.coach_max_log_gens.setValue(settings.coach_max_log_generations)
-        self.coach_auto_reload.setChecked(settings.coach_auto_reload_model)
-        self.coach_context_length.setValue(settings.coach_context_length)
-        self.coach_gpu.setValue(settings.coach_gpu)
-        self.coach_response_timeout.setValue(getattr(settings, 'coach_response_timeout', 3600))
+        self.coach_interval.setValue(int(getattr(settings, 'coach_analysis_interval', 10)))
+        self.coach_pop_window.setValue(int(getattr(settings, 'coach_population_window', 10)))
+        self.coach_max_log_gens.setValue(int(settings.coach_max_log_generations))
+        self.coach_auto_reload.setChecked(bool(settings.coach_auto_reload_model))
+        self.coach_context_length.setValue(int(settings.coach_context_length))
+        self.coach_gpu.setValue(float(settings.coach_gpu))
+        self.coach_response_timeout.setValue(int(getattr(settings, 'coach_response_timeout', 3600)))
+        self.coach_agent_max_iterations.setValue(int(getattr(settings, 'coach_agent_max_iterations', 10)))
         
         # CPU Workers and ADAM epsilon stability
         self.cpu_workers.setValue(getattr(settings, 'cpu_workers', 7))
@@ -630,6 +646,7 @@ class SettingsDialog(QDialog):
                 'coach_context_length': self.coach_context_length.value(),
                 'coach_gpu': self.coach_gpu.value(),
                 'coach_response_timeout': self.coach_response_timeout.value(),
+                'coach_agent_max_iterations': self.coach_agent_max_iterations.value(),
                 
                 # CPU Workers
                 'cpu_workers': self.cpu_workers.value(),

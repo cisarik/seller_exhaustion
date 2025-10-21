@@ -25,7 +25,6 @@ from backtest.coach_protocol import (
     CoachAnalysis, CoachRecommendation, RecommendationCategory,
     EvolutionState, load_coach_prompt
 )
-from core.coach_logging import coach_log_manager, debug_log_manager
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +87,10 @@ class GemmaCoachClient:
         prompt_key = system_prompt if system_prompt else prompt_version
         self.system_prompt = load_coach_prompt(prompt_key)
         # Log to debug (not user-facing coach log) - use startup style
-        debug_log_manager.append(f"✓ 📋 Loaded coach prompt: {prompt_key}")
+        logger.debug(f"✓ 📋 Loaded coach prompt: {prompt_key}")
         if self.debug_payloads:
             logger.info("GemmaCoachClient debug payload logging ENABLED (full LLM traffic will be logged)")
-            debug_log_manager.append("✓ 🧪 GemmaCoachClient payload logging enabled")
+            logger.debug("✓ 🧪 GemmaCoachClient payload logging enabled")
         
         # Track if model is loaded
         self._model_loaded = False
@@ -206,8 +205,7 @@ class GemmaCoachClient:
             return None
     
     def _build_session_message(self, session_dict: dict, raw_logs: Optional[List[str]] = None) -> str:
-        """Build user message from session data."""
-        import json
+        """Build compact user message from session data with actionable insights."""
         
         # Start with session overview
         message = f"""You are analyzing a frozen population state for the Evolution Coach.
@@ -225,22 +223,115 @@ POPULATION METRICS:
         message += f"- Diversity: {metrics.get('diversity', 0):.2f} (0=homogeneous, 1=diverse)\n"
         message += f"- Mean Trades: {metrics.get('mean_trades', 0):.1f} ± {metrics.get('std_trades', 0):.1f}\n"
         
-        # Include full population data
-        message += f"\nPOPULATION DATA (all {len(session_dict.get('individuals', []))} individuals):\n"
-        individuals = session_dict.get('individuals', [])[:50]  # Limit for token budget
+        # CRISIS DETECTION: Highlight if most individuals are failing
+        individuals = session_dict.get('individuals', [])
+        failing_count = sum(1 for ind in individuals if ind.get('fitness', 0) == 0.0)
+        failing_pct = (failing_count / len(individuals) * 100) if individuals else 0
+        
+        if failing_pct >= 50:
+            message += f"\n⚠️ CRISIS: {failing_count}/{len(individuals)} ({failing_pct:.0f}%) have ZERO fitness → parameters too restrictive (vol_z/tr_z too high).\n"
+        
+        # SUCCESS vs FAILURE COMPARISON (compact)
+        successful = [ind for ind in individuals if ind.get('fitness', 0) > 0]
+        failed = [ind for ind in individuals if ind.get('fitness', 0) == 0]
+        
+        if successful and failed:
+            message += f"\nSUCCESS vs FAILURE: {len(successful)} working, {len(failed)} failing\n"
+            
+            # Compare key parameters that control signal generation (compact)
+            signal_params = ['vol_z', 'tr_z', 'cloc_min', 'ema_fast', 'ema_slow']
+            
+            for param in signal_params:
+                success_values = [ind['parameters'].get(param) for ind in successful if param in ind.get('parameters', {})]
+                failed_values = [ind['parameters'].get(param) for ind in failed if param in ind.get('parameters', {})]
+                
+                if success_values and failed_values:
+                    success_avg = sum(success_values) / len(success_values)
+                    failed_avg = sum(failed_values) / len(failed_values)
+                    diff = success_avg - failed_avg
+                    
+                    message += f"  {param}: success={success_avg:.2f} fail={failed_avg:.2f} (diff={diff:+.2f})\n"
+        
+        # COMPACT POPULATION DATA (reuse format from coach_session.py)
+        message += f"\nPOPULATION DATA (all {len(individuals)} individuals):\n\n"
+        
         for ind in individuals:
-            message += f"\nIndividual #{ind['id']}:\n"
-            message += f"  Fitness: {ind.get('fitness', 0):.4f}\n"
-            message += f"  Metrics: {json.dumps(ind.get('metrics', {}), indent=2)}\n"
-            message += f"  Parameters (sample): {json.dumps({k: ind['parameters'].get(k) for k in list(ind['parameters'].keys())[:5]}, indent=2)}\n"
+            ind_id = ind.get('id', 0)
+            fitness = ind.get('fitness', 0)
+            ind_metrics = ind.get('metrics', {})
+            params = ind.get('parameters', {})
+            
+            # Metrics line (compact)
+            n = ind_metrics.get('n', '--')
+            wr = ind_metrics.get('win_rate', 0.0)
+            avgR = ind_metrics.get('avg_R', 0.0)
+            pnl = ind_metrics.get('total_pnl', 0.0)
+            
+            message += f"[IND {ind_id:2d}] fit={fitness:.4f} | n={n:>3} | wr={wr:>5.1%} | avgR={avgR:>5.2f} | pnl={pnl:>6.3f}\n"
+            
+            # Parameters (compact, all critical params)
+            message += f"    SELLER: ema_f={params.get('ema_fast', 0):3d} ema_s={params.get('ema_slow', 0):3d} z_win={params.get('z_window', 0):3d} atr_win={params.get('atr_window', 0):3d}\n"
+            message += f"    THRESH: vol_z={params.get('vol_z', 0.0):.2f} tr_z={params.get('tr_z', 0.0):.2f} cloc_min={params.get('cloc_min', 0.0):.2f}\n"
+            message += f"    EXIT: fib_lookback={params.get('fib_swing_lookback', 0):3d} fib_lookahead={params.get('fib_swing_lookahead', 0):2d} fib_target={params.get('fib_target_level', 0.0):.3f}\n"
+            message += f"    COSTS: fee_bp={params.get('fee_bp', 0.0):.1f} slippage_bp={params.get('slippage_bp', 0.0):.1f} max_hold={params.get('max_hold', 0):3d}\n"
+            
+            # Exit toggles
+            toggles = []
+            if params.get('use_fib_exits', False): toggles.append('fib')
+            if params.get('use_stop_loss', False): toggles.append('stop')
+            if params.get('use_traditional_tp', False): toggles.append('tp')
+            if params.get('use_time_exit', False): toggles.append('time')
+            message += f"    TOGGLES: {' '.join(toggles) if toggles else 'none'}\n\n"
         
-        if len(individuals) < len(session_dict.get('individuals', [])):
-            message += f"\n... and {len(session_dict.get('individuals', [])) - len(individuals)} more individuals\n"
+        # Add structured generation history from agent_feed
+        # Always show last N generations (e.g., 10) regardless of when coach was called
+        import re
+        from core.agent_feed import agent_feed
         
-        # Add recent logs
-        if raw_logs:
-            message += f"\n\nRECENT LOG HISTORY ({len(raw_logs)} lines):\n"
-            message += "\n".join(raw_logs[-50:])  # Last 50 lines
+        # Determine how many generations to show
+        # Default to 10 generations (configurable via settings)
+        from config.settings import settings
+        interval = getattr(settings, 'coach_population_window', 10)
+        
+        # Get generation records from agent_feed
+        recent_gens = agent_feed.get_generations(last_n=interval)
+        
+        if recent_gens:
+            message += f"\nLAST {len(recent_gens)} GENERATIONS:\n\n"
+            
+            # Header row
+            message += f"{'Gen':>4} | {'Best Fit':>8} | {'Mean Fit':>8} | {'Diversity':>9} | {'Trades':>6}\n"
+            message += "-" * 60 + "\n"
+            
+            # Generation rows
+            for gen_record in recent_gens:
+                message += (
+                    f"{gen_record.generation:4d} | "
+                    f"{gen_record.best_fitness:8.4f} | "
+                    f"{gen_record.mean_fitness:8.4f} | "
+                    f"{gen_record.diversity:9.4f} | "
+                    f"{gen_record.best_metrics.get('n', 0):6d}\n"
+                )
+            
+            # Trend analysis (compact diagnosis)
+            if len(recent_gens) >= 2:
+                fitness_improvements = [
+                    recent_gens[i].best_fitness - recent_gens[i-1].best_fitness 
+                    for i in range(1, len(recent_gens))
+                ]
+                avg_improvement = sum(fitness_improvements) / len(fitness_improvements)
+                
+                message += "\n"
+                if abs(avg_improvement) < 0.001:
+                    message += f"⚠️ STAGNATION: avg improvement = {avg_improvement:.5f}/gen (nearly zero)\n"
+                elif avg_improvement < 0:
+                    message += f"⚠️ REGRESSION: fitness declining {avg_improvement:.4f}/gen\n"
+                else:
+                    message += f"✓ IMPROVING: avg improvement = {avg_improvement:.4f}/gen\n"
+        elif raw_logs:
+            # Fallback to raw logs if agent_feed is empty
+            message += f"\nRECENT LOG HISTORY ({len(raw_logs)} lines):\n"
+            message += "\n".join(raw_logs)
         
         message += "\n\nProvide recommendations in JSON format."
         
@@ -272,12 +363,12 @@ POPULATION METRICS:
                     self._model_loaded = False
                     return False
             else:
-                coach_log_manager.append(f"[LMS    ] ⚠️  Failed to check model status")
+                print(f"[LMS    ] ⚠️  Failed to check model status")
                 return False
         
         except Exception as e:
             logger.exception("Error checking model status")
-            coach_log_manager.append(f"[LMS    ] ⚠️  Error checking model: {e}")
+            print(f"[LMS    ] ⚠️  Error checking model: {e}")
             return False
     
     async def load_model(self):
@@ -285,7 +376,7 @@ POPULATION METRICS:
         # First check if model is already loaded
         already_loaded = await self.check_model_loaded()
         if already_loaded:
-            coach_log_manager.append(f"[LMS    ] ✅ Model already loaded")
+            print(f"[LMS    ] ✅ Model already loaded")
             return
         
         try:
@@ -303,21 +394,21 @@ POPULATION METRICS:
             
             if result.returncode == 0:
                 self._model_loaded = True
-                coach_log_manager.append(f"[LMS    ] ✅ Model loaded successfully")
+                print(f"[LMS    ] ✅ Model loaded successfully")
             else:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                coach_log_manager.append(f"[LMS    ] ❌ Failed to load model: {error_msg}")
+                print(f"[LMS    ] ❌ Failed to load model: {error_msg}")
                 raise RuntimeError(f"lms load failed: {error_msg}")
         
         except subprocess.TimeoutExpired:
-            coach_log_manager.append(f"[LMS    ] ❌ Model loading timed out (120s)")
+            print(f"[LMS    ] ❌ Model loading timed out (120s)")
             raise RuntimeError("Model loading timed out")
         except FileNotFoundError:
-            coach_log_manager.append(f"[LMS    ] ❌ 'lms' command not found - is LM Studio installed?")
+            print(f"[LMS    ] ❌ 'lms' command not found - is LM Studio installed?")
             raise RuntimeError("'lms' command not found. Make sure LM Studio CLI is installed and in PATH.")
         except Exception as e:
             logger.exception("Model loading error")
-            coach_log_manager.append(f"[LMS    ] ❌ Error: {e}")
+            print(f"[LMS    ] ❌ Error: {e}")
             raise
     
     async def unload_model(self):
@@ -345,18 +436,44 @@ POPULATION METRICS:
             
             if result.returncode == 0:
                 self._model_loaded = False
-                coach_log_manager.append(f"[LMS    ] ✅ Model unloaded successfully")
+                print(f"[LMS    ] ✅ Model unloaded successfully")
             else:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                coach_log_manager.append(f"[LMS    ] ⚠️  Unload error: {error_msg}")
+                print(f"[LMS    ] ⚠️  Unload error: {error_msg}")
                 # Still mark as unloaded
                 self._model_loaded = False
         
         except Exception as e:
             logger.exception("Model unloading error")
-            coach_log_manager.append(f"[LMS    ] ⚠️  Error: {e}")
+            print(f"[LMS    ] ⚠️  Error: {e}")
             # Still mark as unloaded
             self._model_loaded = False
+    
+    async def reload_model(self):
+        """
+        Reload model to clear context window.
+        
+        Workflow:
+        1. Unload current model (clears context)
+        2. Load model fresh (new context window)
+        
+        This is useful after coach analysis to prevent context overflow
+        on subsequent analyses.
+        """
+        if self.verbose:
+            print(f"[LMS    ] 🔄 Reloading model to clear context...")
+        
+        # Unload first
+        await self.unload_model()
+        
+        # Small delay to ensure unload completes
+        await asyncio.sleep(1)
+        
+        # Load fresh
+        await self.load_model()
+        
+        if self.verbose:
+            print(f"[LMS    ] ✅ Model reloaded with fresh context")
     
     async def _call_llm(self, user_message: str) -> Optional[str]:
         """
@@ -377,12 +494,12 @@ POPULATION METRICS:
                 logger.info("-" * 80)
                 logger.info("USER MESSAGE (%s chars):\n%s", len(user_message), user_message)
                 logger.info("=" * 80)
-                debug_log_manager.append(f"🧪 LLM request: system={len(self.system_prompt)} chars, user={len(user_message)} chars")
+                logger.debug(f"🧪 LLM request: system={len(self.system_prompt)} chars, user={len(user_message)} chars")
             
             # Ensure model is loaded
             await self.load_model()
             
-            coach_log_manager.append(f"[COACH  ] 📤 Sending {len(user_message)} chars to LLM")
+            print(f"[COACH  ] 📤 Sending {len(user_message)} chars to LLM")
             
             # Get LM Studio client (singleton - only created once)
             # IMPORTANT: SDK's get_default_client() can only be called ONCE
@@ -426,21 +543,21 @@ POPULATION METRICS:
                 # Extract text content
                 response_text = response.content
                 
-                coach_log_manager.append(f"[COACH  ] 📥 Received response from LLM ({len(response_text or '') or 0} chars)")
+                print(f"[COACH  ] 📥 Received response from LLM ({len(response_text or '') or 0} chars)")
                 if self.debug_payloads:
                     logger.info("=" * 80)
                     logger.info("LLM RESPONSE (Full Payload)")
                     logger.info("=" * 80)
                     logger.info("RESPONSE TEXT (%s chars):\n%s", len(response_text or ""), response_text)
                     logger.info("=" * 80)
-                    debug_log_manager.append(f"🧪 LLM response size={len(response_text or '')} chars")
+                    logger.debug(f"🧪 LLM response size={len(response_text or '')} chars")
                 
                 return response_text
             
             except asyncio.TimeoutError:
                 # NEW: Handle timeout specifically with detailed logging
-                coach_log_manager.append(f"[COACH  ] ⏱️  LLM timeout after {self.timeout}s")
-                coach_log_manager.append(f"[COACH  ] → Check if LM Studio is responsive: lms ps")
+                print(f"[COACH  ] ⏱️  LLM timeout after {self.timeout}s")
+                print(f"[COACH  ] → Check if LM Studio is responsive: lms ps")
                 raise TimeoutError(
                     f"LLM response timeout after {self.timeout}s. "
                     f"Check if LM Studio server is running and responsive."
@@ -453,7 +570,7 @@ POPULATION METRICS:
         
         except Exception as e:
             logger.exception("LLM call error")
-            coach_log_manager.append(f"[COACH  ] ❌ LLM error: {type(e).__name__}: {str(e)[:80]}")
+            print(f"[COACH  ] ❌ LLM error: {type(e).__name__}: {str(e)[:80]}")
             return None
     
     def _build_user_message(
@@ -515,7 +632,7 @@ GA:
         """
         # NEW: Validate response is not empty
         if not response_text or not response_text.strip():
-            coach_log_manager.append(f"[COACH  ] ❌ Empty response from LLM")
+            print(f"[COACH  ] ❌ Empty response from LLM")
             return None
         
         # Try to extract JSON object from response
@@ -523,22 +640,30 @@ GA:
         
         if not json_str:
             # NEW: More detailed error logging
-            coach_log_manager.append(f"[COACH  ] ❌ No JSON found in response")
-            coach_log_manager.append(f"[COACH  ] Response start: {response_text[:100]}...")
+            print(f"[COACH  ] ❌ No JSON found in response")
+            print(f"[COACH  ] Response start: {response_text[:100]}...")
             if self.verbose:
                 logger.error(f"Full LLM response (no JSON found):\n{response_text}")
             return None
         
         try:
             # NEW: Log parsing attempt
-            coach_log_manager.append(f"[COACH  ] 🔍 Parsing JSON ({len(json_str)} chars)")
+            print(f"[COACH  ] 🔍 Parsing JSON ({len(json_str)} chars)")
             
             data = json.loads(json_str)
+            
+            # CRITICAL: Inject generation if not present in agent response
+            # Agent often forgets to include this field, but we have it from context
+            if 'generation' not in data:
+                data['generation'] = generation
+                if self.verbose:
+                    print(f"[COACH  ] 📝 Injected generation={generation} into response")
+            
             analysis = CoachAnalysis.from_dict(data)
             
             # NEW: Validate that analysis has meaningful content
             if not analysis.recommendations and not analysis.summary:
-                coach_log_manager.append(
+                print(
                     f"[COACH  ] ⚠️  Empty analysis (no recommendations, no summary)"
                 )
             
@@ -546,16 +671,16 @@ GA:
         
         except json.JSONDecodeError as e:
             # NEW: Detailed JSON error logging
-            coach_log_manager.append(f"[COACH  ] ❌ JSON parse error at position {e.pos}: {e.msg}")
-            coach_log_manager.append(f"[COACH  ] Invalid JSON: {json_str[:80]}...")
+            print(f"[COACH  ] ❌ JSON parse error at position {e.pos}: {e.msg}")
+            print(f"[COACH  ] Invalid JSON: {json_str[:80]}...")
             if self.verbose:
                 logger.error(f"JSON parse error: {e}\nFull JSON:\n{json_str}")
             return None
         
         except Exception as e:
             # NEW: Catch CoachAnalysis validation errors
-            coach_log_manager.append(f"[COACH  ] ❌ Validation error: {type(e).__name__}")
-            coach_log_manager.append(f"[COACH  ] Details: {str(e)[:100]}")
+            print(f"[COACH  ] ❌ Validation error: {type(e).__name__}")
+            print(f"[COACH  ] Details: {str(e)[:100]}")
             if self.verbose:
                 logger.exception(f"Coach analysis validation error")
             return None

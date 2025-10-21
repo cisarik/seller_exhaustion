@@ -20,7 +20,6 @@ from backtest.optimizer import Individual
 from backtest.engine import run_backtest
 import config.settings as config_settings
 from core.logging_utils import get_logger
-from core.coach_logging import coach_log_manager, debug_log_manager
 import os
 
 # New modular optimizer system
@@ -389,23 +388,23 @@ class StatsPanel(QWidget):
                         now - last_ts,
                     )
                 else:
-                    coach_log_manager.append(
+                    print(
                         f"OPT init name={self.optimizer.get_optimizer_name()} workers={worker_count}"
                     )
                     # Optimizer hyperparameters
                     hp = getattr(self.optimizer, 'config', {}) or {}
                     if isinstance(hp, dict) and hp:
-                        coach_log_manager.append(f"OPT hp {self._format_dict_compact(hp, float_dp=3)}")
+                        print(f"OPT hp {self._format_dict_compact(hp, float_dp=3)}")
                     # Population status
                     pop = getattr(self.optimizer, 'population', None)
                     if pop is not None:
-                        coach_log_manager.append(
+                        print(
                             f"POP status size={getattr(pop, 'size', '--')} gen={getattr(pop, 'generation', '--')}"
                         )
-                    coach_log_manager.append(
+                    print(
                         f"SEED seller[{self._compact_seller_params(seller_params)}]"
                     )
-                    coach_log_manager.append(
+                    print(
                         f"SEED backtest[{self._compact_backtest_params(backtest_params)}]"
                     )
                     # Full seed dumps for agent completeness
@@ -414,8 +413,8 @@ class StatsPanel(QWidget):
                     full_backtest = (
                         backtest_params.model_dump() if hasattr(backtest_params, 'model_dump') else dict(backtest_params)
                     )
-                    coach_log_manager.append(f"SEED SellerParams: {self._format_dict_compact(full_seller)}")
-                    coach_log_manager.append(f"SEED BacktestParams: {self._format_dict_compact(full_backtest)}")
+                    print(f"SEED SellerParams: {self._format_dict_compact(full_seller)}")
+                    print(f"SEED BacktestParams: {self._format_dict_compact(full_backtest)}")
                     self._last_init_signature = signature
                     self._last_init_signature_ts = now
                 self._logged_optimizer_ids.add(optimizer_id)
@@ -865,7 +864,7 @@ class StatsPanel(QWidget):
                     workers = self.optimizer.get_worker_count()
                 except Exception:
                     workers = "unknown"
-                coach_log_manager.append(
+                print(
                     f"STEP begin workers={workers} preset={getattr(fitness_config, 'preset', '--')}"
                 )
                 
@@ -926,7 +925,7 @@ class StatsPanel(QWidget):
                         self._log_metrics_snapshot(backtest_result.get('metrics', {}), prefix="  ")
                         self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
                         metrics_payload = backtest_result.get('metrics') if backtest_result else {}
-                        coach_log_manager.append(
+                        print(
                             "STEP best "
                             f"fitness={best_fitness:.4f} "
                             f"{self._compact_metrics(metrics_payload)}"
@@ -934,7 +933,7 @@ class StatsPanel(QWidget):
                     
                 except Exception as e:
                     logger.exception("Error running backtest for visualization: %s", e)
-                    debug_log_manager.append(f"❌ Backtest error: {e}")
+                    logger.debug(f"❌ Backtest error: {e}")
                 
                 # Store results for main thread to process
                 self.temp_backtest_result = backtest_result
@@ -944,12 +943,12 @@ class StatsPanel(QWidget):
                 
                 # Emit progress completion
                 self.progress_updated.emit(1, 1, "✓ Optimization step complete")
-                coach_log_manager.append("STEP done")
+                print("STEP done")
                 
             except Exception as e:
                 logger.exception("Error during optimization step: %s", e)
                 self.progress_updated.emit(0, 1, f"❌ Error: {str(e)}")
-                debug_log_manager.append(f"❌ Optimization step error: {e}")
+                logger.debug(f"❌ Optimization step error: {e}")
             finally:
                 # Re-enable optimize button using thread-safe method
                 QMetaObject.invokeMethod(
@@ -1188,7 +1187,7 @@ class StatsPanel(QWidget):
             workers = self.optimizer.get_worker_count()
         except Exception:
             workers = "unknown"
-        coach_log_manager.append(
+        print(
             f"RUN start iters={n_iters} workers={workers}"
         )
         
@@ -1265,6 +1264,12 @@ class StatsPanel(QWidget):
                         fitness_config=fitness_config,
                         stop_flag=stop_check
                     )
+                    
+                    # CRITICAL: Record EVERY generation to agent_feed (not just when coach triggers)
+                    population = getattr(self.optimizer, 'population', None)
+                    if population and self.coach_manager:
+                        self.coach_manager.record_generation(population)
+                    
                     if result.additional_info:
                         population_stats = result.additional_info.get('population_stats')
                         if isinstance(population_stats, dict) and population_stats:
@@ -1339,7 +1344,7 @@ class StatsPanel(QWidget):
                             if self.coach_manager:
                                 self.coach_manager.add_log(result.iteration, stat_message)
                             else:
-                                coach_log_manager.append(stat_message)
+                                print(stat_message)
                     
                     # Extract results
                     current_best_fitness = result.fitness
@@ -1366,7 +1371,7 @@ class StatsPanel(QWidget):
                         if self.coach_manager:
                             self.coach_manager.add_log(gen + 1, best_line)
                         else:
-                            coach_log_manager.append(best_line)
+                            print(best_line)
                         # Include full param snapshot for best
                         if best_seller is not None:
                             from dataclasses import asdict as _asdict
@@ -1374,14 +1379,14 @@ class StatsPanel(QWidget):
                             if self.coach_manager:
                                 self.coach_manager.add_log(gen + 1, seller_line)
                             else:
-                                coach_log_manager.append(seller_line)
+                                print(seller_line)
                         if best_backtest is not None:
                             btp = best_backtest.model_dump() if hasattr(best_backtest, 'model_dump') else dict(best_backtest)
                             backtest_line = f"BEST backtest_params[{self._format_dict_compact(btp)}]"
                             if self.coach_manager:
                                 self.coach_manager.add_log(gen + 1, backtest_line)
                             else:
-                                coach_log_manager.append(backtest_line)
+                                print(backtest_line)
                         
                         # Run backtest for visualization using RAW data
                         logger.info("Running backtest with new best parameters...")
@@ -1390,7 +1395,7 @@ class StatsPanel(QWidget):
                             if self.raw_data is None:
                                 logger.warning("No raw data available, skipping visualization backtest")
                                 self.temp_backtest_result = None
-                                coach_log_manager.append("WARN no_raw_data")
+                                print("WARN no_raw_data")
                             else:
                                 # Rebuild features from raw OHLCV data with new parameters
                                 feats = build_features(self.raw_data, best_seller, self.current_tf)
@@ -1408,11 +1413,11 @@ class StatsPanel(QWidget):
                                 if self.coach_manager:
                                     self.coach_manager.add_log(gen + 1, backtest_metrics_line)
                                 else:
-                                    coach_log_manager.append(backtest_metrics_line)
+                                    print(backtest_metrics_line)
                             
                         except Exception as e:
                             logger.exception("Error running visualization backtest: %s", e)
-                            debug_log_manager.append(f"❌ Visualization backtest error: {e}")
+                            logger.debug(f"❌ Visualization backtest error: {e}")
                             self.temp_backtest_result = None
                     
                     # Update UI (from main thread)
@@ -1429,14 +1434,14 @@ class StatsPanel(QWidget):
                         logger.info("=" * 70)
                         logger.info("⏸️  PAUSING OPTIMIZATION FOR COACH ANALYSIS (Generation %s)", gen + 1)
                         logger.info("=" * 70)
-                        coach_log_manager.append(f"[COACH  ] ⏸️  Pausing for analysis at Gen {gen + 1}")
+                        print(f"[COACH  ] ⏸️  Pausing for analysis at Gen {gen + 1}")
                         
                         # Get current population
                         population = getattr(self.optimizer, 'population', None)
                         if population:
                             try:
                                 # Log complete population snapshot for coach context
-                                coach_log_manager.append(f"[COACH  ] 📸 Population snapshot (Gen {gen + 1}):")
+                                print(f"[COACH  ] 📸 Population snapshot (Gen {gen + 1}):")
                                 if hasattr(population, 'individuals') and population.individuals:
                                     for i, ind in enumerate(population.individuals):
                                         # Complete individual parameters dump
@@ -1450,15 +1455,15 @@ class StatsPanel(QWidget):
                                         pnl = metrics.get('total_pnl', 0.0)
                                         
                                         # Complete parameter dump for coach analysis
-                                        coach_log_manager.append(f"  [IND {i:2d}] fit={fitness:.4f} | n={trades:3} | wr={win_rate:5.1%} | avgR={avg_r:5.2f} | pnl={pnl:6.3f}")
+                                        print(f"  [IND {i:2d}] fit={fitness:.4f} | n={trades:3} | wr={win_rate:5.1%} | avgR={avg_r:5.2f} | pnl={pnl:6.3f}")
                                         
                                         # Seller parameters (strategy entry logic)
-                                        coach_log_manager.append(f"    SELLER: ema_f={seller_params.ema_fast:3d} ema_s={seller_params.ema_slow:3d} z_win={seller_params.z_window:3d} atr_win={seller_params.atr_window:3d}")
-                                        coach_log_manager.append(f"    THRESH: vol_z={seller_params.vol_z:.2f} tr_z={seller_params.tr_z:.2f} cloc_min={seller_params.cloc_min:.2f}")
+                                        print(f"    SELLER: ema_f={seller_params.ema_fast:3d} ema_s={seller_params.ema_slow:3d} z_win={seller_params.z_window:3d} atr_win={seller_params.atr_window:3d}")
+                                        print(f"    THRESH: vol_z={seller_params.vol_z:.2f} tr_z={seller_params.tr_z:.2f} cloc_min={seller_params.cloc_min:.2f}")
                                         
                                         # Backtest parameters (exit logic and costs)
-                                        coach_log_manager.append(f"    EXIT: fib_lookback={backtest_params.fib_swing_lookback:3d} fib_lookahead={backtest_params.fib_swing_lookahead:2d} fib_target={backtest_params.fib_target_level:.3f}")
-                                        coach_log_manager.append(f"    COSTS: fee_bp={backtest_params.fee_bp:.1f} slippage_bp={backtest_params.slippage_bp:.1f} max_hold={backtest_params.max_hold:3d}")
+                                        print(f"    EXIT: fib_lookback={backtest_params.fib_swing_lookback:3d} fib_lookahead={backtest_params.fib_swing_lookahead:2d} fib_target={backtest_params.fib_target_level:.3f}")
+                                        print(f"    COSTS: fee_bp={backtest_params.fee_bp:.1f} slippage_bp={backtest_params.slippage_bp:.1f} max_hold={backtest_params.max_hold:3d}")
                                         
                                         # Exit strategy toggles
                                         exit_toggles = []
@@ -1466,54 +1471,69 @@ class StatsPanel(QWidget):
                                         if backtest_params.use_stop_loss: exit_toggles.append("stop")
                                         if backtest_params.use_traditional_tp: exit_toggles.append("tp")
                                         if backtest_params.use_time_exit: exit_toggles.append("time")
-                                        coach_log_manager.append(f"    TOGGLES: {', '.join(exit_toggles) if exit_toggles else 'none'}")
+                                        print(f"    TOGGLES: {', '.join(exit_toggles) if exit_toggles else 'none'}")
                                         
-                                        coach_log_manager.append("")  # Empty line for readability
+                                        print("")  # Empty line for readability
                                     
                                     # Population summary line
                                     pop_size = len(population.individuals)
                                     avg_fitness = sum(ind.fitness for ind in population.individuals) / pop_size if pop_size > 0 else 0.0
                                     best_fitness = max((ind.fitness for ind in population.individuals), default=0.0)
                                     avg_trades = sum(ind.metrics.get('n', 0) for ind in population.individuals) / pop_size if pop_size > 0 else 0.0
-                                    coach_log_manager.append(
+                                    print(
                                         f"[COACH  ] Population stats: size={pop_size} avg_fitness={avg_fitness:.4f} "
                                         f"best_fitness={best_fitness:.4f} avg_trades={avg_trades:.1f}"
                                     )
                                 
-                                # Run blocking coach analysis with current fitness config
+                                # Run agent-based coach analysis
                                 _, _, fitness_config = self.get_current_params()
                                 
-                                # Call blocking analysis - this WAITS for LLM response
+                                # Get GA config from optimizer
+                                from core.models import OptimizationConfig
+                                ga_config = OptimizationConfig(
+                                    population_size=len(population.individuals),
+                                    mutation_probability=getattr(population, 'mutation_probability', 0.9),
+                                    mutation_rate=getattr(population, 'mutation_rate', 0.55),
+                                    sigma=getattr(population, 'sigma', 0.15),
+                                    elite_fraction=getattr(population, 'elite_fraction', 0.1),
+                                    tournament_size=getattr(population, 'tournament_size', 3),
+                                    immigrant_fraction=getattr(population, 'immigrant_fraction', 0.0)
+                                )
+                                
+                                # Use agent-based analysis (tool calls)
                                 success, summary = loop.run_until_complete(
-                                    self.coach_manager.analyze_and_apply_blocking(
+                                    self.coach_manager.analyze_and_apply_with_agent(
                                         population=population,
                                         fitness_config=fitness_config,
-                                        ga_config=None
+                                        ga_config=ga_config
                                     )
                                 )
                                 
                                 if success:
-                                    logger.info("✅ Coach applied %s mutations this generation", summary.get('total_mutations', 0))
-                                    coach_log_manager.append(f"[COACH  ] ✅ Applied {summary.get('total_mutations', 0)} recommendations")
+                                    # Agent returns 'total_actions'
+                                    action_count = summary.get('total_actions', 0)
+                                    logger.info("✅ Coach agent completed: %s actions", action_count)
+                                    print(f"[COACH  ] ✅ Agent took {action_count} actions")
                                 else:
-                                    logger.warning("⚠️  Coach analysis returned no mutations")
-                                    coach_log_manager.append(f"[COACH  ] ⚠️  No recommendations")
+                                    error_msg = summary.get('error', 'Unknown error')
+                                    logger.warning("⚠️  Coach agent failed: %s", error_msg)
+                                    print(f"[COACH  ] ⚠️  {error_msg}")
                             except Exception as e:
                                 logger.exception("Coach analysis error: %s", e)
-                                debug_log_manager.append(f"❌ Coach analysis failed: {e}")
-                                coach_log_manager.append(f"[COACH  ] ❌ Analysis error")
+                                logger.debug(f"❌ Coach analysis failed: {e}")
+                                print(f"[COACH  ] ❌ Analysis error")
                         else:
                             logger.warning("⚠️  No population available for coach analysis")
-                            coach_log_manager.append(f"[COACH  ] ⚠️  No population")
+                            print(f"[COACH  ] ⚠️  No population")
                         
                         logger.info("=" * 70)
                         logger.info("▶️  RESUMING OPTIMIZATION (Generation %s)", gen + 1)
                         logger.info("=" * 70)
-                        coach_log_manager.append(f"[COACH  ] ▶️  Resuming optimization")
+                        print(f"[COACH  ] ▶️  Resuming optimization")
                     
                 except Exception as e:
                     logger.exception("Error in generation %s: %s", gen + 1, e)
-                    debug_log_manager.append(f"❌ Generation {gen + 1} error: {e}")
+                    logger.debug(f"❌ Generation {gen + 1} error: {e}")
                     break
             
             # Final progress update
@@ -1548,7 +1568,7 @@ class StatsPanel(QWidget):
         except Exception as e:
             logger.exception("Error in multi-step optimization: %s", e)
             self.progress_updated.emit(0, n_gens, f"❌ Error: {str(e)}")
-            debug_log_manager.append(f"❌ Optimization run error: {e}")
+            logger.debug(f"❌ Optimization run error: {e}")
         
         finally:
             try:
@@ -1675,7 +1695,7 @@ class StatsPanel(QWidget):
         if self.is_optimizing:
             self.stop_requested = True
             logger.info("⏹ Stop requested... will finish current iteration and keep best parameters")
-            coach_log_manager.append("RUN stop_requested")
+            print("RUN stop_requested")
     
     @Slot(int, int, str)
     def _emit_progress_signal(self, current: int, total: int, message: str):

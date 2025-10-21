@@ -1,16 +1,21 @@
 """
-Evolution Coach Manager - Blocking Version
+Evolution Coach Manager - Agent Mode
 
-Implements BLOCKING optimization semantics:
-- Population is FROZEN during coach analysis
-- Coach analyzes exact population state (with all individual data)
-- Recommendations applied to SAME population state
-- Evolution resumes after mutations applied
+Implements agent-based Evolution Coach with tool calling:
+- Population is FROZEN during agent analysis
+- Agent gets FULL population snapshot with all individual data
+- Agent makes multiple tool calls to diagnose and take actions
+- Tools execute directly on population (mutations, GA params, fitness gates)
+- Evolution resumes after agent completes
 
-This replaces the non-blocking version to solve:
-1. Population drift (evolution continuing while coach analyzes)
-2. Stale recommendations (coach analyzed old state, applies to new state)
-3. Difficulty tracking mutations (population changed between analysis and application)
+Agent workflow:
+1. GA runs N generations
+2. Should analyze? YES → PAUSE optimization
+3. Create frozen session (population snapshot)
+4. Send full population data to agent (all parameters + metrics)
+5. Agent analyzes and takes actions via tools (analyze_population, mutate_individual, etc.)
+6. Agent calls finish_analysis() when done
+7. RESUME optimization from modified population
 """
 
 import asyncio
@@ -31,36 +36,37 @@ from backtest.coach_tools import CoachToolkit
 from backtest.coach_agent_executor import AgentExecutor
 from backtest.optimizer import Population
 from core.models import FitnessConfig, OptimizationConfig
-from core.coach_logging import coach_log_manager, debug_log_manager
+from core.agent_feed import agent_feed
 
 logger = logging.getLogger(__name__)
 
 
 class BlockingCoachManager:
     """
-    Manages Evolution Coach with BLOCKING semantics.
+    Manages Evolution Coach in agent mode with tool calling.
     
-    KEY DIFFERENCE from non-blocking:
-    - Optimization PAUSES during coach analysis
-    - Coach gets FULL population snapshot with all individual data
-    - Recommendations applied to SAME population state
-    - Can include direct individual mutations
+    Agent-based analysis:
+    - Optimization PAUSES during agent analysis
+    - Agent gets FULL population snapshot with all individual data  
+    - Agent makes multiple tool calls to diagnose and act
+    - Actions applied directly to population via tools
+    - Multi-step reasoning and iterative refinement
     
     Workflow:
     1. GA runs N generations
     2. Should analyze? YES → PAUSE optimization
     3. Create frozen session (population snapshot)
-    4. Send full population data to coach (all parameters + metrics)
-    5. Coach analyzes and recommends (may include mutations)
-    6. Apply recommendations (mutations to same frozen population)
-    7. RESUME optimization from modified population
+    4. Build observation from population state
+    5. Agent loop: observe → think → call tools → repeat
+    6. Agent finishes via finish_analysis() tool
+    7. RESUME optimization from agent-modified population
     """
     
     def __init__(
         self,
         base_url: str = "http://localhost:1234",
         model: Optional[str] = None,
-        prompt_version: str = "blocking_coach_v1",
+        prompt_version: str = "agent01",
         system_prompt: Optional[str] = None,
         analysis_interval: Optional[int] = None,
         max_log_generations: Optional[int] = None,
@@ -107,14 +113,12 @@ class BlockingCoachManager:
         self.verbose = verbose
         self.debug_payloads = getattr(settings, 'coach_debug_payloads', False)
         
-        # Log to debug log (not user-facing coach log) - use startup style
-        debug_log_manager.append(
-            f"✓ 🤖 Evolution Coach Manager initialized: "
-            f"interval={self.analysis_interval} gens, window={self.population_window} gens"
-        )
+        # Log initialization to console
+        print(f"✓ 🤖 Evolution Coach Manager initialized: "
+              f"interval={self.analysis_interval} gens, window={self.population_window} gens")
         if self.debug_payloads:
             logger.info("Evolution Coach debug payload logging ENABLED (full LLM traffic will be logged)")
-            debug_log_manager.append("✓ 🧪 Coach debug payload logging enabled")
+            print("✓ 🧪 Coach debug payload logging enabled")
         
         # State tracking
         self.coach_client: Optional[GemmaCoachClient] = None
@@ -153,23 +157,72 @@ class BlockingCoachManager:
         
         return should_trigger
     
+    def record_generation(self, population: Population, coach_triggered: bool = False, coach_recommendations: int = 0, mutations_applied: int = 0, ga_changes_applied: int = 0):
+        """
+        Record generation data to agent_feed.
+        
+        Args:
+            population: Current population
+            coach_triggered: Whether coach was triggered this generation
+            coach_recommendations: Number of coach recommendations
+            mutations_applied: Number of mutations applied
+            ga_changes_applied: Number of GA parameter changes
+        """
+        if not population.individuals:
+            return
+        
+        # Calculate population metrics
+        fitnesses = [ind.fitness for ind in population.individuals if ind.fitness is not None]
+        if not fitnesses:
+            return
+        
+        best_fitness = max(fitnesses)
+        mean_fitness = sum(fitnesses) / len(fitnesses)
+        worst_fitness = min(fitnesses)
+        
+        # Calculate diversity (std dev of fitness)
+        fitness_variance = sum((f - mean_fitness) ** 2 for f in fitnesses) / len(fitnesses)
+        diversity = fitness_variance ** 0.5
+        
+        # Get best individual
+        best_ind = max(population.individuals, key=lambda x: x.fitness if x.fitness is not None else float('-inf'))
+        
+        # Record to agent_feed
+        agent_feed.record_generation(
+            generation=population.generation,
+            population_size=len(population.individuals),
+            best_fitness=best_fitness,
+            mean_fitness=mean_fitness,
+            worst_fitness=worst_fitness,
+            diversity=diversity,
+            best_params=best_ind.to_dict() if hasattr(best_ind, 'to_dict') else {},
+            best_metrics=best_ind.metrics if hasattr(best_ind, 'metrics') else {},
+            coach_triggered=coach_triggered,
+            coach_recommendations_count=coach_recommendations,
+            mutations_applied=mutations_applied,
+            ga_changes_applied=ga_changes_applied
+        )
+        
+        # Also log to console for real-time feedback
+        print(f"[Gen {population.generation:3d}] fitness: best={best_fitness:.4f} mean={mean_fitness:.4f} diversity={diversity:.4f}")
+    
     def add_log(self, generation: int, log_line: str, to_debug: bool = False):
         """
-        Add log line for this generation.
+        Add log line for this generation (legacy method, kept for compatibility).
         
         Args:
             generation: Generation number
             log_line: Log message
-            to_debug: If True, log to debug log instead of coach log
+            to_debug: If True, log to debug logger instead
         """
         self.generation_logs.append((generation, log_line))
         
         if to_debug:
-            # Diagnostic logs go to debug log (startup, etc.) - simple format
-            debug_log_manager.append(f"  {log_line}")
+            # Diagnostic logs go to logger
+            logger.debug(f"[Gen {generation:3d}] {log_line}")
         else:
-            # Relevant coach logs go to coach log
-            coach_log_manager.append(f"[Gen {generation:3d}] {log_line}")
+            # Print to console
+            print(f"[Gen {generation:3d}] {log_line}")
         
         # Trim old logs
         if len(self.generation_logs) > self.max_log_generations * 10:
@@ -180,39 +233,62 @@ class BlockingCoachManager:
     
     def get_recent_logs(self, n_generations: Optional[int] = None) -> List[str]:
         """
-        Get recent logs from last N generations.
+        Get recent evolution history from agent_feed formatted for coach.
         
         Args:
             n_generations: Number of generations to include. 
                           If None, uses self.population_window
         
         Returns:
-            List of log lines
+            List of formatted log lines from agent_feed
         """
         if n_generations is None:
             n_generations = self.population_window
         
-        # Find logs from last N generations
-        if not self.generation_logs:
-            return []
+        # Get recent generations from agent_feed
+        recent_gens = agent_feed.get_generations(last_n=n_generations)
         
-        last_gen = max(g for g, _ in self.generation_logs)
-        min_gen = max(0, last_gen - n_generations + 1)
+        if not recent_gens:
+            return ["No generation data available"]
         
-        return [line for g, line in self.generation_logs if g >= min_gen]
+        # Format as log lines for coach
+        log_lines = []
+        log_lines.append(f"RECENT LOG HISTORY (last {len(recent_gens)} generations):")
+        log_lines.append("")
+        
+        for gen_record in recent_gens:
+            # Format: [Gen XXX] fitness: best=X.XXXX mean=X.XXXX diversity=X.XX
+            line = (f"[Gen {gen_record.generation:3d}] "
+                   f"fitness: best={gen_record.best_fitness:.4f} "
+                   f"mean={gen_record.mean_fitness:.4f} "
+                   f"diversity={gen_record.diversity:.2f}")
+            
+            # Add coach info if triggered
+            if gen_record.coach_triggered:
+                line += f" [COACH: {gen_record.coach_recommendations_count} recs, "
+                line += f"{gen_record.mutations_applied} mutations]"
+            
+            log_lines.append(line)
+        
+        # Add summary statistics
+        log_lines.append("")
+        summary = agent_feed.get_summary()
+        if summary['total_generations'] > 0:
+            log_lines.append(f"Summary: {summary['total_generations']} gens total, "
+                           f"best ever: {summary['best_ever']['fitness']:.4f} @ gen {summary['best_ever']['generation']}, "
+                           f"recent mean: {summary['recent_mean_fitness']:.4f}")
+        
+        return log_lines
     
-    def clear_coach_log(self):
+    def clear_agent_feed(self):
         """
-        Clear coach log after sending to coach.
+        DEPRECATED: Do NOT clear agent_feed - we want continuous history!
         
-        This allows user to see how new logs accumulate before next analysis.
-        Debug log is NOT cleared (kept for diagnostics).
+        Agent feed should accumulate ALL generations for historical analysis.
+        The max_generations limit in AgentFeed handles automatic cleanup.
         """
-        lines_before = coach_log_manager.get_line_count()
-        coach_log_manager.clear()
-        debug_log_manager.append(
-            f"✓ 🧹 Coach log cleared ({lines_before} lines sent to coach)"
-        )
+        # DO NOT CLEAR - we want to keep all generation history!
+        logger.debug("⚠️  clear_agent_feed() called but doing nothing (agent_feed keeps history)")
     
     async def create_analysis_session(
         self,
@@ -236,7 +312,7 @@ class BlockingCoachManager:
             Frozen CoachAnalysisSession
         """
         # Log to coach window (user sees this)
-        coach_log_manager.append(
+        print(
             f"[COACH  ] ❄️  Freezing population at Gen {population.generation}"
         )
         
@@ -248,7 +324,7 @@ class BlockingCoachManager:
         self.session_history.append(session)
         
         # Show session details
-        coach_log_manager.append(
+        print(
             f"[COACH  ] 📸 Session {session.session_id}: "
             f"{session.population_size} individuals, "
             f"diversity={session.get_population_metrics()['diversity']:.2f}"
@@ -256,295 +332,11 @@ class BlockingCoachManager:
         
         return session
     
-    async def analyze_session_blocking(
-        self,
-        session: CoachAnalysisSession
-    ) -> Optional[CoachAnalysis]:
-        """
-        Analyze a frozen population session (BLOCKING).
-        
-        Sends FULL population data to coach including:
-        - All individual parameters
-        - All individual metrics
-        - Population statistics
-        - Current GA configuration
-        
-        Coach provides recommendations including possible mutations.
-        
-        This is a BLOCKING call - waits for coach response.
-        
-        Args:
-            session: Frozen session to analyze
-        
-        Returns:
-            Coach analysis with recommendations
-        """
-        coach_log_manager.append(
-            f"[COACH  ] 🤖 Requesting coach analysis for {session.session_label}"
-        )
-        
-        # Initialize client if needed
-        if not self.coach_client:
-            self.coach_client = GemmaCoachClient(
-                base_url=self.base_url,
-                model=self.model,
-                prompt_version=self.prompt_version,
-                system_prompt=self.system_prompt,
-                verbose=self.verbose,
-                debug_payloads=self.debug_payloads
-            )
-            # Log initialization to debug (not user-facing) - use startup style
-            debug_log_manager.append(f"✓ 🔌 LM Studio client initialized")
-        
-        try:
-            # Send FULL population data to coach
-            coach_log_manager.append(
-                f"[COACH  ] 📤 Sending population data: "
-                f"{session.population_size} individuals with full parameters"
-            )
-            
-            # Estimate token count
-            session_data = session.to_dict_for_coach()
-            estimated_tokens = len(json.dumps(session_data)) // 4
-            coach_log_manager.append(
-                f"[COACH  ] 📊 Population data: ~{estimated_tokens:,} tokens"
-            )
-            if self.debug_payloads:
-                payload_json = json.dumps(session_data, indent=2, default=str)
-                logger.info("Coach session payload (Gen %s):\n%s", session.generation, payload_json)
-                debug_log_manager.append(f"🧪 Coach payload size={len(payload_json)} chars")
-            
-            # Get recent logs for context
-            recent_logs = self.get_recent_logs(n_generations=self.population_window)
-            coach_log_manager.append(
-                f"[COACH  ] 📜 Context logs: {len(recent_logs)} lines"
-            )
-            if self.debug_payloads and recent_logs:
-                logger.info("Coach context logs (latest %s lines):\n%s", len(recent_logs), "\n".join(recent_logs))
-            
-            # BLOCKING: Wait for coach analysis
-            coach_log_manager.append(f"[COACH  ] ⏳ Waiting for coach response...")
-            coach_log_manager.append(f"[COACH  ] ⏱️  Timeout: {self.coach_client.timeout}s")
-            
-            # Analyze using LLM client with full session data
-            # (Extended interface to include full population)
-            analysis = await self.coach_client.analyze_evolution_with_session(
-                session, recent_logs
-            )
-            
-            if analysis:
-                session.analysis = analysis
-                session.analysis_timestamp = datetime.utcnow()
-                
-                coach_log_manager.append(
-                    f"[COACH  ] ✅ Analysis complete: {analysis.overall_assessment}"
-                )
-                coach_log_manager.append(
-                    f"[COACH  ] 📋 Recommendations: {len(analysis.recommendations)}"
-                )
-                
-                if self.debug_payloads:
-                    analysis_json = analysis.to_json()
-                    logger.info("Coach analysis JSON (Gen %s):\n%s", session.generation, analysis_json)
-                    debug_log_manager.append(f"🧪 Coach analysis JSON size={len(analysis_json)} chars")
-                    if analysis.recommendations:
-                        for idx, rec in enumerate(analysis.recommendations, start=1):
-                            logger.info(
-                                "Coach recommendation %s: param=%s value=%s -> %s, reasoning=%s",
-                                idx,
-                                rec.parameter,
-                                rec.current_value,
-                                rec.suggested_value,
-                                rec.reasoning
-                            )
-                
-                if analysis.recommendations:
-                    # Group recommendations by category
-                    mutations = [r for r in analysis.recommendations if r.parameter.startswith(("mutate_", "drop_", "insert_"))]
-                    ga_params = [r for r in analysis.recommendations if r.category.value in ("ga_hyperparams", "diversity")]
-                    fitness_gates = [r for r in analysis.recommendations if r.category.value == "fitness_gates"]
-                    
-                    for i, rec in enumerate(analysis.recommendations, 1):
-                        coach_log_manager.append(
-                            f"[COACH  ]   {i}. [{rec.category.value}] {rec.parameter}: {rec.reasoning[:60]}..."
-                        )
-                    
-                    if mutations:
-                        coach_log_manager.append(f"[COACH  ]   🧬 {len(mutations)} mutation(s) recommended")
-                    if ga_params:
-                        coach_log_manager.append(f"[COACH  ]   ⚙️  {len(ga_params)} GA param change(s)")
-                    if fitness_gates:
-                        coach_log_manager.append(f"[COACH  ]   🎯 {len(fitness_gates)} fitness gate change(s)")
-                else:
-                    # NEW: Explicit warning if no mutations returned
-                    coach_log_manager.append(
-                        f"[COACH  ] ⚠️  Coach analysis returned no recommendations "
-                        f"(assessment: {analysis.overall_assessment})"
-                    )
-                
-                # Mark first analysis done
-                if not self._first_analysis_done:
-                    self._first_analysis_done = True
-                    coach_log_manager.append(
-                        f"[COACH  ] 🎉 First analysis complete at Gen {session.generation}"
-                    )
-            else:
-                # NEW: Explicit failure logging
-                coach_log_manager.append(
-                    f"[COACH  ] ❌ Analysis returned None (LLM may not have responded)"
-                )
-            
-            return analysis
-        
-        except asyncio.TimeoutError:
-            # NEW: Handle timeout specifically
-            timeout_seconds = self.coach_client.timeout if hasattr(self.coach_client, 'timeout') else 120
-            coach_log_manager.append(f"[COACH  ] ❌ TIMEOUT: LLM response exceeded {timeout_seconds}s")
-            coach_log_manager.append(f"[COACH  ] → Check if LM Studio is running and responsive")
-            coach_log_manager.append(f"[COACH  ] → Run: lms ps")
-            logger.exception("Coach analysis timeout")
-            return None
-        
-        except Exception as e:
-            # NEW: Detailed error logging to user-facing log
-            coach_log_manager.append(f"[COACH  ] ❌ Analysis error: {type(e).__name__}")
-            coach_log_manager.append(f"[COACH  ] Details: {str(e)[:120]}")
-            
-            # NEW: Add traceback context for debugging
-            import traceback
-            tb_lines = traceback.format_exc().split('\n')
-            # Find relevant lines (with coach/manager context)
-            relevant = [l for l in tb_lines if l.strip() and any(x in l.lower() for x in ['coach', 'manager', 'llm', 'file'])]
-            if relevant and len(relevant) > 1:
-                # Log the file/line where error occurred
-                coach_log_manager.append(f"[COACH  ] Context: {relevant[-2][:80]}")
-            
-            logger.exception("Coach analysis error")
-            debug_log_manager.append(f"❌ Coach analysis error: {type(e).__name__}: {e}")
-            return None
+
     
-    async def apply_session_recommendations_blocking(
-        self,
-        population: Population,
-        session: CoachAnalysisSession
-    ) -> Dict[str, Any]:
-        """
-        Apply coach recommendations to population (BLOCKING).
-        
-        CRITICAL: Applies to the SAME population state that was analyzed.
-        Supports mutations:
-        - mutate_<id>_<param>: Mutate individual parameter
-        - drop_<id>: Drop individual
-        - insert_*: Insert new individual (if coach provides)
-        
-        Args:
-            population: Population to mutate (should be same as frozen session)
-            session: Frozen session with analysis results
-        
-        Returns:
-            Mutation summary
-        """
-        if not session.analysis:
-            return {"total_mutations": 0, "mutations_by_type": {}}
-        
-        coach_log_manager.append(
-            f"[COACH  ] 🔧 Applying recommendations to {session.session_label}"
-        )
-        
-        # Apply mutations using mutation manager
-        summary = self.mutation_manager.apply_coach_recommendations(
-            population, session, session.analysis
-        )
-        
-        coach_log_manager.append(
-            f"[COACH  ] ✅ Applied {summary['total_mutations']} mutations"
-        )
-        
-        return summary
+
     
-    async def analyze_and_apply_blocking(
-        self,
-        population: Population,
-        fitness_config: FitnessConfig,
-        ga_config: OptimizationConfig
-    ) -> Tuple[bool, Dict[str, Any]]:
-        """
-        Full blocking workflow: Freeze → Analyze → Apply → Return.
-        
-        BLOCKING CALL: Returns after analysis and mutation application.
-        
-        Workflow:
-        1. FREEZE population (create session)
-        2. ANALYZE with full population data
-        3. APPLY recommendations/mutations
-        4. RETURN to caller (GA resumes with modified population)
-        
-        Args:
-            population: Population to analyze and modify
-            fitness_config: Fitness configuration
-            ga_config: GA configuration
-        
-        Returns:
-            (success, mutation_summary)
-        """
-        coach_log_manager.append(
-            f"[COACH  ] 🔄 Starting blocking analysis workflow at Gen {population.generation}"
-        )
-        
-        # Step 1: FREEZE population
-        session = await self.create_analysis_session(
-            population, fitness_config, ga_config
-        )
-        
-        # Step 2: ANALYZE
-        analysis = await self.analyze_session_blocking(session)
-        
-        if not analysis:
-            coach_log_manager.append(f"[COACH  ] ❌ Analysis failed, skipping")
-            return False, {}
-        
-        # Step 3: APPLY recommendations
-        summary = await self.apply_session_recommendations_blocking(
-            population, session
-        )
-        
-        # Log mutation summary
-        if summary.get("total_mutations", 0) > 0:
-            coach_log_manager.append(
-                f"[COACH  ] ✅ Applied {summary['total_mutations']} mutations: "
-                f"{summary['mutations_by_type']}"
-            )
-            if summary.get("mutations_failed"):
-                coach_log_manager.append(
-                    f"[COACH  ] ⚠️  {len(summary['mutations_failed'])} mutations failed: "
-                    f"{summary['mutations_failed']}"
-                )
-        else:
-            coach_log_manager.append(
-                f"[COACH  ] ℹ️  No mutations applied (0 mutation-type recommendations)"
-            )
-        
-        # Step 4: Optionally reload model to clear context
-        if self.auto_reload_model:
-            coach_log_manager.append(
-                f"[COACH  ] 🔄 Reloading model to clear context window"
-            )
-            try:
-                await self.coach_client.reload_model()
-                coach_log_manager.append(f"[COACH  ] ✅ Model reloaded")
-            except Exception as e:
-                logger.warning(f"Failed to reload model: {e}")
-        
-        coach_log_manager.append(
-            f"[COACH  ] ✅ Blocking workflow complete - "
-            f"GA will resume with modified population"
-        )
-        
-        # IMPORTANT: Clear coach log after sending to coach
-        # This allows user to see how new logs accumulate before next analysis
-        self.clear_coach_log()
-        
-        return True, summary
+
     
     async def analyze_and_apply_with_agent(
         self,
@@ -580,7 +372,7 @@ class BlockingCoachManager:
         """
         from config.settings import settings
         
-        coach_log_manager.append(
+        print(
             f"[AGENT  ] 🤖 Starting agent-based analysis at Gen {population.generation}"
         )
         
@@ -610,7 +402,7 @@ class BlockingCoachManager:
             verbose=self.verbose
         )
         
-        coach_log_manager.append(
+        print(
             f"[AGENT  ] 🔧 Agent created with max_iterations={max_iterations}"
         )
         
@@ -618,13 +410,13 @@ class BlockingCoachManager:
         observation = self._build_agent_observation(session, fitness_config, ga_config)
         
         # Step 6: RUN agent analysis
-        coach_log_manager.append(f"[AGENT  ] 🚀 Running agent analysis...")
+        print(f"[AGENT  ] 🚀 Running agent analysis...")
         
         try:
             result = await agent.run_analysis(observation)
             
             if result.get("success"):
-                coach_log_manager.append(
+                print(
                     f"[AGENT  ] ✅ Agent completed: "
                     f"{result['iterations']} iterations, "
                     f"{result['tool_calls_count']} tool calls"
@@ -632,41 +424,40 @@ class BlockingCoachManager:
                 
                 # Log actions taken
                 if toolkit.actions_log:
-                    coach_log_manager.append(
+                    print(
                         f"[AGENT  ] 📋 Actions taken: {len(toolkit.actions_log)}"
                     )
                     for i, action in enumerate(toolkit.actions_log[:5], 1):
                         action_name = action.get("action", "unknown")
-                        coach_log_manager.append(f"[AGENT  ]   {i}. {action_name}")
+                        print(f"[AGENT  ]   {i}. {action_name}")
                     
                     if len(toolkit.actions_log) > 5:
-                        coach_log_manager.append(
+                        print(
                             f"[AGENT  ]   ... and {len(toolkit.actions_log) - 5} more actions"
                         )
                 else:
-                    coach_log_manager.append("[AGENT  ] ⚠️  No actions logged")
+                    print("[AGENT  ] ⚠️  No actions logged")
                 
                 # Store toolkit for later inspection
                 self.last_toolkit = toolkit
                 
                 # Step 7: Optionally reload model to clear context
                 if self.auto_reload_model:
-                    coach_log_manager.append(
+                    print(
                         f"[AGENT  ] 🔄 Reloading model to clear context window"
                     )
                     try:
                         await self.coach_client.reload_model()
-                        coach_log_manager.append(f"[AGENT  ] ✅ Model reloaded")
+                        print(f"[AGENT  ] ✅ Model reloaded")
                     except Exception as e:
                         logger.warning(f"Failed to reload model: {e}")
                 
-                coach_log_manager.append(
+                print(
                     f"[AGENT  ] ✅ Agent workflow complete - "
                     f"GA will resume with modified population"
                 )
                 
-                # Clear coach log
-                self.clear_coach_log()
+                # DO NOT clear agent_feed - we want continuous history!
                 
                 return True, {
                     "total_actions": len(toolkit.actions_log),
@@ -676,13 +467,13 @@ class BlockingCoachManager:
                 }
             else:
                 error = result.get("error", "Unknown error")
-                coach_log_manager.append(f"[AGENT  ] ❌ Agent failed: {error}")
+                # Log to console only
+                logger.error("Agent failed: %s", error)
                 return False, {"error": error}
                 
         except Exception as e:
+            # Log errors to console only - not useful for agent
             logger.exception("Agent analysis failed: %s", e)
-            coach_log_manager.append(f"[AGENT  ] ❌ Exception: {str(e)}")
-            debug_log_manager.append(f"❌ Agent exception: {e}")
             return False, {"error": str(e)}
     
     def _build_agent_observation(self, session: CoachAnalysisSession, fitness_config: FitnessConfig, ga_config: OptimizationConfig) -> str:
@@ -738,7 +529,89 @@ GA CONFIGURATION:
 - Tournament size: {ga_config.tournament_size}
 - Immigrant fraction: {ga_config.immigrant_fraction}
 
-Your task: Analyze this population state and take actions to improve evolution.
+"""
+        
+        # Add generation history from agent_feed
+        recent_gens = agent_feed.get_generations(last_n=self.population_window)
+        
+        if recent_gens:
+            obs += f"EVOLUTION HISTORY (last {len(recent_gens)} generations):\n\n"
+            
+            # Header row
+            obs += f"{'Gen':>4} | {'Best Fit':>8} | {'Mean Fit':>8} | {'Diversity':>9} | {'Trades':>6} | {'Events':>20}\n"
+            obs += "-" * 80 + "\n"
+            
+            # Generation rows
+            for gen_record in recent_gens:
+                # Build events string
+                events = []
+                if gen_record.coach_triggered:
+                    events.append(f"Coach:{gen_record.coach_recommendations_count}r")
+                if gen_record.mutations_applied > 0:
+                    events.append(f"{gen_record.mutations_applied}mut")
+                if gen_record.ga_changes_applied > 0:
+                    events.append(f"{gen_record.ga_changes_applied}ga")
+                events_str = " ".join(events) if events else "-"
+                
+                obs += (
+                    f"{gen_record.generation:4d} | "
+                    f"{gen_record.best_fitness:8.4f} | "
+                    f"{gen_record.mean_fitness:8.4f} | "
+                    f"{gen_record.diversity:9.4f} | "
+                    f"{gen_record.best_metrics.get('n', 0):6d} | "
+                    f"{events_str:>20}\n"
+                )
+            
+            # Trend analysis
+            if len(recent_gens) >= 3:
+                obs += "\nTREND ANALYSIS:\n"
+                
+                # Fitness trend
+                fitness_improvements = [
+                    recent_gens[i].best_fitness - recent_gens[i-1].best_fitness 
+                    for i in range(1, len(recent_gens))
+                ]
+                avg_improvement = sum(fitness_improvements) / len(fitness_improvements)
+                
+                if abs(avg_improvement) < 0.001:
+                    obs += f"⚠️ STAGNATION: fitness nearly flat ({avg_improvement:.5f}/gen avg change)\n"
+                elif avg_improvement < -0.001:
+                    obs += f"⚠️ REGRESSION: fitness declining ({avg_improvement:.4f}/gen)\n"
+                else:
+                    obs += f"✓ IMPROVING: {avg_improvement:.4f}/gen average improvement\n"
+                
+                # Diversity trend
+                diversity_vals = [g.diversity for g in recent_gens]
+                diversity_change = diversity_vals[-1] - diversity_vals[0]
+                
+                if diversity_vals[-1] < 0.10:
+                    obs += f"⚠️ CONVERGENCE: diversity very low ({diversity_vals[-1]:.4f})\n"
+                elif diversity_change < -0.05:
+                    obs += f"⚠️ COLLAPSING: diversity dropping fast ({diversity_change:.4f})\n"
+                
+                # Trade count trend
+                trade_counts = [g.best_metrics.get('n', 0) for g in recent_gens]
+                recent_avg_trades = sum(trade_counts[-3:]) / 3
+                
+                if recent_avg_trades < fitness_config.min_trades:
+                    failing_count = sum(1 for tc in trade_counts[-3:] if tc < fitness_config.min_trades)
+                    obs += f"⚠️ GATE CRISIS: {failing_count}/3 recent best below min_trades ({fitness_config.min_trades})\n"
+            
+            obs += "\n"
+        
+        # Summary from agent_feed
+        summary = agent_feed.get_summary()
+        if summary['total_generations'] > 0:
+            obs += f"""SUMMARY STATISTICS:
+- Total generations tracked: {summary['total_generations']}
+- Best ever: {summary['best_ever']['fitness']:.4f} @ gen {summary['best_ever']['generation']}
+- Recent mean fitness: {summary['recent_mean_fitness']:.4f}
+- Recent best fitness: {summary['recent_best_fitness']:.4f}
+- Recent diversity: {summary['recent_diversity']:.4f}
+
+"""
+        
+        obs += """Your task: Analyze this population state and take actions to improve evolution.
 Start by calling analyze_population() to get detailed statistics.
 """
         
@@ -766,7 +639,7 @@ Start by calling analyze_population() to get detailed statistics.
                 verbose=self.verbose,
                 debug_payloads=self.debug_payloads
             )
-            debug_log_manager.append(f"✓ 🔌 LM Studio agent client initialized")
+            logger.debug(f"✓ 🔌 LM Studio agent client initialized")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get coach manager statistics."""
@@ -782,15 +655,15 @@ Start by calling analyze_population() to get detailed statistics.
 
 # Example usage
 if __name__ == "__main__":
-    print("Blocking Evolution Coach Manager")
+    print("Evolution Coach Manager - Agent Mode")
     print("\nKey Features:")
-    print("  - BLOCKING optimization (pauses during coach analysis)")
-    print("  - Full population data sent to coach")
-    print("  - Direct individual mutations")
+    print("  - Agent-based analysis with tool calling")
+    print("  - Full population data sent to agent")
+    print("  - Direct individual mutations via tools")
     print("  - Frozen session tracking")
-    print("  - Accurate recommendation application")
+    print("  - Multi-step reasoning and diagnosis")
     print("\nUsage:")
     print("  manager = BlockingCoachManager()")
     print("  if manager.should_analyze(gen):")
-    print("      success, summary = await manager.analyze_and_apply_blocking(pop, fitness, ga)")
-    print("  # GA continues from modified population")
+    print("      success, summary = await manager.analyze_and_apply_with_agent(pop, fitness, ga)")
+    print("  # GA continues with agent-modified population")

@@ -17,7 +17,6 @@ from datetime import datetime
 from backtest.optimizer import Population, Individual
 from backtest.coach_session import CoachAnalysisSession
 from backtest.coach_protocol import CoachAnalysis, CoachRecommendation
-from core.coach_logging import coach_log_manager
 from core.models import Timeframe
 import logging
 
@@ -136,7 +135,7 @@ class CoachMutationManager:
         log_msg = f"[MUTATE ] Ind#{individual_id:02d} {parameter_name}: {old_value} → {new_value}"
         if reason:
             log_msg += f" ({reason})"
-        coach_log_manager.append(log_msg)
+        print(log_msg)
         
         if self.verbose:
             print(f"✏️  {log_msg}")
@@ -181,7 +180,7 @@ class CoachMutationManager:
         
         # Log
         log_msg = f"[DROP   ] Removed Ind#{individual_id:02d} ({reason})"
-        coach_log_manager.append(log_msg)
+        print(log_msg)
         
         if self.verbose:
             print(f"🗑️  {log_msg}")
@@ -230,7 +229,7 @@ class CoachMutationManager:
             f"[INSERT ] New individual at Ind#{position:02d} "
             f"(fitness={new_individual.fitness:.4f}, {reason})"
         )
-        coach_log_manager.append(log_msg)
+        print(log_msg)
         
         if self.verbose:
             print(f"➕ {log_msg}")
@@ -403,10 +402,10 @@ class CoachMutationManager:
         }
         
         if not analysis or not analysis.recommendations:
-            coach_log_manager.append("[APPLY  ] ⚠️  No recommendations to apply")
+            print("[APPLY  ] ⚠️  No recommendations to apply")
             return summary
         
-        coach_log_manager.append(f"[APPLY  ] Processing {len(analysis.recommendations)} recommendations")
+        print(f"[APPLY  ] Processing {len(analysis.recommendations)} recommendations")
         
         # Parse recommendations for mutations
         for recommendation in analysis.recommendations:
@@ -507,7 +506,7 @@ class CoachMutationManager:
         
         # Log summary
         if summary["total_mutations"] > 0:
-            coach_log_manager.append(
+            print(
                 f"[APPLY  ] Applied {summary['total_mutations']} mutations from coach: "
                 f"{summary['mutations_by_type']['mutate']} mutate, "
                 f"{summary['mutations_by_type']['drop']} drop, "

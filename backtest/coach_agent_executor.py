@@ -283,15 +283,27 @@ class AgentExecutor:
                     print(f"   🔧 Parsed {len(tools_found)} tool calls (pattern matching)")
                 return tools_found
             
-            # No tools found
+            # No tools found - show detailed error
             if self.verbose:
                 print("   ⚠️  No valid tool calls found in response")
                 logger.warning("Could not extract tool calls from response")
-                logger.debug("Response preview: %s", cleaned_text[:500])
+                logger.debug("Response preview (first 500 chars): %s", cleaned_text[:500])
                 
-                # Try to show what we received
-                if len(cleaned_text) < 1000:
-                    logger.debug("Full response: %s", cleaned_text)
+                # Show full response for debugging (up to 2000 chars)
+                if len(cleaned_text) < 2000:
+                    logger.debug("Full response text:\n%s", cleaned_text)
+                    print(f"   📄 Full LLM response ({len(cleaned_text)} chars):")
+                    print("   " + "-" * 70)
+                    for line in cleaned_text.split('\n')[:20]:  # First 20 lines
+                        print(f"   {line}")
+                    print("   " + "-" * 70)
+                else:
+                    logger.debug("Response too long (%d chars), showing first 2000", len(cleaned_text))
+                    print(f"   📄 LLM response preview ({len(cleaned_text)} chars total):")
+                    print("   " + "-" * 70)
+                    for line in cleaned_text[:2000].split('\n')[:20]:
+                        print(f"   {line}")
+                    print("   " + "-" * 70)
             
             return []
         

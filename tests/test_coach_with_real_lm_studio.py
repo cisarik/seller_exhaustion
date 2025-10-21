@@ -31,7 +31,6 @@ sys.path.insert(0, str(project_root))
 
 from backtest.llm_coach import GemmaCoachClient, HAS_LMSTUDIO
 from backtest.coach_protocol import EvolutionState
-from core.coach_logging import coach_log_manager
 
 
 async def test_real_lm_studio():
@@ -237,7 +236,7 @@ async def test_real_lm_studio():
     # Print logs
     print("\n[COACH LOGS]")
     print("─" * 80)
-    all_logs = coach_log_manager.dump()
+    all_logs = # coach_log_manager removed: dump()
     for log in all_logs[-20:]:  # Last 20 entries
         print(log)
     

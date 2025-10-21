@@ -14,7 +14,6 @@ sys.modules['lmstudio.sync_api'] = MagicMock()
 import asyncio
 from backtest.llm_coach import GemmaCoachClient
 from backtest.coach_protocol import EvolutionState
-from core.coach_logging import coach_log_manager
 
 
 class TestClientReloadCycle:

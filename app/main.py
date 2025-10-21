@@ -23,7 +23,7 @@ from app.widgets.stats_panel import StatsPanel
 from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
 from app.widgets.data_bar import DataBar
-from app.widgets.evolution_coach import EvolutionCoachWindow
+# Removed: EvolutionCoachWindow (now using console logging)
 from strategy.seller_exhaustion import build_features, SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe
@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
         self.current_tf = Timeframe.m15
         self.settings_dialog = None
         self.strategy_editor = None
-        self.evolution_coach_window: EvolutionCoachWindow | None = None
+        # Removed: evolution_coach_window (now using console logging)
         self.data_provider = DataProvider(use_cache=True)
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
@@ -502,12 +502,14 @@ class MainWindow(QMainWindow):
         self.strategy_editor.exec()
 
     def show_evolution_coach(self):
-        """Show the Evolution Coach log window."""
-        if self.evolution_coach_window is None:
-            self.evolution_coach_window = EvolutionCoachWindow(self)
-        self.evolution_coach_window.show()
-        self.evolution_coach_window.raise_()
-        self.evolution_coach_window.activateWindow()
+        """Evolution Coach window removed - using console logging now."""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self,
+            "Evolution Coach",
+            "Evolution Coach logging has been moved to console output.\n\n"
+            "Check the terminal where you launched the application to see coach logs."
+        )
 
     def on_data_downloaded(self, df):
         """Handle data download completion."""
@@ -1425,7 +1427,7 @@ class MainWindow(QMainWindow):
         """Check if Evolution Coach model is already loaded on app startup."""
         try:
             from backtest.llm_coach import GemmaCoachClient
-            from core.coach_logging import coach_log_manager
+            # Removed: coach_log_manager (now using console logging)
             
             model = settings.coach_model
             

@@ -385,17 +385,16 @@ class TestCoachEndToEnd:
 
 def test_coach_logging():
     """Test coach logging functionality."""
-    from core.coach_logging import coach_log_manager
-    
+        
     print("[TEST] Coach logging...")
     
     # Add test logs
-    coach_log_manager.append("[TEST] Test message 1")
-    coach_log_manager.append("[TEST] Test message 2")
-    coach_log_manager.append("[TEST] Test message 3")
+    # coach_log_manager removed: append("[TEST] Test message 1")
+    # coach_log_manager removed: append("[TEST] Test message 2")
+    # coach_log_manager removed: append("[TEST] Test message 3")
     
     # Get recent logs
-    all_logs = coach_log_manager.dump()
+    all_logs = # coach_log_manager removed: dump()
     recent = all_logs[-2:] if len(all_logs) >= 2 else all_logs
     
     assert len(recent) >= 1

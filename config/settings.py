@@ -72,19 +72,23 @@ class Settings(BaseSettings):
     # Optimizer execution
     optimizer_workers: int = max(1, multiprocessing.cpu_count() - 1)
     
-    # Evolution Coach Parameters
-    coach_model: str = "google/gemma-3-12b"
-    coach_prompt_version: str = "blocking_coach_v1"  # Use blocking coach by default
-    coach_system_prompt: str = "blocking_coach_v1"  # System prompt selection
+    # Evolution Coach Parameters (OpenRouter only)
+    coach_enabled: bool = True  # Enable/disable Evolution Coach
     coach_analysis_interval: int = 10  # Analyze every N generations (10, 15, 20, etc)
-    coach_population_window: int = 10  # Last N generations for coach context
-    coach_max_log_generations: int = 25
-    coach_auto_reload_model: bool = True
-    coach_context_length: int = 5000  # Experimental: testing if enough for 25 gens
-    coach_gpu: float = 0.6  # GPU offload ratio 0.0-1.0 (60% default)
     coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses
     coach_response_timeout: int = 3600  # LLM response timeout in seconds (3600 = 1 hour)
-    coach_agent_max_iterations: int = 10  # Max tool calls per agent analysis session
+    
+    # Logging
+    ada_agent_log_level: str = "INFO"  # Root console log level: DEBUG, INFO, WARNING, ERROR
+    log_progress_bars: bool = True      # Show tqdm progress bars during optimization
+    log_feature_builds: bool = False    # Emit per-build feature logs (INFO); otherwise DEBUG
+    
+    # OpenAI Parameters
+    openai_api_key: str = ""  # OpenAI API key (preferred)
+    
+    # Openrouter Parameters
+    openrouter_api_key: str = ""  # Openrouter API key (fallback)
+    openrouter_model: str = "anthropic/claude-3.5-sonnet"  # Default Openrouter model
    
     # CPU Workers
     cpu_workers: int = 7  # CPU worker processes for optimization
@@ -208,19 +212,23 @@ class SettingsManager:
             f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")
             f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
             
-            f.write("# Evolution Coach Parameters\n")
-            f.write(f"COACH_MODEL={existing.get('COACH_MODEL', 'google/gemma-3-12b')}\n")
-            f.write(f"COACH_PROMPT_VERSION={existing.get('COACH_PROMPT_VERSION', 'blocking_coach_v1')}\n")
-            f.write(f"COACH_SYSTEM_PROMPT={existing.get('COACH_SYSTEM_PROMPT', 'blocking_coach_v1')}\n")
+            f.write("# Evolution Coach Parameters (OpenRouter only)\n")
+            f.write(f"COACH_ENABLED={existing.get('COACH_ENABLED', 'True')}\n")
             f.write(f"COACH_ANALYSIS_INTERVAL={existing.get('COACH_ANALYSIS_INTERVAL', '10')}\n")
-            f.write(f"COACH_POPULATION_WINDOW={existing.get('COACH_POPULATION_WINDOW', '10')}\n")
-            f.write(f"COACH_MAX_LOG_GENERATIONS={existing.get('COACH_MAX_LOG_GENERATIONS', '25')}\n")
-            f.write(f"COACH_AUTO_RELOAD_MODEL={existing.get('COACH_AUTO_RELOAD_MODEL', 'True')}\n")
-            f.write(f"COACH_CONTEXT_LENGTH={existing.get('COACH_CONTEXT_LENGTH', '5000')}\n")
-            f.write(f"COACH_GPU={existing.get('COACH_GPU', '0.6')}\n")
             f.write(f"COACH_DEBUG_PAYLOADS={existing.get('COACH_DEBUG_PAYLOADS', 'False')}\n")
-            f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n")
-            f.write(f"COACH_AGENT_MAX_ITERATIONS={existing.get('COACH_AGENT_MAX_ITERATIONS', '10')}\n\n")
+            f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n\n")
+
+            f.write("# Logging\n")
+            f.write(f"ADA_AGENT_LOG_LEVEL={existing.get('ADA_AGENT_LOG_LEVEL', 'INFO')}\n")
+            f.write(f"LOG_PROGRESS_BARS={existing.get('LOG_PROGRESS_BARS', 'True')}\n")
+            f.write(f"LOG_FEATURE_BUILDS={existing.get('LOG_FEATURE_BUILDS', 'False')}\n\n")
+            
+            f.write("# OpenAI Parameters\n")
+            f.write(f"OPENAI_API_KEY={existing.get('OPENAI_API_KEY', '')}\n\n")
+            
+            f.write("# Openrouter Parameters\n")
+            f.write(f"OPENROUTER_API_KEY={existing.get('OPENROUTER_API_KEY', '')}\n")
+            f.write(f"OPENROUTER_MODEL={existing.get('OPENROUTER_MODEL', 'anthropic/claude-3.5-sonnet')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")

@@ -7,6 +7,7 @@ Runs on CPU with optional multiprocessing for parallel evaluation.
 import multiprocessing
 from typing import Optional
 from copy import deepcopy
+from tqdm import tqdm
 
 from backtest.optimizer_base import BaseOptimizer, OptimizationResult
 from backtest.optimizer import (
@@ -16,6 +17,10 @@ from backtest.optimizer import (
 )
 from strategy.seller_exhaustion import SellerParams, build_features
 from core.models import BacktestParams, Timeframe, FitnessConfig
+from core.logging_utils import get_logger
+from config.settings import settings
+
+logger = get_logger(__name__)
 
 
 class EvolutionaryOptimizer(BaseOptimizer):
@@ -65,7 +70,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
         self.initial_population_file = initial_population_file
         
         # Initialization note
-        print("✓ Evolutionary optimizer initialized")
+        logger.info("✓ Evolutionary optimizer initialized")
     
     def initialize(
         self,
@@ -98,9 +103,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
                     # Truncate to pop size
                     self.population.individuals = self.population.individuals[: self.config['population_size']]
                     self.population.size = len(self.population.individuals)
-                print(f"✓ Population loaded from file: {self.initial_population_file} ({self.population.size} individuals)")
+                logger.info("✓ Population loaded from file: %s (%s individuals)", self.initial_population_file, self.population.size)
             except Exception as e:
-                print(f"⚠ Failed to load initial population from file: {e}. Falling back to random initialization.")
+                logger.warning("⚠ Failed to load initial population from file: %s. Falling back to random initialization.", e)
                 self.population = Population(
                     size=self.config['population_size'],
                     seed_individual=seed_individual,
@@ -113,10 +118,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
                 timeframe=timeframe
             )
         
-        print(
-            f"✓ Population initialized: {self.population.size} individuals | "
-            f"mutation_rate={self.config['mutation_rate']:.3f} | "
-            f"sigma={self.config['sigma']:.3f}"
+        logger.info(
+            "✓ Population initialized: %s individuals | mutation_rate=%.3f | sigma=%.3f",
+            self.population.size, self.config['mutation_rate'], self.config['sigma']
         )
     
     def step(
@@ -131,11 +135,9 @@ class EvolutionaryOptimizer(BaseOptimizer):
         if self.population is None:
             raise RuntimeError("Optimizer not initialized. Call initialize() first.")
         
-        print(f"\n{'='*60}")
-        print("Evolution Step")
-        print(f"Generation: {self.population.generation}")
-        print(f"Fitness Preset: {fitness_config.preset}")
-        print(f"{'='*60}")
+        logger.info(
+            "[Gen %s] Evolution step | preset=%s", self.population.generation, getattr(fitness_config, 'preset', 'custom')
+        )
         
         # Choose evolution method based on worker count
         if self.n_workers > 1:
@@ -171,12 +173,15 @@ class EvolutionaryOptimizer(BaseOptimizer):
             raise RuntimeError("No best individual found after evolution step")
         
         # Show best metrics
-        print(f"\n🏆 Best Individual:")
-        print(f"   Fitness: {best.fitness:.4f}")
-        print(f"   Trades: {best.metrics.get('n', 0)}")
-        print(f"   Win Rate: {best.metrics.get('win_rate', 0):.2%}")
-        print(f"   Avg R: {best.metrics.get('avg_R', 0):.2f}")
-        print(f"   Total PnL: ${best.metrics.get('total_pnl', 0):.4f}")
+        logger.info(
+            "[Gen %s] Best: fit=%.4f | n=%s | wr=%.1f%% | avgR=%.2f | pnl=$%.4f",
+            self.population.generation,
+            best.fitness,
+            best.metrics.get('n', 0),
+            100.0 * (best.metrics.get('win_rate', 0.0) or 0.0),
+            best.metrics.get('avg_R', 0.0) or 0.0,
+            best.metrics.get('total_pnl', 0.0) or 0.0,
+        )
         
         return OptimizationResult(
             best_seller_params=deepcopy(best.seller_params),

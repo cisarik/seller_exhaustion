@@ -304,34 +304,48 @@ class CompactParamsEditor(QWidget):
         fitness_group.setLayout(fitness_layout)
         scroll_layout.addWidget(fitness_group)
         
-        # Evolution Coach Group (NEW - LLM coach configuration)
+        # Evolution Coach Group (NEW - Enable checkbox + provider button)
         coach_group = QGroupBox("Evolution Coach 🤖")
         coach_layout = QVBoxLayout()
         coach_layout.setSpacing(6)
         coach_layout.setContentsMargins(8, 8, 8, 8)
         
-        # Model selection row
-        model_row = QHBoxLayout()
-        model_label = QLabel("Model:")
-        model_label.setMaximumWidth(60)
-        self.coach_model_combo = QComboBox()
-        self.coach_model_combo.addItem("google/gemma-3-12b", "google/gemma-3-12b")
-        self.coach_model_combo.addItem("gemma-2-9b-it", "gemma-2-9b-it")
-        self.coach_model_combo.setToolTip("LLM model for Evolution Coach")
-        self.coach_model_combo.currentIndexChanged.connect(self._on_coach_config_changed)
-        model_row.addWidget(model_label)
-        model_row.addWidget(self.coach_model_combo, 1)
-        coach_layout.addLayout(model_row)
+        # Enable checkbox row
+        enable_row = QHBoxLayout()
+        enable_label = QLabel("Enable:")
+        enable_label.setMaximumWidth(60)
+        self.coach_enabled_check = QCheckBox()
+        self.coach_enabled_check.setChecked(True)
+        self.coach_enabled_check.setToolTip("Enable/disable Evolution Coach agent")
+        self.coach_enabled_check.stateChanged.connect(self._on_coach_config_changed)
+        enable_row.addWidget(enable_label)
+        enable_row.addWidget(self.coach_enabled_check, 1)
+        coach_layout.addLayout(enable_row)
         
-        # Note: System Prompt is configured in Settings → Evolution Coach Settings
+        # Provider buttons row
+        provider_row = QHBoxLayout()
         
-        # Load/Unload button
-        self.coach_load_btn = QPushButton("Load Model")
-        self.coach_load_btn.setToolTip("Load the selected LLM model in LM Studio")
-        self.coach_load_btn.clicked.connect(self._on_coach_load_clicked)
+        # Local LLM button (for LM Studio)
+        self.coach_local_btn = QPushButton("Local LLM")
+        self.coach_local_btn.setToolTip("Use local LM Studio for Evolution Coach")
+        self.coach_local_btn.clicked.connect(self._on_local_coach_clicked)
+        provider_row.addWidget(self.coach_local_btn)
+        
+        # Openrouter button (for online)
+        self.coach_openrouter_btn = QPushButton("Openrouter")
+        self.coach_openrouter_btn.setToolTip("Use online Openrouter API for Evolution Coach")
+        self.coach_openrouter_btn.clicked.connect(self._on_openrouter_coach_clicked)
+        provider_row.addWidget(self.coach_openrouter_btn)
+        
+        coach_layout.addLayout(provider_row)
+        
+        # Note: Configure coach settings in Settings → Evolution Coach
+        note_label = QLabel("⚙️ Configure in Settings")
+        note_label.setStyleSheet("color: #888; font-size: 10px;")
+        coach_layout.addWidget(note_label)
+        
         self._coach_model_loaded = False
         self._update_coach_button_style()
-        coach_layout.addWidget(self.coach_load_btn)
         
         coach_group.setLayout(coach_layout)
         scroll_layout.addWidget(coach_group)
@@ -346,21 +360,18 @@ class CompactParamsEditor(QWidget):
         """Load coach settings from config and update UI."""
         from config.settings import settings
         
-        # Set model
-        model = settings.coach_model
-        for i in range(self.coach_model_combo.count()):
-            if self.coach_model_combo.itemData(i) == model:
-                self.coach_model_combo.setCurrentIndex(i)
-                break
+        # Set enabled state
+        self.coach_enabled_check.setChecked(getattr(settings, 'coach_enabled', True))
         
-        # Note: System Prompt setting is managed in Settings → Evolution Coach Settings
+        # Update button styles based on provider
+        self._update_coach_button_style()
     
     def _on_coach_config_changed(self):
-        """Handle coach model change - save to settings."""
+        """Handle coach enable/disable change - save to settings."""
         from config.settings import settings, SettingsManager
         
-        # Update model setting only (prompt version is set in Settings dialog)
-        settings.coach_model = self.coach_model_combo.currentData()
+        # Update enabled setting
+        settings.coach_enabled = self.coach_enabled_check.isChecked()
         
         # Convert settings to dict and save to .env
         try:
@@ -369,79 +380,65 @@ class CompactParamsEditor(QWidget):
             settings_dict = settings.dict()  # Pydantic v1 fallback
         
         SettingsManager.save_to_env(settings_dict)
-    
-    def get_coach_config(self) -> dict:
-        """Get Evolution Coach configuration (model only; prompt is in Settings)."""
-        from config.settings import settings
-        return {
-            "model": self.coach_model_combo.currentData(),
-            "prompt_version": getattr(settings, 'coach_system_prompt', 'blocking_coach_v1')
-        }
-    
-    def _on_coach_load_clicked(self):
-        """Handle coach load/unload button click."""
-        from config.settings import settings
-        if self._coach_model_loaded:
-            # Unload model
-            self.coach_unload_requested.emit()
-        else:
-            # Load model with system prompt from Settings
-            model = self.coach_model_combo.currentData()
-            prompt_version = getattr(settings, 'coach_system_prompt', 'blocking_coach_v1')
-            self.coach_load_requested.emit(model, prompt_version)
-    
-    def set_coach_model_loaded(self, loaded: bool):
-        """Update coach model loaded state and button appearance."""
-        self._coach_model_loaded = loaded
+        
+        # Update button states
         self._update_coach_button_style()
     
-    def set_coach_loading(self, loading: bool):
-        """Update button to show loading state."""
-        if loading:
-            self.coach_load_btn.setText("Loading...")
-            self.coach_load_btn.setEnabled(False)
-            self.coach_load_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2e2416;
-                    color: #ff9800;
-                    border: 1px solid #ff9800;
-                    padding: 6px;
-                    font-weight: bold;
-                }
-            """)
-        else:
-            self._update_coach_button_style()
+    def _on_local_coach_clicked(self):
+        """Handle Local LLM button click - open Settings to configure."""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self,
+            "Configure Local LLM",
+            "Please configure Local LLM settings:\n\n"
+            "1. Go to Settings → Evolution Coach\n"
+            "2. Select 'Local (LM Studio)' provider\n"
+            "3. Choose model and adjust parameters\n"
+            "4. Save settings"
+        )
+    
+    def _on_openrouter_coach_clicked(self):
+        """Handle Openrouter button click - open Settings to configure."""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self,
+            "Configure Openrouter",
+            "Please configure Openrouter settings:\n\n"
+            "1. Go to Settings → Evolution Coach\n"
+            "2. Select 'Online (Openrouter)' provider\n"
+            "3. Enter your API key\n"
+            "4. Choose model (Claude 3.5 Sonnet recommended)\n"
+            "5. Save settings"
+        )
+    
+    def get_coach_config(self) -> dict:
+        """Get Evolution Coach configuration from settings."""
+        from config.settings import settings
+        return {
+            "enabled": self.coach_enabled_check.isChecked(),
+            "provider": getattr(settings, 'coach_provider', 'local'),
+            "model": getattr(settings, 'coach_model', 'google/gemma-3-12b'),
+            "prompt_version": getattr(settings, 'coach_system_prompt', 'agent01')
+        }
     
     def _update_coach_button_style(self):
-        """Update button text and style based on loaded state."""
-        if self._coach_model_loaded:
-            # Model is loaded - show Unload button (red)
-            self.coach_load_btn.setText("Unload Model")
-            self.coach_load_btn.setToolTip("Unload the LLM model to free memory")
-            self.coach_load_btn.setEnabled(True)
-            self.coach_load_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2e1a1a;
-                    color: #f44336;
-                    border: 1px solid #f44336;
-                    padding: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #f44336;
-                    color: #ffffff;
-                }
-            """)
-        else:
-            # Model not loaded - show Load button (green)
-            self.coach_load_btn.setText("Load Model")
-            self.coach_load_btn.setToolTip("Load the selected LLM model in LM Studio")
-            self.coach_load_btn.setEnabled(True)
-            self.coach_load_btn.setStyleSheet("""
+        """Update button styles based on enabled state and provider."""
+        from config.settings import settings
+        
+        enabled = self.coach_enabled_check.isChecked()
+        provider = getattr(settings, 'coach_provider', 'local')
+        
+        # Update button enabled state
+        self.coach_local_btn.setEnabled(enabled)
+        self.coach_openrouter_btn.setEnabled(enabled)
+        
+        # Style active provider button
+        if provider == "local":
+            self.coach_local_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #2f5c39;
                     color: #e8f5e9;
-                    border: 1px solid #4caf50;
+                    border: 2px solid #4caf50;
                     padding: 6px;
                     font-weight: bold;
                 }
@@ -449,6 +446,56 @@ class CompactParamsEditor(QWidget):
                     background-color: #4caf50;
                 }
             """)
+            self.coach_openrouter_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a2a2a;
+                    color: #888;
+                    border: 1px solid #555;
+                    padding: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #333;
+                    border: 1px solid #666;
+                }
+            """)
+        else:  # openrouter
+            self.coach_local_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a2a2a;
+                    color: #888;
+                    border: 1px solid #555;
+                    padding: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #333;
+                    border: 1px solid #666;
+                }
+            """)
+            self.coach_openrouter_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2f4a5c;
+                    color: #e3f2fd;
+                    border: 2px solid #2196f3;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #2196f3;
+                }
+            """)
+        
+        # Disabled state
+        if not enabled:
+            disabled_style = """
+                QPushButton {
+                    background-color: #1a1a1a;
+                    color: #555;
+                    border: 1px solid #333;
+                    padding: 6px;
+                }
+            """
+            self.coach_local_btn.setStyleSheet(disabled_style)
+            self.coach_openrouter_btn.setStyleSheet(disabled_style)
     
     def _on_param_changed(self):
         """Handle parameter change and update tooltips."""

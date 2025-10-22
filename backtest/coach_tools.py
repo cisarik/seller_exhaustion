@@ -48,7 +48,9 @@ class CoachToolkit:
         session: CoachAnalysisSession,
         fitness_config: FitnessConfig,
         ga_config: OptimizationConfig,
-        mutation_manager: CoachMutationManager
+        mutation_manager: CoachMutationManager,
+        islands_registry: Optional[Dict[int, Population]] = None,
+        island_policy_reference: Optional[Dict[str, Any]] = None
     ):
         self.population = population
         self.session = session
@@ -58,6 +60,10 @@ class CoachToolkit:
         
         # Track actions taken
         self.actions_log: List[Dict[str, Any]] = []
+        # Optional island model registry (persistent across sessions if provided)
+        self._islands: Dict[int, Population] = islands_registry if islands_registry is not None else {}
+        # Optional policy dict reference owned by manager
+        self._island_policy = island_policy_reference if island_policy_reference is not None else {}
     
     # ========================================================================
     # CATEGORY 1: OBSERVABILITY (8 tools)
@@ -160,6 +166,69 @@ class CoachToolkit:
         
         except Exception as e:
             logger.exception("analyze_population failed")
+            return {"success": False, "error": str(e)}
+
+    async def get_correlation_matrix(
+        self,
+        include_params: Optional[List[str]] = None,
+        correlate_with: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Compute Pearson correlations between parameters and selected metrics."""
+        try:
+            # Parameters to evaluate
+            all_params = [
+                'ema_fast','ema_slow','z_window','atr_window','vol_z','tr_z','cloc_min',
+                'fib_swing_lookback','fib_swing_lookahead','fib_target_level','fee_bp','slippage_bp'
+            ]
+            params = include_params or all_params
+            metrics_wanted = correlate_with or ['fitness','trade_count','win_rate','avg_r']
+
+            # Gather vectors
+            def get_param(ind, name):
+                if hasattr(ind.seller_params, name):
+                    return getattr(ind.seller_params, name)
+                if hasattr(ind.backtest_params, name):
+                    return getattr(ind.backtest_params, name)
+                return None
+
+            inds = self.population.individuals
+            by_param = {p: [get_param(ind, p) for ind in inds] for p in params}
+            by_metric = {
+                'fitness': [ind.fitness for ind in inds],
+                'trade_count': [ind.metrics.get('n', 0) for ind in inds],
+                'win_rate': [ind.metrics.get('win_rate', 0) for ind in inds],
+                'avg_r': [ind.metrics.get('avg_R', 0) for ind in inds],
+            }
+
+            correlations = {}
+            for metric in metrics_wanted:
+                correlations[metric] = {}
+                y = by_metric.get(metric)
+                for p in params:
+                    x = by_param[p]
+                    try:
+                        r, pval = pearsonr(x, y)
+                        correlations[metric][p] = {
+                            'r': float(r),
+                            'p': float(pval),
+                            'sig': bool(pval < 0.05)
+                        }
+                    except Exception:
+                        correlations[metric][p] = {'r': 0.0, 'p': 1.0, 'sig': False}
+
+            # Rank importance by |r| with fitness
+            rank = sorted(
+                (
+                    (p, abs(correlations['fitness'][p]['r']))
+                    for p in params if 'fitness' in correlations and p in correlations['fitness']
+                ), key=lambda t: t[1], reverse=True
+            )
+            ranked = [{'param': p, 'abs_r': v} for p, v in rank]
+
+            self.actions_log.append({"action": "get_correlation_matrix"})
+            return {"success": True, "correlations": correlations, "ranked_by_fitness_abs_r": ranked}
+        except Exception as e:
+            logger.exception("get_correlation_matrix failed")
             return {"success": False, "error": str(e)}
     
     async def get_param_distribution(
@@ -407,6 +476,403 @@ class CoachToolkit:
         except Exception as e:
             logger.exception(f"mutate_individual failed for individual {individual_id}")
             return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CATEGORY 2b: LLM-INDIVIDUALS & ISLANDS (NEW)
+    # ========================================================================
+    
+    async def insert_llm_individual(
+        self,
+        destination: str,
+        individual: Dict[str, Any],
+        island_id: Optional[int] = None,
+        reason: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Insert a new individual provided by the LLM into the main population or a specific island.
+        The individual's fitness is reset for evaluation in the next generation.
+        """
+        try:
+            sp_dict = individual.get("seller_params") or {}
+            bp_dict = individual.get("backtest_params") or {}
+            from strategy.seller_exhaustion import SellerParams
+            from core.models import BacktestParams
+            from backtest.optimizer import Individual as PopIndividual
+            sp = SellerParams(**sp_dict)
+            bp = BacktestParams(**bp_dict)
+            ind = PopIndividual(seller_params=sp, backtest_params=bp, fitness=0.0, metrics={}, generation=self.population.generation)
+
+            if destination == "main":
+                self.population.individuals.append(ind)
+                self.population.size = len(self.population.individuals)
+                target = "main"
+                index = self.population.size - 1
+            elif destination == "island":
+                if not hasattr(self, "_islands"):
+                    self._islands = {}
+                if island_id is None or island_id not in self._islands:
+                    return {"success": False, "error": "Invalid or missing island_id"}
+                self._islands[island_id].individuals.append(ind)
+                self._islands[island_id].size = len(self._islands[island_id].individuals)
+                target = f"island:{island_id}"
+                index = self._islands[island_id].size - 1
+            else:
+                return {"success": False, "error": f"Unknown destination: {destination}"}
+
+            self.actions_log.append({
+                "action": "insert_llm_individual",
+                "destination": destination,
+                "island_id": island_id,
+                "reason": reason
+            })
+            return {"success": True, "destination": target, "index": index}
+        except Exception as e:
+            logger.exception("insert_llm_individual failed")
+            return {"success": False, "error": str(e)}
+
+    async def create_islands(self, count: int = 2, strategy: str = "split") -> Dict[str, Any]:
+        """Create multiple sub‑populations (islands) from the current population."""
+        try:
+            if count < 2:
+                return {"success": False, "error": "count must be >= 2"}
+            # Reset previous islands
+            self._islands = {}
+            from copy import deepcopy
+            if strategy == "split":
+                inds = list(self.population.individuals)
+                # Create island containers
+                for i in range(count):
+                    island = Population(size=0, timeframe=self.population.timeframe)
+                    island.individuals = []
+                    island.size = 0
+                    island.bounds = self.population.bounds
+                    island.generation = self.population.generation
+                    self._islands[i] = island
+                # Distribute individuals round‑robin
+                for idx, ind in enumerate(inds):
+                    target_id = idx % count
+                    self._islands[target_id].individuals.append(deepcopy(ind))
+                    self._islands[target_id].size = len(self._islands[target_id].individuals)
+            else:
+                return {"success": False, "error": f"Unsupported strategy: {strategy}"}
+
+            islands_info = [{"id": k, "size": v.size} for k, v in self._islands.items()]
+            self.actions_log.append({"action": "create_islands", "count": count, "strategy": strategy})
+            return {"success": True, "islands": islands_info}
+        except Exception as e:
+            logger.exception("create_islands failed")
+            return {"success": False, "error": str(e)}
+
+    async def migrate_between_islands(self, src_island: int, dst_island: int, individual_id: int, reason: str = "") -> Dict[str, Any]:
+        """Migrate an individual from one island to another."""
+        try:
+            if not hasattr(self, "_islands") or src_island not in self._islands or dst_island not in self._islands:
+                return {"success": False, "error": "Invalid island id"}
+            src = self._islands[src_island]
+            dst = self._islands[dst_island]
+            if individual_id < 0 or individual_id >= len(src.individuals):
+                return {"success": False, "error": "Invalid individual_id"}
+            ind = src.individuals.pop(individual_id)
+            src.size = len(src.individuals)
+            dst.individuals.append(ind)
+            dst.size = len(dst.individuals)
+            self.actions_log.append({"action": "migrate_between_islands", "src": src_island, "dst": dst_island, "individual_id": individual_id, "reason": reason})
+            return {"success": True}
+        except Exception as e:
+            logger.exception("migrate_between_islands failed")
+            return {"success": False, "error": str(e)}
+
+    async def configure_island_scheduler(
+        self,
+        migration_cadence: Optional[int] = None,
+        migration_size: Optional[int] = None,
+        merge_to_main_cadence: Optional[int] = None,
+        merge_top_k: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Configure island migration cadence/size and island→main merge policy."""
+        try:
+            changes = {}
+            def apply(name, val):
+                if val is not None:
+                    old = self._island_policy.get(name)
+                    self._island_policy[name] = int(val)
+                    changes[name] = {"old": old, "new": int(val)}
+            apply("migration_cadence", migration_cadence)
+            apply("migration_size", migration_size)
+            apply("merge_to_main_cadence", merge_to_main_cadence)
+            apply("merge_top_k", merge_top_k)
+            self.actions_log.append({"action": "configure_island_scheduler", "changes": changes})
+            return {"success": True, "changes": changes}
+        except Exception as e:
+            logger.exception("configure_island_scheduler failed")
+            return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CATEGORY 3: GA / POPULATION UTILITIES (NEW)
+    # ========================================================================
+
+    async def inject_immigrants(self, fraction: float = 0.15, strategy: str = "worst_replacement") -> Dict[str, Any]:
+        """Inject random immigrants into the main population to boost diversity."""
+        try:
+            added = self.population.add_immigrants(fraction=fraction, strategy=strategy, generation=self.population.generation)
+            self.actions_log.append({"action": "inject_immigrants", "fraction": fraction, "strategy": strategy, "added": added})
+            return {"success": True, "added": int(added)}
+        except Exception as e:
+            logger.exception("inject_immigrants failed")
+            return {"success": False, "error": str(e)}
+
+    async def export_population(self, path: str) -> Dict[str, Any]:
+        """Export current population to JSON file."""
+        try:
+            from backtest.optimizer import export_population as exp
+            exp(self.population, path)
+            self.actions_log.append({"action": "export_population", "path": path})
+            return {"success": True, "path": path}
+        except Exception as e:
+            logger.exception("export_population failed")
+            return {"success": False, "error": str(e)}
+
+    async def import_population(self, path: str, limit: Optional[int] = None) -> Dict[str, Any]:
+        """Import population from JSON and replace current individuals (size preserved if limit provided)."""
+        try:
+            from backtest.optimizer import import_population as imp
+            imported = imp(path, timeframe=self.population.timeframe, limit=limit)
+            self.population.individuals = imported.individuals
+            self.population.size = len(imported.individuals)
+            self.population.bounds = imported.bounds
+            self.population.generation = imported.generation
+            self.actions_log.append({"action": "import_population", "path": path, "size": self.population.size})
+            return {"success": True, "size": self.population.size}
+        except Exception as e:
+            logger.exception("import_population failed")
+            return {"success": False, "error": str(e)}
+
+    async def drop_individual(self, individual_id: int, replace_with: str = "immigrant") -> Dict[str, Any]:
+        """Drop an individual and optionally replace with a new immigrant to keep size constant."""
+        try:
+            if individual_id < 0 or individual_id >= len(self.population.individuals):
+                return {"success": False, "error": "Invalid individual_id"}
+            self.population.individuals.pop(individual_id)
+            self.population.size = len(self.population.individuals)
+            if replace_with == "immigrant":
+                tmp = Population(size=1, timeframe=self.population.timeframe)
+                self.population.individuals.append(tmp.individuals[0])
+                self.population.size = len(self.population.individuals)
+            self.actions_log.append({"action": "drop_individual", "id": individual_id, "replaced": replace_with == 'immigrant'})
+            return {"success": True, "size": self.population.size}
+        except Exception as e:
+            logger.exception("drop_individual failed")
+            return {"success": False, "error": str(e)}
+
+    async def bulk_update_param(self, individual_ids: List[int], parameter_name: str, new_value) -> Dict[str, Any]:
+        """Set a parameter to a new value for a group of individuals."""
+        try:
+            changed = 0
+            for iid in individual_ids:
+                if 0 <= iid < len(self.population.individuals):
+                    ind = self.population.individuals[iid]
+                    if hasattr(ind.seller_params, parameter_name):
+                        setattr(ind.seller_params, parameter_name, new_value)
+                        changed += 1
+                    elif hasattr(ind.backtest_params, parameter_name):
+                        setattr(ind.backtest_params, parameter_name, new_value)
+                        changed += 1
+                    ind.fitness = 0.0
+            self.actions_log.append({"action": "bulk_update_param", "parameter": parameter_name, "changed": changed})
+            return {"success": True, "changed": changed}
+        except Exception as e:
+            logger.exception("bulk_update_param failed")
+            return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CATEGORY 4: BOUNDS & INSERTION (ADVANCED)
+    # ========================================================================
+
+    async def update_param_bounds(
+        self,
+        parameter: str,
+        new_min=None,
+        new_max=None,
+        reason: str = "",
+        retroactive: bool = False
+    ) -> Dict[str, Any]:
+        """Expand/contract parameter search bounds and optionally clamp existing individuals."""
+        try:
+            if parameter not in self.population.bounds:
+                return {"success": False, "error": f"Unknown parameter: {parameter}"}
+            old_min, old_max = self.population.bounds[parameter]
+            min_v = old_min if new_min is None else new_min
+            max_v = old_max if new_max is None else new_max
+            # Apply override
+            self.population.apply_bounds_override({parameter: (min_v, max_v)})
+            impact = {"individuals_at_old_min": 0, "individuals_now_in_bounds": 0}
+            if retroactive:
+                # Clamp existing values
+                import math
+                for ind in self.population.individuals:
+                    # Determine which object has the parameter
+                    target = None
+                    if hasattr(ind.seller_params, parameter):
+                        target = ind.seller_params
+                    elif hasattr(ind.backtest_params, parameter):
+                        target = ind.backtest_params
+                    if target is None:
+                        continue
+                    val = getattr(target, parameter)
+                    if val == old_min:
+                        impact["individuals_at_old_min"] += 1
+                    if val < min_v or val > max_v:
+                        new_val = min(max(val, min_v), max_v)
+                        if isinstance(val, int):
+                            new_val = int(round(new_val))
+                        setattr(target, parameter, new_val)
+                        impact["individuals_now_in_bounds"] += 1
+                        ind.fitness = 0.0
+            self.actions_log.append({"action": "update_param_bounds", "parameter": parameter, "old": [old_min, old_max], "new": [min_v, max_v], "retroactive": retroactive, "reason": reason})
+            return {
+                "success": True,
+                "parameter": parameter,
+                "old_bounds": {"min": old_min, "max": old_max},
+                "new_bounds": {"min": min_v, "max": max_v},
+                "population_impact": impact,
+            }
+        except Exception as e:
+            logger.exception("update_param_bounds failed")
+            return {"success": False, "error": str(e)}
+
+    async def update_bounds_multi(
+        self,
+        bounds: Dict[str, Dict[str, float]],
+        retroactive: bool = False
+    ) -> Dict[str, Any]:
+        """Update bounds for multiple parameters at once. bounds={'ema_fast': {'min':24,'max':192}, ...}"""
+        try:
+            applied = {}
+            for param, b in bounds.items():
+                mn = b.get('min'); mx = b.get('max')
+                if param in self.population.bounds:
+                    old = self.population.bounds[param]
+                    self.population.apply_bounds_override({param: (mn if mn is not None else old[0], mx if mx is not None else old[1])})
+                    applied[param] = {'old': old, 'new': self.population.bounds[param]}
+            # Optionally clamp existing individuals
+            clamped = 0
+            if retroactive:
+                for ind in self.population.individuals:
+                    for param in bounds.keys():
+                        target = ind.seller_params if hasattr(ind.seller_params, param) else (ind.backtest_params if hasattr(ind.backtest_params, param) else None)
+                        if target is None: continue
+                        val = getattr(target, param)
+                        mn, mx = self.population.bounds[param]
+                        if val < mn or val > mx:
+                            new_val = max(min(val, mx), mn)
+                            if isinstance(val, int): new_val = int(round(new_val))
+                            setattr(target, param, new_val); clamped += 1; ind.fitness = 0.0
+            self.actions_log.append({"action": "update_bounds_multi", "applied": applied, "retroactive": retroactive})
+            return {"success": True, "applied": applied, "clamped": clamped}
+        except Exception as e:
+            logger.exception("update_bounds_multi failed")
+            return {"success": False, "error": str(e)}
+
+    async def reseed_population(self, fraction: float = 0.2, strategy: str = "worst_replacement") -> Dict[str, Any]:
+        """Replace a fraction of the population immediately with random newcomers (hard reseed)."""
+        try:
+            added = self.population.add_immigrants(fraction=fraction, strategy=strategy, generation=self.population.generation)
+            self.actions_log.append({"action": "reseed_population", "fraction": fraction, "added": added})
+            return {"success": True, "reseeded": int(added)}
+        except Exception as e:
+            logger.exception("reseed_population failed")
+            return {"success": False, "error": str(e)}
+
+    async def insert_individual(
+        self,
+        strategy: str = "coach_designed",
+        parameters: Optional[Dict[str, Any]] = None,
+        clone_from_id: Optional[int] = None,
+        mutations: Optional[Dict[str, Any]] = None,
+        parent_ids: Optional[List[int]] = None,
+        blend_strategy: str = "average",
+        reason: str = "",
+        position: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Add a new individual using multiple strategies (coach_designed, random, clone_best, hybrid)."""
+        try:
+            from strategy.seller_exhaustion import SellerParams
+            from core.models import BacktestParams
+            from backtest.optimizer import Individual as PopIndividual, Population as Pop
+            new_ind = None
+
+            if strategy == "coach_designed":
+                if not parameters:
+                    return {"success": False, "error": "parameters required for coach_designed"}
+                sp_dict = parameters.get("seller_params") or {}
+                bp_dict = parameters.get("backtest_params") or {}
+                sp = SellerParams(**sp_dict)
+                bp = BacktestParams(**bp_dict)
+                new_ind = PopIndividual(seller_params=sp, backtest_params=bp, fitness=0.0, metrics={}, generation=self.population.generation)
+
+            elif strategy == "random":
+                tmp = Pop(size=1, timeframe=self.population.timeframe)
+                new_ind = tmp.individuals[0]
+                new_ind.generation = self.population.generation
+
+            elif strategy == "clone_best":
+                src_id = clone_from_id if clone_from_id is not None else max(range(len(self.population.individuals)), key=lambda i: self.population.individuals[i].fitness)
+                base = self.population.individuals[src_id]
+                sp = SellerParams(**base.seller_params.__dict__)
+                bp = BacktestParams(**(base.backtest_params.model_dump() if hasattr(base.backtest_params, 'model_dump') else base.backtest_params.__dict__))
+                # Apply mutations
+                if mutations:
+                    for k,v in mutations.items():
+                        if hasattr(sp, k):
+                            setattr(sp, k, v)
+                        elif hasattr(bp, k):
+                            setattr(bp, k, v)
+                new_ind = PopIndividual(seller_params=sp, backtest_params=bp, fitness=0.0, metrics={}, generation=self.population.generation)
+
+            elif strategy == "hybrid":
+                if not parent_ids or len(parent_ids) < 2:
+                    return {"success": False, "error": "parent_ids must include at least two ids"}
+                p1 = self.population.individuals[parent_ids[0]]
+                p2 = self.population.individuals[parent_ids[1]]
+                # Blend
+                def pick_num(a,b):
+                    return (a+b)/2 if blend_strategy == 'average' else (a if p1.fitness >= p2.fitness else b)
+                sp = SellerParams(
+                    ema_fast=int(round(pick_num(p1.seller_params.ema_fast, p2.seller_params.ema_fast))),
+                    ema_slow=int(round(pick_num(p1.seller_params.ema_slow, p2.seller_params.ema_slow))),
+                    z_window=int(round(pick_num(p1.seller_params.z_window, p2.seller_params.z_window))),
+                    vol_z=pick_num(p1.seller_params.vol_z, p2.seller_params.vol_z),
+                    tr_z=pick_num(p1.seller_params.tr_z, p2.seller_params.tr_z),
+                    cloc_min=pick_num(p1.seller_params.cloc_min, p2.seller_params.cloc_min),
+                    atr_window=int(round(pick_num(p1.seller_params.atr_window, p2.seller_params.atr_window))),
+                )
+                from backtest.optimizer import VALID_FIB_LEVELS
+                def pick_discrete(a,b):
+                    return a if blend_strategy == 'best_of_each' and p1.fitness >= p2.fitness else (b if blend_strategy == 'best_of_each' else (a if np.random.rand()<0.5 else b))
+                bp = BacktestParams(
+                    fib_swing_lookback=int(round(pick_num(p1.backtest_params.fib_swing_lookback, p2.backtest_params.fib_swing_lookback))),
+                    fib_swing_lookahead=int(round(pick_num(p1.backtest_params.fib_swing_lookahead, p2.backtest_params.fib_swing_lookahead))),
+                    fib_target_level=pick_discrete(p1.backtest_params.fib_target_level, p2.backtest_params.fib_target_level),
+                    fee_bp=pick_num(p1.backtest_params.fee_bp, p2.backtest_params.fee_bp),
+                    slippage_bp=pick_num(p1.backtest_params.slippage_bp, p2.backtest_params.slippage_bp),
+                )
+                new_ind = PopIndividual(seller_params=sp, backtest_params=bp, fitness=0.0, metrics={}, generation=self.population.generation)
+            else:
+                return {"success": False, "error": f"Unknown strategy: {strategy}"}
+
+            # Insert into population
+            if position is None or position < 0 or position > len(self.population.individuals):
+                self.population.individuals.append(new_ind)
+                pos = len(self.population.individuals) - 1
+            else:
+                self.population.individuals.insert(position, new_ind)
+                pos = position
+            self.population.size = len(self.population.individuals)
+            self.actions_log.append({"action": "insert_individual", "strategy": strategy, "position": pos, "reason": reason})
+            return {"success": True, "new_individual_id": pos, "position": pos, "strategy": strategy}
+        except Exception as e:
+            logger.exception("insert_individual failed")
+            return {"success": False, "error": str(e)}
     
     async def update_fitness_gates(
         self,
@@ -525,7 +991,7 @@ class CoachToolkit:
         except Exception as e:
             logger.exception("update_ga_params failed")
             return {"success": False, "error": str(e)}
-    
+
     async def finish_analysis(
         self,
         summary: str,
@@ -559,6 +1025,185 @@ class CoachToolkit:
         
         self.actions_log.append({"action": "finish_analysis"})
         return summary_data
+
+    # ========================================================================
+    # CATEGORY 5: FITNESS CONFIGURATION (NEW)
+    # ========================================================================
+
+    async def update_fitness_weights(
+        self,
+        trade_count_weight: Optional[float] = None,
+        win_rate_weight: Optional[float] = None,
+        avg_r_weight: Optional[float] = None,
+        total_pnl_weight: Optional[float] = None,
+        max_drawdown_penalty: Optional[float] = None,
+        penalty_trades_strength: Optional[float] = None,
+        penalty_wr_strength: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Adjust fitness weights and penalty strengths; renormalize weights to sum≈1.0."""
+        try:
+            fc = self.fitness_config
+            changes = {}
+            def apply(name, val):
+                if val is not None:
+                    old = getattr(fc, name)
+                    setattr(fc, name, float(val))
+                    changes[name] = {"old": old, "new": float(val)}
+            apply('trade_count_weight', trade_count_weight)
+            apply('win_rate_weight', win_rate_weight)
+            apply('avg_r_weight', avg_r_weight)
+            apply('total_pnl_weight', total_pnl_weight)
+            apply('max_drawdown_penalty', max_drawdown_penalty)
+            apply('penalty_trades_strength', penalty_trades_strength)
+            apply('penalty_wr_strength', penalty_wr_strength)
+            # Renormalize non-penalty weights to ~1.0
+            s = fc.trade_count_weight + fc.win_rate_weight + fc.avg_r_weight + fc.total_pnl_weight
+            if s > 0:
+                fc.trade_count_weight /= s
+                fc.win_rate_weight /= s
+                fc.avg_r_weight /= s
+                fc.total_pnl_weight /= s
+            self.actions_log.append({"action": "update_fitness_weights", "changes": changes})
+            return {"success": True, "changes": changes}
+        except Exception as e:
+            logger.exception("update_fitness_weights failed")
+            return {"success": False, "error": str(e)}
+
+    async def set_fitness_function_type(self, fitness_function_type: str) -> Dict[str, Any]:
+        """Switch between 'hard_gates' and 'soft_penalties'."""
+        try:
+            old = self.fitness_config.fitness_function_type
+            self.fitness_config.fitness_function_type = fitness_function_type
+            self.actions_log.append({"action": "set_fitness_function_type", "old": old, "new": fitness_function_type})
+            return {"success": True, "old": old, "new": fitness_function_type}
+        except Exception as e:
+            logger.exception("set_fitness_function_type failed")
+            return {"success": False, "error": str(e)}
+
+    async def configure_curriculum(
+        self,
+        enabled: Optional[bool] = None,
+        start_min_trades: Optional[int] = None,
+        increase_per_gen: Optional[int] = None,
+        checkpoint_gens: Optional[int] = None,
+        max_generations: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Enable/adjust curriculum learning parameters for min_trades over generations."""
+        try:
+            fc = self.fitness_config
+            changes = {}
+            if enabled is not None:
+                old = fc.curriculum_enabled; fc.curriculum_enabled = bool(enabled); changes['enabled'] = {"old": old, "new": bool(enabled)}
+            def seti(name, val):
+                if val is not None:
+                    old = getattr(fc, name)
+                    setattr(fc, name, int(val))
+                    changes[name] = {"old": old, "new": int(val)}
+            seti('curriculum_start_min_trades', start_min_trades)
+            seti('curriculum_increase_per_gen', increase_per_gen)
+            seti('curriculum_checkpoint_gens', checkpoint_gens)
+            seti('curriculum_max_generations', max_generations)
+            self.actions_log.append({"action": "configure_curriculum", "changes": changes})
+            return {"success": True, "changes": changes}
+        except Exception as e:
+            logger.exception("configure_curriculum failed")
+            return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CATEGORY 6: HISTORY & PRESETS (NEW)
+    # ========================================================================
+
+    async def get_generation_history(self, last_n: Optional[int] = None) -> Dict[str, Any]:
+        """Return generation history from agent_feed (full if last_n=None)."""
+        try:
+            from core.agent_feed import agent_feed
+            gens = agent_feed.get_generations(last_n=last_n)
+            data = [
+                {
+                    'generation': g.generation,
+                    'best_fitness': g.best_fitness,
+                    'mean_fitness': g.mean_fitness,
+                    'diversity': g.diversity,
+                    'best_metrics': g.best_metrics,
+                    'coach_triggered': g.coach_triggered
+                } for g in gens
+            ]
+            return {"success": True, "generations": data}
+        except Exception as e:
+            logger.exception("get_generation_history failed")
+            return {"success": False, "error": str(e)}
+
+    async def set_fitness_preset(self, preset: str) -> Dict[str, Any]:
+        """Apply a FitnessConfig preset quickly (balanced, high_frequency, conservative, profit_focused)."""
+        try:
+            from core.models import FitnessConfig
+            new_fc = FitnessConfig.get_preset_config(preset)
+            old = self.fitness_config.preset
+            # Copy fields
+            for k, v in new_fc.model_dump().items():
+                setattr(self.fitness_config, k, v)
+            self.actions_log.append({"action": "set_fitness_preset", "old": old, "new": preset})
+            return {"success": True, "preset": preset}
+        except Exception as e:
+            logger.exception("set_fitness_preset failed")
+            return {"success": False, "error": str(e)}
+
+    # ========================================================================
+    # CATEGORY 7: EXIT / COST CONTROLS (NEW)
+    # ========================================================================
+
+    async def set_exit_policy(
+        self,
+        use_fib_exits: Optional[bool] = None,
+        use_stop_loss: Optional[bool] = None,
+        use_traditional_tp: Optional[bool] = None,
+        use_time_exit: Optional[bool] = None,
+        individual_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Set exit toggles globally or for a specific individual."""
+        try:
+            targets = []
+            if individual_id is None:
+                targets = self.population.individuals
+            else:
+                if 0 <= individual_id < len(self.population.individuals):
+                    targets = [self.population.individuals[individual_id]]
+                else:
+                    return {"success": False, "error": "Invalid individual_id"}
+            changed = 0
+            for ind in targets:
+                bp = ind.backtest_params
+                def setb(name, val):
+                    nonlocal changed
+                    if val is not None:
+                        setattr(bp, name, bool(val)); changed += 1
+                setb('use_fib_exits', use_fib_exits)
+                setb('use_stop_loss', use_stop_loss)
+                setb('use_traditional_tp', use_traditional_tp)
+                setb('use_time_exit', use_time_exit)
+                ind.fitness = 0.0
+            self.actions_log.append({"action": "set_exit_policy", "changed": changed, "scope": "individual" if individual_id is not None else "global"})
+            return {"success": True, "changed": changed}
+        except Exception as e:
+            logger.exception("set_exit_policy failed")
+            return {"success": False, "error": str(e)}
+
+    async def set_costs(self, fee_bp: Optional[float] = None, slippage_bp: Optional[float] = None, individual_id: Optional[int] = None) -> Dict[str, Any]:
+        """Adjust transaction cost assumptions globally or per individual."""
+        try:
+            targets = self.population.individuals if individual_id is None else [self.population.individuals[individual_id]]
+            changed = 0
+            for ind in targets:
+                if fee_bp is not None:
+                    ind.backtest_params.fee_bp = float(fee_bp); changed += 1
+                if slippage_bp is not None:
+                    ind.backtest_params.slippage_bp = float(slippage_bp); changed += 1
+                ind.fitness = 0.0
+            self.actions_log.append({"action": "set_costs", "changed": changed})
+            return {"success": True, "changed": changed}
+        except Exception as e:
+            logger.exception("set_costs failed")
+            return {"success": False, "error": str(e)}
     
     # ========================================================================
     # HELPER METHODS

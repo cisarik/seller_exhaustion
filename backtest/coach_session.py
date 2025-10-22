@@ -312,14 +312,7 @@ def format_population_snapshot_for_coach(session: CoachAnalysisSession) -> str:
         lines.append(f"    EXIT: fib_lookback={params.get('fib_swing_lookback', 0):3d} fib_lookahead={params.get('fib_swing_lookahead', 0):2d} fib_target={params.get('fib_target_level', 0.0):.3f}")
         lines.append(f"    COSTS: fee_bp={params.get('fee_bp', 0.0):.1f} slippage_bp={params.get('slippage_bp', 0.0):.1f} max_hold={params.get('max_hold', 0):3d}")
         
-        # Exit strategy toggles
-        exit_toggles = []
-        if params.get('use_fib_exits', False): exit_toggles.append("fib")
-        if params.get('use_stop_loss', False): exit_toggles.append("stop")
-        if params.get('use_traditional_tp', False): exit_toggles.append("tp")
-        if params.get('use_time_exit', False): exit_toggles.append("time")
-        lines.append(f"    TOGGLES: {', '.join(exit_toggles) if exit_toggles else 'none'}")
-        
+        # Suppress exit toggles line to reduce noise
         lines.append("")  # Empty line for readability
     
     # Population summary

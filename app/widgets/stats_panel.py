@@ -31,8 +31,7 @@ from backtest.optimizer_factory import (
 )
 
 # Evolution Coach integration
-from backtest.coach_manager_blocking import BlockingCoachManager
-from backtest.coach_integration import format_coach_output
+from backtest.coach_manager_openai import OpenAICoachManager
 from backtest.coach_protocol import CoachAnalysis
 
 import multiprocessing
@@ -82,8 +81,8 @@ class StatsPanel(QWidget):
         self._last_init_signature: tuple | None = None
         self._last_init_signature_ts: float = 0.0  # Monotonic timestamp
         
-        # Evolution Coach integration (blocking coach)
-        self.coach_manager: Optional[BlockingCoachManager] = None
+        # Evolution Coach integration (OpenAI Agents coach)
+        self.coach_manager: Optional[OpenAICoachManager] = None
         self.status_callback: callable = None  # Callback to update main window status bar
         
         self.init_ui()
@@ -100,25 +99,34 @@ class StatsPanel(QWidget):
 
     # -------- Evolution Coach Integration --------
     def _initialize_coach_manager(self):
-        """Initialize Evolution Coach manager (blocking version)."""
+        """Initialize Evolution Coach manager (OpenRouter-based)."""
         try:
             from config.settings import settings
-            self.coach_manager = BlockingCoachManager(
-                base_url="http://localhost:1234",
-                model=settings.coach_model,
-                prompt_version=settings.coach_prompt_version,
-                system_prompt=getattr(settings, 'coach_system_prompt', settings.coach_prompt_version),
-                analysis_interval=getattr(settings, 'coach_analysis_interval', 10),
-                max_log_generations=settings.coach_max_log_generations,
+            
+            # Coach requires OpenRouter API key and must be enabled
+            if not settings.coach_enabled:
+                logger.info("Evolution Coach disabled in settings")
+                self.coach_manager = None
+                return
+            
+            openrouter_api_key = getattr(settings, 'openrouter_api_key', '')
+            if not openrouter_api_key:
+                logger.warning("⚠ OpenRouter API key not configured - Coach unavailable")
+                self.coach_manager = None
+                return
+            
+            self.coach_manager = OpenAICoachManager(
+                analysis_interval=settings.coach_analysis_interval,
                 auto_apply=True,
-                auto_reload_model=settings.coach_auto_reload_model,
-                verbose=True
+                verbose=True,
+                openrouter_api_key=getattr(settings, 'openrouter_api_key', ''),
+                openrouter_model=getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet')
             )
             # Log to main logger (terminal), not coach window
-            logger.info(f"✓ 🤖 Evolution Coach initialized: interval={self.coach_manager.analysis_interval}g, model={settings.coach_model}")
+            logger.info(f"✓ 🤖 Evolution Coach initialized (OpenRouter): interval={self.coach_manager.analysis_interval} gens")
             # Update UI status bar if callback provided
             if self.status_callback:
-                self.status_callback(f"✓ 🤖 Coach ready: {settings.coach_model} (every {self.coach_manager.analysis_interval} gens)")
+                self.status_callback(f"✓ 🤖 Coach ready (every {self.coach_manager.analysis_interval} gens)")
         except Exception as e:
             logger.exception("Failed to initialize coach manager: %s", e)
             logger.warning("⚠ Evolution Coach unavailable - continuing without coach")
@@ -1009,7 +1017,7 @@ class StatsPanel(QWidget):
                         asyncio.set_event_loop(loop)
                         try:
                             success, summary = loop.run_until_complete(
-                                self.coach_manager.analyze_and_apply_with_agent(
+                                self.coach_manager.analyze_and_apply_with_openai_agent(
                                     population=population,
                                     fitness_config=fitness_config,
                                     ga_config=ga_config
@@ -1028,6 +1036,9 @@ class StatsPanel(QWidget):
                                         'population_size': ga_config.population_size,
                                     })
                                     logger.info("Updated optimizer config with Coach modifications")
+
+                                    # Save coach-modified parameters to .env for persistence
+                                    self._save_coach_modified_params_to_env()
                                 
                                 logger.info("✅ Coach agent completed: %s", summary)
                                 # Update status bar if callback available
@@ -1278,6 +1289,32 @@ class StatsPanel(QWidget):
                         stop_flag=stop_check
                     )
                     
+                    # Evolve islands in parallel (if any were created by the coach)
+                    if self.coach_manager:
+                        try:
+                            from core.models import OptimizationConfig
+                            optimizer_config = getattr(self.optimizer, 'config', {})
+                            ga_config = OptimizationConfig(
+                                population_size=optimizer_config.get('population_size', len(getattr(self.optimizer, 'population', {}).individuals) if getattr(self.optimizer, 'population', None) else 0),
+                                mutation_probability=optimizer_config.get('mutation_probability', 0.9),
+                                mutation_rate=optimizer_config.get('mutation_rate', 0.55),
+                                sigma=optimizer_config.get('sigma', 0.15),
+                                elite_fraction=optimizer_config.get('elite_fraction', 0.1),
+                                tournament_size=optimizer_config.get('tournament_size', 3),
+                                immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
+                            )
+                            # Provide the current main population so scheduler can merge elites
+                            population = getattr(self.optimizer, 'population', None)
+                            self.coach_manager.evolve_islands_step(
+                                data=data_for_optimizer,
+                                timeframe=self.current_tf,
+                                fitness_config=fitness_config,
+                                ga_config=ga_config,
+                                main_population=population
+                            )
+                        except Exception:
+                            pass
+                    
                     # CRITICAL: Record EVERY generation to agent_feed (not just when coach triggers)
                     population = getattr(self.optimizer, 'population', None)
                     if population and self.coach_manager:
@@ -1478,14 +1515,6 @@ class StatsPanel(QWidget):
                                         print(f"    EXIT: fib_lookback={backtest_params.fib_swing_lookback:3d} fib_lookahead={backtest_params.fib_swing_lookahead:2d} fib_target={backtest_params.fib_target_level:.3f}")
                                         print(f"    COSTS: fee_bp={backtest_params.fee_bp:.1f} slippage_bp={backtest_params.slippage_bp:.1f} max_hold={backtest_params.max_hold:3d}")
                                         
-                                        # Exit strategy toggles
-                                        exit_toggles = []
-                                        if backtest_params.use_fib_exits: exit_toggles.append("fib")
-                                        if backtest_params.use_stop_loss: exit_toggles.append("stop")
-                                        if backtest_params.use_traditional_tp: exit_toggles.append("tp")
-                                        if backtest_params.use_time_exit: exit_toggles.append("time")
-                                        print(f"    TOGGLES: {', '.join(exit_toggles) if exit_toggles else 'none'}")
-                                        
                                         print("")  # Empty line for readability
                                     
                                     # Population summary line
@@ -1514,9 +1543,9 @@ class StatsPanel(QWidget):
                                     immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
                                 )
                                 
-                                # Use agent-based analysis (tool calls)
+                                # Use OpenAI Agents coach analysis
                                 success, summary = loop.run_until_complete(
-                                    self.coach_manager.analyze_and_apply_with_agent(
+                                    self.coach_manager.analyze_and_apply_with_openai_agent(
                                         population=population,
                                         fitness_config=fitness_config,
                                         ga_config=ga_config
@@ -1734,26 +1763,26 @@ class StatsPanel(QWidget):
     def _save_evolution_params_to_env(self):
         """
         Save current evolution parameters from optimizer to .env file.
-        
+
         Coach Agent can modify these during optimization, so we save them
         when Stop is clicked to persist any changes.
         """
         if self.optimizer is None:
             logger.debug("No optimizer to save parameters from")
             return
-        
+
         try:
             from config.settings import SettingsManager
-            
+
             # Extract current config from optimizer
             config = getattr(self.optimizer, 'config', {})
             if not config:
                 logger.warning("Optimizer has no config to save")
                 return
-            
+
             # Build settings dict for GA parameters
             settings_dict = {}
-            
+
             # Core GA parameters
             if 'mutation_rate' in config:
                 settings_dict['ga_mutation_rate'] = float(config['mutation_rate'])
@@ -1767,20 +1796,74 @@ class StatsPanel(QWidget):
                 settings_dict['ga_mutation_probability'] = float(config['mutation_probability'])
             if 'population_size' in config:
                 settings_dict['ga_population_size'] = int(config['population_size'])
-            
+
             if not settings_dict:
                 logger.debug("No GA parameters to save")
                 return
-            
+
             # Save to .env
             SettingsManager.save_to_env(settings_dict)
             SettingsManager.reload_settings()
-            
+
             logger.info("💾 Saved evolution parameters to .env:")
             for key, value in settings_dict.items():
                 logger.info(f"  {key}={value}")
-            
+
             print(f"ENV saved ga_params={len(settings_dict)}")
-            
+
         except Exception as e:
             logger.exception("Failed to save evolution parameters: %s", e)
+
+    def _save_coach_modified_params_to_env(self):
+        """
+        Save GA parameters that were modified by the Evolution Coach to .env file.
+
+        This ensures that coach improvements persist across app restarts.
+        Called automatically when coach modifies parameters.
+        """
+        if self.optimizer is None:
+            logger.debug("No optimizer to save coach-modified parameters from")
+            return
+
+        try:
+            from config.settings import SettingsManager
+
+            # Extract current config from optimizer (which may have been modified by coach)
+            config = getattr(self.optimizer, 'config', {})
+            if not config:
+                logger.debug("Optimizer has no config to save")
+                return
+
+            # Build settings dict for GA parameters that coach can modify
+            coach_modifiable_params = {}
+
+            # Parameters that coach can modify
+            if 'mutation_probability' in config:
+                coach_modifiable_params['ga_mutation_probability'] = float(config['mutation_probability'])
+            if 'mutation_rate' in config:
+                coach_modifiable_params['ga_mutation_rate'] = float(config['mutation_rate'])
+            if 'sigma' in config:
+                coach_modifiable_params['ga_sigma'] = float(config['sigma'])
+            if 'elite_fraction' in config:
+                coach_modifiable_params['ga_elite_fraction'] = float(config['elite_fraction'])
+            if 'tournament_size' in config:
+                coach_modifiable_params['ga_tournament_size'] = int(config['tournament_size'])
+            if 'population_size' in config:
+                coach_modifiable_params['ga_population_size'] = int(config['population_size'])
+
+            if not coach_modifiable_params:
+                logger.debug("No coach-modifiable GA parameters to save")
+                return
+
+            # Save to .env
+            SettingsManager.save_to_env(coach_modifiable_params)
+            SettingsManager.reload_settings()
+
+            logger.info("🤖💾 Coach-modified GA parameters saved to .env:")
+            for key, value in coach_modifiable_params.items():
+                logger.info(f"  {key}={value}")
+
+            print(f"COACH_ENV saved ga_params={len(coach_modifiable_params)}")
+
+        except Exception as e:
+            logger.exception("Failed to save coach-modified evolution parameters: %s", e)

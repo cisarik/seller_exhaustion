@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Tuple, Dict, Any
 from copy import deepcopy
+from tqdm import tqdm
 
 from backtest.optimizer import (
     Individual, Population, get_param_bounds_for_timeframe,
@@ -19,15 +20,19 @@ from backtest.optimizer import (
 from strategy.seller_exhaustion import SellerParams, build_features
 from backtest.engine import run_backtest
 from core.models import BacktestParams, Timeframe, FitnessConfig
+from core.logging_utils import get_logger
+from config.settings import settings
+
+logger = get_logger(__name__)
 
 
-def evaluate_individual_worker(args: Tuple) -> Tuple[float, Dict[str, Any]]:
+def evaluate_individual_worker(args: Tuple) -> Tuple[int, float, Dict[str, Any]]:
     """
     Worker function for multiprocessing.
     
     Pure CPU evaluation using pandas feature pipeline.
     """
-    seller_params, backtest_params, data_dict, tf, fitness_config = args
+    idx, seller_params, backtest_params, data_dict, tf, fitness_config = args
     
     # Reconstruct DataFrame from dict (passed through pickle)
     data = pd.DataFrame(data_dict['values'], index=data_dict['index'], columns=data_dict['columns'])
@@ -36,10 +41,10 @@ def evaluate_individual_worker(args: Tuple) -> Tuple[float, Dict[str, Any]]:
         feats = build_features(data, seller_params, tf)
         result = run_backtest(feats, backtest_params)
         fitness = calculate_fitness(result['metrics'], fitness_config)
-        return fitness, result['metrics']
+        return idx, fitness, result['metrics']
     except Exception:
         # Return penalty fitness on error
-        return -100.0, {
+        return idx, -100.0, {
             'n': 0,
             'win_rate': 0.0,
             'avg_R': 0.0,
@@ -87,11 +92,11 @@ def evolution_step_multicore(
         n_workers = mp.cpu_count()
     
     # Step 1: Evaluate unevaluated individuals in parallel
-    print(f"\n=== Generation {population.generation} (Multi-Core CPU Mode - {n_workers} workers) ===")
+    logger.info("[Gen %s] Multi-core evolution (%s workers)", population.generation, n_workers)
     unevaluated = [ind for ind in population.individuals if ind.fitness == 0.0]
     
     if unevaluated:
-        print(f"Evaluating {len(unevaluated)} individuals on {n_workers} CPU cores...")
+        logger.info("[Gen %s] Evaluating %s individuals on %s cores", population.generation, len(unevaluated), n_workers)
         
         # Convert DataFrame to dict for pickling
         data_dict = {
@@ -102,8 +107,8 @@ def evolution_step_multicore(
         
         # Prepare arguments for workers
         args_list = [
-            (ind.seller_params, ind.backtest_params, data_dict, tf, fitness_config)
-            for ind in unevaluated
+            (i, ind.seller_params, ind.backtest_params, data_dict, tf, fitness_config)
+            for i, ind in enumerate(unevaluated)
         ]
         
         # Parallel evaluation (use spawn to avoid Qt fork deadlocks)
@@ -113,23 +118,26 @@ def evolution_step_multicore(
             # Fallback to default context if spawn unsupported
             ctx = mp.get_context()
         with ctx.Pool(processes=n_workers) as pool:
-            results = pool.map(evaluate_individual_worker, args_list)
-        
-        # Update individuals with results
-        for i, (ind, (fitness, metrics)) in enumerate(zip(unevaluated, results)):
-            ind.fitness = float(fitness)
-            ind.metrics = metrics
-            print(f"  [{i+1}/{len(unevaluated)}] Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | Win Rate: {metrics.get('win_rate', 0):.2%}")
+            with tqdm(total=len(args_list), desc=f"Gen {population.generation} eval", unit="ind", leave=False, disable=not getattr(settings, 'log_progress_bars', True)) as pbar:
+                for idx, fitness, metrics in pool.imap_unordered(evaluate_individual_worker, args_list):
+                    ind = unevaluated[idx]
+                    ind.fitness = float(fitness)
+                    ind.metrics = metrics
+                    pbar.update(1)
     
     # Update best ever
     current_best = population.get_best()
     if population.best_ever is None or current_best.fitness > population.best_ever.fitness:
         population.best_ever = deepcopy(current_best)
-        print(f"🌟 NEW BEST: Fitness={current_best.fitness:.4f}")
+        logger.info("[Gen %s] New best fitness = %.4f", population.generation, current_best.fitness)
     
     # Population statistics
     stats = population.get_stats()
-    print(f"Population stats: mean={stats['mean_fitness']:.4f}, std={stats['std_fitness']:.4f}, best={stats['max_fitness']:.4f}")
+    logger.info(
+        "[Gen %s] Pop: mean=%.4f std=%.4f best=%.4f",
+        population.generation,
+        stats['mean_fitness'], stats['std_fitness'], stats['max_fitness']
+    )
     
     # Record history
     population.history.append({

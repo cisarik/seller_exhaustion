@@ -126,10 +126,6 @@ class MainWindow(QMainWindow):
         # Connect param changes to trigger re-calculation
         self.param_editor.params_changed.connect(self.on_params_changed)
         
-        # Connect coach load/unload signals
-        self.param_editor.coach_load_requested.connect(self.on_coach_load_requested)
-        self.param_editor.coach_unload_requested.connect(self.on_coach_unload_requested)
-        
         # Set initial sizes: Chart 50%, Params 25%, Stats 25% (right panel with Optimize button bottom-right)
         splitter.setSizes([800, 400, 400])
         
@@ -590,85 +586,6 @@ class MainWindow(QMainWindow):
         finally:
             self.chart_view.hide_action_progress()
     
-    def on_coach_load_requested(self, model: str, prompt_version: str):
-        """Handle coach model load request."""
-        # Run async load in event loop
-        if HAS_QASYNC:
-            asyncio.create_task(self._load_coach_model_async(model, prompt_version))
-        else:
-            QMessageBox.warning(
-                self,
-                "Async Not Available",
-                "qasync is required for Evolution Coach. Please install: pip install qasync"
-            )
-    
-    async def _load_coach_model_async(self, model: str, prompt_version: str):
-        """Async handler for loading coach model."""
-        from backtest.llm_coach import GemmaCoachClient
-        
-        # Show loading state
-        self.param_editor.set_coach_loading(True)
-        self.chart_view.set_coach_status(f"🔍 Checking if model is loaded...")
-        
-        try:
-            # Create coach client if needed
-            if not hasattr(self, 'coach_client') or self.coach_client is None:
-                self.coach_client = GemmaCoachClient(
-                    model=model,
-                    prompt_version=prompt_version,
-                    verbose=True
-                )
-            
-            # Check if model is already loaded
-            model_loaded = await self.coach_client.check_model_loaded()
-            
-            if model_loaded:
-                # Model already loaded, just update UI
-                self.chart_view.set_coach_status(f"✅ Model already loaded: {model}")
-                self.param_editor.set_coach_model_loaded(True)
-                return
-            
-            # Model not loaded, proceed with loading
-            self.chart_view.set_coach_status(f"📦 Loading model: {model}...")
-            await self.coach_client.load_model()
-            
-            # Update UI
-            self.param_editor.set_coach_model_loaded(True)
-            self.chart_view.set_coach_status(f"✅ Model loaded: {model}")
-            
-        except Exception as e:
-            # Handle error
-            self.param_editor.set_coach_loading(False)
-            self.chart_view.set_coach_status(f"❌ Failed to load model: {e}")
-            QMessageBox.critical(self, "Model Load Error", 
-                f"Failed to load Evolution Coach model:\n\n{str(e)}\n\n"
-                f"Make sure LM Studio is running on port 1234.")
-    
-    def on_coach_unload_requested(self):
-        """Handle coach model unload request."""
-        # Run async unload in event loop
-        if HAS_QASYNC:
-            asyncio.create_task(self._unload_coach_model_async())
-        else:
-            QMessageBox.warning(
-                self,
-                "Async Not Available",
-                "qasync is required for Evolution Coach."
-            )
-    
-    async def _unload_coach_model_async(self):
-        """Async handler for unloading coach model."""
-        if hasattr(self, 'coach_client') and self.coach_client:
-            try:
-                await self.coach_client.unload_model()
-                self.param_editor.set_coach_model_loaded(False)
-                self.chart_view.set_coach_status("🗑️ Model unloaded")
-            except Exception as e:
-                self.chart_view.set_coach_status(f"⚠️ Error unloading model: {e}")
-        else:
-            self.param_editor.set_coach_model_loaded(False)
-            self.chart_view.set_coach_status("Model already unloaded")
-    
     def on_params_changed(self):
         """Handle parameter changes from the compact editor."""
         # Just mark that params changed - backtest will use latest values when run
@@ -845,7 +762,11 @@ class MainWindow(QMainWindow):
 
             self._persist_session(seller_params, best_individual.backtest_params, backtest_result)
             
-            print(f"✓ Chart and metrics updated with best strategy: {metrics['n']} trades, {metrics['win_rate']:.1%} win rate")
+            from core.logging_utils import get_logger
+            get_logger(__name__).info(
+                "✓ Chart and metrics updated with best strategy: %s trades, %.1f%% win rate",
+                metrics['n'], 100.0 * metrics['win_rate']
+            )
             
         except Exception as e:
             print(f"❌ Error updating chart: {e}")
@@ -867,6 +788,9 @@ class MainWindow(QMainWindow):
         """Refresh runtime flags from settings after the dialog saves."""
         try:
             SettingsManager.reload_settings()
+            # Apply new logging level immediately
+            from core.logging_utils import configure_logging
+            configure_logging(level=getattr(settings, 'ada_agent_log_level', 'INFO'))
         except Exception:
             pass
 
@@ -1426,16 +1350,15 @@ class MainWindow(QMainWindow):
     async def _check_coach_model_status_on_startup(self):
         """Check if Evolution Coach model is already loaded on app startup."""
         try:
-            from backtest.llm_coach import GemmaCoachClient
+# Removed import for deleted file
             # Removed: coach_log_manager (now using console logging)
             
             model = settings.coach_model
             
             # Create temporary client to check model status
+            # Uses agent.txt automatically (no prompt selection needed)
             temp_client = GemmaCoachClient(
                 model=model,
-                prompt_version=settings.coach_prompt_version,
-                system_prompt=getattr(settings, 'coach_system_prompt', settings.coach_prompt_version),
                 verbose=False
             )
             

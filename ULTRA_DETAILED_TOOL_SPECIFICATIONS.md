@@ -902,3 +902,42 @@ The Evolution Coach Agent is not just an observer—it's the **director of evolu
 [Continue with remaining 15 tools in similar ultra-detailed format...]
 
 Would you like me to continue with the remaining tools (fitness function, curriculum, exit strategies, etc.) in the same level of detail?
+## Tool Category 4: ISLANDS & SCHEDULER (Parallel Exploration)
+
+### Tool 4.1: `create_islands`
+Create N sub‑populations (islands) to promote parallel exploration. Default strategy `split` distributes current population evenly across islands.
+
+### Tool 4.2: `configure_island_scheduler`
+
+Purpose: Configure island ring‑migration and periodic merge of island elites into the main population. This gives the agent full control over information flow between parallel searches and the main search.
+
+Input Schema:
+```python
+{
+  "migration_cadence": int | null,      # every N island generations (0 disables)
+  "migration_size": int | null,         # top K moved between islands
+  "merge_to_main_cadence": int | null,  # every N island generations push elites to main (0 disables)
+  "merge_top_k": int | null             # top K from each island sent to main on merge
+}
+```
+
+Behavior:
+- Ring migration: Every `migration_cadence` generations, move top `migration_size` individuals from island i → island i+1 (wraparound).
+- Merge: Every `merge_to_main_cadence` generations, take `merge_top_k` elites from each island and replace the worst individuals in the main population.
+
+Best Practices:
+- Start small (cadence 5–10, K=1). Increase only if islands remain healthy.
+- Enable merge_to_main once islands have diverged for several generations.
+
+Example:
+```python
+configure_island_scheduler(
+  migration_cadence=5,
+  migration_size=1,
+  merge_to_main_cadence=10,
+  merge_top_k=2
+)
+```
+
+### Tool 4.3: `migrate_between_islands`
+Move a specific individual from one island to another (surgical intervention) to test mating combinations without collapsing diversity.

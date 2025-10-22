@@ -5,6 +5,7 @@ import numpy as np
 from indicators.local import ema, atr, zscore
 from indicators.fibonacci import add_fib_levels_to_df
 from core.models import Timeframe, minutes_to_bars
+from config.settings import settings
 from core.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -55,13 +56,17 @@ def build_features(
     t0 = time.perf_counter()
     out = _build_features_pandas(df, p, tf, add_fib, fib_lookback, fib_lookahead)
     dt = time.perf_counter() - t0
-    logger.info(
+    msg = (
         "Features built | tf=%s | bars=%d | signals=%d | %.3fs",
         tf.value,
         len(out),
         int(out.get("exhaustion", pd.Series(dtype=bool)).sum() if "exhaustion" in out else 0),
         dt,
     )
+    if getattr(settings, 'log_feature_builds', False):
+        logger.info(*msg)
+    else:
+        logger.debug(*msg)
     return out
 
 

@@ -67,6 +67,9 @@ class SettingsDialog(QDialog):
         
         # Evolution Coach Tab
         tabs.addTab(self.create_coach_tab(), "Evolution Coach")
+
+        # Logging Tab
+        tabs.addTab(self.create_logging_tab(), "Logging")
         
         layout.addWidget(tabs)
         
@@ -208,6 +211,50 @@ class SettingsDialog(QDialog):
         reset_btn.clicked.connect(self.reset_backtest_params)
         layout.addWidget(reset_btn)
         
+        layout.addStretch()
+        return widget
+
+    def create_logging_tab(self):
+        """Create logging configuration tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Console logging group
+        console_group = QGroupBox("Console Logging")
+        console_layout = QFormLayout()
+
+        # Log level
+        self.log_level = QComboBox()
+        for lvl in ["DEBUG", "INFO", "WARNING", "ERROR"]:
+            self.log_level.addItem(lvl, lvl)
+        console_layout.addRow("Log Level:", self.log_level)
+
+        # Progress bars
+        self.log_progress_bars = QCheckBox("Show progress bars during optimization (tqdm)")
+        self.log_progress_bars.setChecked(True)
+        console_layout.addRow("Progress Bars:", self.log_progress_bars)
+
+        console_group.setLayout(console_layout)
+        layout.addWidget(console_group)
+
+        # Feature logging group
+        feature_group = QGroupBox("Feature Build Logging")
+        feature_layout = QVBoxLayout()
+        self.log_feature_builds = QCheckBox("Log feature builds (INFO level)")
+        self.log_feature_builds.setToolTip("When enabled, emits a line per feature build; otherwise logs at DEBUG only.")
+        feature_layout.addWidget(self.log_feature_builds)
+        feature_group.setLayout(feature_layout)
+        layout.addWidget(feature_group)
+
+        # Coach logging group
+        coach_group = QGroupBox("Coach Logging")
+        coach_layout = QVBoxLayout()
+        self.coach_debug_payloads = QCheckBox("Log full LLM payloads and responses (COACH_DEBUG_PAYLOADS)")
+        self.coach_debug_payloads.setToolTip("Very noisy. Includes full prompts and responses for diagnostics.")
+        coach_layout.addWidget(self.coach_debug_payloads)
+        coach_group.setLayout(coach_layout)
+        layout.addWidget(coach_group)
+
         layout.addStretch()
         return widget
 
@@ -387,16 +434,149 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Coach Settings Group
-        coach_group = QGroupBox("Evolution Coach Settings")
+        # Enable/Provider Group (NEW)
+        enable_group = QGroupBox("Evolution Coach")
+        enable_layout = QFormLayout()
+        
+        # Enable checkbox
+        self.coach_enabled = QCheckBox("Enable Evolution Coach Agent")
+        self.coach_enabled.setChecked(True)
+        self.coach_enabled.setToolTip("Enable/disable the Evolution Coach agent during optimization")
+        enable_layout.addRow("Enabled:", self.coach_enabled)
+        
+        # Provider selection
+        self.coach_provider = QComboBox()
+        self.coach_provider.addItem("🖥️  Local (LM Studio)", "local")
+        self.coach_provider.addItem("🌐 Online (Openrouter)", "openrouter")
+        self.coach_provider.setCurrentIndex(0)
+        self.coach_provider.setToolTip(
+            "Choose LLM provider:\n"
+            "• Local: Free, private, requires LM Studio installed\n"
+            "• Openrouter: Paid, faster, more powerful models (Claude, GPT-4)"
+        )
+        self.coach_provider.currentIndexChanged.connect(self._on_provider_changed)
+        enable_layout.addRow("Provider:", self.coach_provider)
+        
+        enable_group.setLayout(enable_layout)
+        layout.addWidget(enable_group)
+        
+        # LM Studio Configuration (local provider only)
+        self.lms_group = QGroupBox("LM Studio Configuration")
+        lms_layout = QFormLayout()
+        
+        # Model dropdown (populated by lms ls)
+        model_row = QHBoxLayout()
+        self.lms_model = QComboBox()
+        self.lms_model.setEditable(True)
+        self.lms_model.addItem("google/gemma-3-12b", "google/gemma-3-12b")
+        self.lms_model.addItem("gemma-2-9b-it", "gemma-2-9b-it")
+        self.lms_model.setToolTip("Select model from LM Studio")
+        model_row.addWidget(self.lms_model)
+        
+        # Refresh models button
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setMaximumWidth(40)
+        refresh_btn.setToolTip("Refresh available models from LM Studio")
+        refresh_btn.clicked.connect(self._refresh_lms_models)
+        model_row.addWidget(refresh_btn)
+        
+        lms_layout.addRow("Model:", model_row)
+        
+        # Context Length
+        self.coach_context_length = QSpinBox()
+        self.coach_context_length.setRange(1000, 131072)
+        self.coach_context_length.setValue(5000)
+        self.coach_context_length.setSingleStep(1000)
+        self.coach_context_length.setSuffix(" tokens")
+        self.coach_context_length.setToolTip("Model context window size (131072 = Gemma max)")
+        lms_layout.addRow("Context Length:", self.coach_context_length)
+        
+        # GPU Offload Ratio
+        self.coach_gpu = QDoubleSpinBox()
+        self.coach_gpu.setRange(0.0, 1.0)
+        self.coach_gpu.setSingleStep(0.1)
+        self.coach_gpu.setDecimals(1)
+        self.coach_gpu.setValue(0.6)
+        self.coach_gpu.setToolTip("GPU offload ratio: 0.0 = CPU only, 1.0 = max GPU")
+        lms_layout.addRow("GPU Offload:", self.coach_gpu)
+        
+        # Auto Reload Model
+        self.coach_auto_reload = QCheckBox("Auto reload model after analysis")
+        self.coach_auto_reload.setChecked(True)
+        self.coach_auto_reload.setToolTip("Automatically unload and reload model to clear context window")
+        lms_layout.addRow("Auto Reload:", self.coach_auto_reload)
+        
+        self.lms_group.setLayout(lms_layout)
+        layout.addWidget(self.lms_group)
+        
+        # Openrouter Configuration (online provider only)
+        self.openrouter_group = QGroupBox("Openrouter Configuration")
+        openrouter_layout = QFormLayout()
+        
+        # API Key input
+        api_key_row = QHBoxLayout()
+        self.openrouter_api_key = QLineEdit()
+        self.openrouter_api_key.setEchoMode(QLineEdit.Password)
+        self.openrouter_api_key.setPlaceholderText("sk-or-v1-...")
+        self.openrouter_api_key.setToolTip(
+            "Openrouter API key\n"
+            "Get one at: https://openrouter.ai/keys"
+        )
+        api_key_row.addWidget(self.openrouter_api_key)
+        
+        # Show/hide API key button
+        self.show_key_btn = QPushButton("👁️")
+        self.show_key_btn.setMaximumWidth(40)
+        self.show_key_btn.setCheckable(True)
+        self.show_key_btn.setToolTip("Show/hide API key")
+        self.show_key_btn.clicked.connect(lambda checked: 
+            self.openrouter_api_key.setEchoMode(
+                QLineEdit.Normal if checked else QLineEdit.Password
+            )
+        )
+        api_key_row.addWidget(self.show_key_btn)
+        
+        openrouter_layout.addRow("API Key:", api_key_row)
+        
+        # Model input with popular defaults
+        self.openrouter_model = QComboBox()
+        self.openrouter_model.setEditable(True)
+        self.openrouter_model.addItem("anthropic/claude-3.5-sonnet", "anthropic/claude-3.5-sonnet")
+        self.openrouter_model.addItem("openai/gpt-4o", "openai/gpt-4o")
+        self.openrouter_model.addItem("anthropic/claude-3-opus", "anthropic/claude-3-opus")
+        self.openrouter_model.addItem("google/gemini-pro-1.5", "google/gemini-pro-1.5")
+        self.openrouter_model.setToolTip(
+            "Openrouter model identifier\n"
+            "Browse models at: https://openrouter.ai/models"
+        )
+        openrouter_layout.addRow("Model:", self.openrouter_model)
+        
+        # Info label
+        info_label = QLabel(
+            "💡 <b>Recommended for Evolution Coach:</b><br>"
+            "• <b>Claude 3.5 Sonnet</b>: Best reasoning, ~$0.06 per analysis<br>"
+            "• <b>GPT-4o</b>: Fast, good quality, ~$0.04 per analysis<br>"
+            "• <b>Claude 3 Opus</b>: Most powerful, ~$0.15 per analysis"
+        )
+        info_label.setWordWrap(True)
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setStyleSheet("color: #888; font-size: 11px; padding: 8px;")
+        openrouter_layout.addRow(info_label)
+        
+        self.openrouter_group.setLayout(openrouter_layout)
+        layout.addWidget(self.openrouter_group)
+        
+        # Common Coach Settings Group
+        coach_group = QGroupBox("Coach Behavior Settings")
         coach_layout = QFormLayout()
         
         # System Prompt Selection
         self.coach_system_prompt = QComboBox()
+        self.coach_system_prompt.addItem("🤖 Agent Mode (agent02)", "agent02")
         self.coach_system_prompt.addItem("🤖 Agent Mode (agent01)", "agent01")
         self.coach_system_prompt.addItem("blocking_coach_v1", "blocking_coach_v1")
         self.coach_system_prompt.addItem("async_coach_v1", "async_coach_v1")
-        self.coach_system_prompt.setCurrentIndex(0)  # Default to agent01
+        self.coach_system_prompt.setCurrentIndex(0)  # Default to agent02
         self.coach_system_prompt.setToolTip("Select the system prompt version for the coach\nagent01 = Full agent with tool-calling capabilities")
         coach_layout.addRow("System Prompt:", self.coach_system_prompt)
         
@@ -408,45 +588,7 @@ class SettingsDialog(QDialog):
         self.coach_interval.setToolTip("Coach analyzes every N generations (10, 20, 30, etc)")
         coach_layout.addRow("Analysis Interval:", self.coach_interval)
         
-        # Population Context Window (how many generations coach sees)
-        self.coach_pop_window = QSpinBox()
-        self.coach_pop_window.setRange(1, 100)
-        self.coach_pop_window.setValue(10)
-        self.coach_pop_window.setSuffix(" gens")
-        self.coach_pop_window.setToolTip("Coach sees stats from last N generations for context")
-        coach_layout.addRow("Population Context Window:", self.coach_pop_window)
-        
-        # Max Log Generations
-        self.coach_max_log_gens = QSpinBox()
-        self.coach_max_log_gens.setRange(5, 100)
-        self.coach_max_log_gens.setValue(25)
-        self.coach_max_log_gens.setSuffix(" gens")
-        self.coach_max_log_gens.setToolTip("Keep last N generations in log history sent to coach")
-        coach_layout.addRow("Max Log Generations:", self.coach_max_log_gens)
-        
-        # Auto Reload Model
-        self.coach_auto_reload = QCheckBox("Auto reload model after recommendations")
-        self.coach_auto_reload.setChecked(True)
-        self.coach_auto_reload.setToolTip("Automatically unload and reload model to clear context window")
-        coach_layout.addRow("Auto Reload:", self.coach_auto_reload)
-        
-        # Context Length
-        self.coach_context_length = QSpinBox()
-        self.coach_context_length.setRange(1000, 131072)
-        self.coach_context_length.setValue(5000)
-        self.coach_context_length.setSingleStep(1000)
-        self.coach_context_length.setSuffix(" tokens")
-        self.coach_context_length.setToolTip("Model context window size (131072 = Gemma max)")
-        coach_layout.addRow("Context Length:", self.coach_context_length)
-        
-        # GPU Offload Ratio
-        self.coach_gpu = QDoubleSpinBox()
-        self.coach_gpu.setRange(0.0, 1.0)
-        self.coach_gpu.setSingleStep(0.1)
-        self.coach_gpu.setDecimals(1)
-        self.coach_gpu.setValue(0.6)
-        self.coach_gpu.setToolTip("GPU offload ratio: 0.0 = CPU only, 1.0 = max GPU")
-        coach_layout.addRow("GPU Offload:", self.coach_gpu)
+        # Removed: Population Context Window + Max Log Generations (full history is used)
         
         # LLM Response Timeout
         self.coach_response_timeout = QSpinBox()
@@ -460,17 +602,7 @@ class SettingsDialog(QDialog):
         )
         coach_layout.addRow("LLM Response Timeout:", self.coach_response_timeout)
         
-        # Agent Max Iterations
-        self.coach_agent_max_iterations = QSpinBox()
-        self.coach_agent_max_iterations.setRange(1, 20)
-        self.coach_agent_max_iterations.setValue(10)
-        self.coach_agent_max_iterations.setSuffix(" iterations")
-        self.coach_agent_max_iterations.setToolTip(
-            "Maximum tool calls allowed for agent per analysis session\n"
-            "Typical: 5-7 tool calls (3-5 iterations)\n"
-            "Agent will diagnose problems and take corrective actions"
-        )
-        coach_layout.addRow("Agent Max Iterations:", self.coach_agent_max_iterations)
+        # Removed: Agent Max Iterations (fixed at 50 internally)
         
         coach_group.setLayout(coach_layout)
         layout.addWidget(coach_group)
@@ -523,19 +655,113 @@ class SettingsDialog(QDialog):
     
     def reset_coach_params(self):
         """Reset Evolution Coach parameters to defaults."""
+        self.coach_enabled.setChecked(True)
+        self.coach_provider.setCurrentIndex(0)  # Local
         idx = self.coach_system_prompt.findData("agent01")
         if idx >= 0:
             self.coach_system_prompt.setCurrentIndex(idx)
         self.coach_interval.setValue(10)
-        self.coach_pop_window.setValue(10)
-        self.coach_max_log_gens.setValue(25)
+        # No population window / max log generations
         self.coach_auto_reload.setChecked(True)
         self.coach_context_length.setValue(5000)
         self.coach_gpu.setValue(0.6)
         self.coach_response_timeout.setValue(3600)  # 1 hour default
-        self.coach_agent_max_iterations.setValue(10)
         self.cpu_workers.setValue(7)
         self.adam_epsilon_stability_coach.setValue(1e-8)
+        self._on_provider_changed(0)
+    
+    def _on_provider_changed(self, index):
+        """Show/hide provider-specific settings based on selection."""
+        provider = self.coach_provider.currentData()
+        
+        # Show/hide provider-specific groups
+        self.lms_group.setVisible(provider == "local")
+        self.openrouter_group.setVisible(provider == "openrouter")
+        
+        # No agent iteration control here
+    
+    def _refresh_lms_models(self):
+        """Refresh available LM Studio models via 'lms ls' command."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["lms", "ls"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                # Parse lms ls output
+                lines = result.stdout.strip().split('\n')
+                models = []
+                
+                for line in lines:
+                    # Skip header lines
+                    if 'LLM' in line or 'EMBEDDING' in line or 'PARAMS' in line:
+                        continue
+                    
+                    # Extract model names (format: "model-name    SIZE    ARCH    ...")
+                    parts = line.split()
+                    if parts and len(parts) >= 2:
+                        model_name = parts[0]
+                        # Skip empty lines and separator lines
+                        if model_name and not model_name.startswith('-'):
+                            models.append(model_name)
+                
+                if models:
+                    # Save current selection
+                    current = self.lms_model.currentText()
+                    
+                    # Update dropdown
+                    self.lms_model.clear()
+                    for model in models:
+                        self.lms_model.addItem(model, model)
+                    
+                    # Restore selection if it exists
+                    idx = self.lms_model.findText(current)
+                    if idx >= 0:
+                        self.lms_model.setCurrentIndex(idx)
+                    
+                    QMessageBox.information(
+                        self,
+                        "Models Refreshed",
+                        f"Found {len(models)} models in LM Studio:\n\n" + "\n".join(f"• {m}" for m in models[:10])
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "No Models Found",
+                        "No models found in LM Studio.\n\n"
+                        "Download models using:\n"
+                        "lms download <model-name>\n\n"
+                        "Example:\n"
+                        "lms download google/gemma-3-12b"
+                    )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    "Failed to list LM Studio models.\n\n"
+                    "Make sure LM Studio CLI is installed:\n"
+                    "curl -fsSL https://lmstudio.ai/lms-cli/install.sh | bash"
+                )
+        
+        except FileNotFoundError:
+            QMessageBox.critical(
+                self,
+                "LM Studio CLI Not Found",
+                "'lms' command not found in PATH.\n\n"
+                "Install LM Studio CLI:\n"
+                "curl -fsSL https://lmstudio.ai/lms-cli/install.sh | bash\n\n"
+                "Then restart terminal and try again."
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to refresh models: {e}"
+            )
     
     def load_from_settings(self):
         """Load UI values from saved settings."""
@@ -574,24 +800,68 @@ class SettingsDialog(QDialog):
         self.show_volume.setChecked(settings.chart_volume)
         self.show_signals.setChecked(settings.chart_signals)
         self.show_entries.setChecked(settings.chart_entries)
+
+        # Logging
+        # Log level
+        lvl = str(getattr(settings, 'ada_agent_log_level', 'INFO')).upper()
+        idx = self.log_level.findData(lvl)
+        if idx >= 0:
+            self.log_level.setCurrentIndex(idx)
+        else:
+            self.log_level.setCurrentText(lvl)
+        # Progress bars and feature builds
+        self.log_progress_bars.setChecked(bool(getattr(settings, 'log_progress_bars', True)))
+        self.log_feature_builds.setChecked(bool(getattr(settings, 'log_feature_builds', False)))
+        # Coach debug payloads
+        self.coach_debug_payloads.setChecked(bool(getattr(settings, 'coach_debug_payloads', False)))
         
         # Evolution Coach settings
+        # Enable/Provider
+        self.coach_enabled.setChecked(getattr(settings, 'coach_enabled', True))
+        
+        provider = getattr(settings, 'coach_provider', 'local')
+        idx = self.coach_provider.findData(provider)
+        if idx >= 0:
+            self.coach_provider.setCurrentIndex(idx)
+        
+        # LM Studio settings
+        model = getattr(settings, 'coach_model', 'google/gemma-3-12b')
+        idx = self.lms_model.findData(model)
+        if idx >= 0:
+            self.lms_model.setCurrentIndex(idx)
+        else:
+            # Model not in list, add it
+            self.lms_model.addItem(model, model)
+            self.lms_model.setCurrentIndex(self.lms_model.count() - 1)
+        
+        self.coach_context_length.setValue(int(getattr(settings, 'coach_context_length', 5000)))
+        self.coach_gpu.setValue(float(getattr(settings, 'coach_gpu', 0.6)))
+        self.coach_auto_reload.setChecked(bool(getattr(settings, 'coach_auto_reload_model', True)))
+        
+        # Openrouter settings
+        self.openrouter_api_key.setText(getattr(settings, 'openrouter_api_key', ''))
+        openrouter_model = getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet')
+        idx = self.openrouter_model.findData(openrouter_model)
+        if idx >= 0:
+            self.openrouter_model.setCurrentIndex(idx)
+        else:
+            self.openrouter_model.setCurrentText(openrouter_model)
+        
+        # Common coach settings
         if hasattr(settings, 'coach_system_prompt'):
             idx = self.coach_system_prompt.findData(settings.coach_system_prompt)
             if idx >= 0:
                 self.coach_system_prompt.setCurrentIndex(idx)
+        
         self.coach_interval.setValue(int(getattr(settings, 'coach_analysis_interval', 10)))
-        self.coach_pop_window.setValue(int(getattr(settings, 'coach_population_window', 10)))
-        self.coach_max_log_gens.setValue(int(settings.coach_max_log_generations))
-        self.coach_auto_reload.setChecked(bool(settings.coach_auto_reload_model))
-        self.coach_context_length.setValue(int(settings.coach_context_length))
-        self.coach_gpu.setValue(float(settings.coach_gpu))
         self.coach_response_timeout.setValue(int(getattr(settings, 'coach_response_timeout', 3600)))
-        self.coach_agent_max_iterations.setValue(int(getattr(settings, 'coach_agent_max_iterations', 10)))
         
         # CPU Workers and ADAM epsilon stability
         self.cpu_workers.setValue(getattr(settings, 'cpu_workers', 7))
-        self.adam_epsilon_stability_coach.setValue(settings.adam_epsilon_stability)
+        self.adam_epsilon_stability_coach.setValue(getattr(settings, 'adam_epsilon_stability', 1e-8))
+        
+        # Trigger provider change to show/hide appropriate sections
+        self._on_provider_changed(self.coach_provider.currentIndex())
     
 
     
@@ -638,15 +908,22 @@ class SettingsDialog(QDialog):
                 'chart_exits': True,  # Always true for backwards compatibility (not shown in UI)
                 
                 # Evolution Coach settings
+                'coach_enabled': self.coach_enabled.isChecked(),
+                'coach_provider': self.coach_provider.currentData(),
+                'coach_model': self.lms_model.currentData() or self.lms_model.currentText(),
+                'openrouter_api_key': self.openrouter_api_key.text(),
+                'openrouter_model': self.openrouter_model.currentData() or self.openrouter_model.currentText(),
                 'coach_system_prompt': self.coach_system_prompt.currentData(),
                 'coach_analysis_interval': self.coach_interval.value(),
-                'coach_population_window': self.coach_pop_window.value(),
-                'coach_max_log_generations': self.coach_max_log_gens.value(),
                 'coach_auto_reload_model': self.coach_auto_reload.isChecked(),
                 'coach_context_length': self.coach_context_length.value(),
                 'coach_gpu': self.coach_gpu.value(),
                 'coach_response_timeout': self.coach_response_timeout.value(),
-                'coach_agent_max_iterations': self.coach_agent_max_iterations.value(),
+                # Logging
+                'ada_agent_log_level': self.log_level.currentData() or self.log_level.currentText(),
+                'log_progress_bars': self.log_progress_bars.isChecked(),
+                'log_feature_builds': self.log_feature_builds.isChecked(),
+                'coach_debug_payloads': self.coach_debug_payloads.isChecked(),
                 
                 # CPU Workers
                 'cpu_workers': self.cpu_workers.value(),

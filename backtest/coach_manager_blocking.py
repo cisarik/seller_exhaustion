@@ -31,7 +31,7 @@ from backtest.coach_mutations import CoachMutationManager, MutationRecord
 from backtest.coach_protocol import (
     CoachAnalysis, EvolutionState, load_coach_prompt
 )
-from backtest.llm_coach import GemmaCoachClient
+from backtest.unified_llm_client import UnifiedLLMClient
 from backtest.coach_tools import CoachToolkit
 from backtest.coach_agent_executor import AgentExecutor
 from backtest.optimizer import Population
@@ -64,64 +64,56 @@ class BlockingCoachManager:
     
     def __init__(
         self,
-        base_url: str = "http://localhost:1234",
-        model: Optional[str] = None,
-        prompt_version: str = "agent01",
-        system_prompt: Optional[str] = None,
         analysis_interval: Optional[int] = None,
-        max_log_generations: Optional[int] = None,
         auto_apply: bool = True,
+        verbose: bool = True,
+        # Legacy parameters (ignored for backward compatibility)
+        provider: Optional[str] = None,
+        base_url: str = None,
+        model: Optional[str] = None,
+        max_log_generations: Optional[int] = None,
         auto_reload_model: Optional[bool] = None,
-        verbose: bool = True
     ):
         """
-        Initialize Blocking Coach Manager.
+        Initialize Blocking Coach Manager (OpenRouter-based).
+        
+        Uses agent.txt as system prompt (always, no configuration needed).
         
         Args:
-            base_url: LM Studio endpoint
-            model: Model name (loaded from settings if None)
-            prompt_version: Coach prompt version (blocking_coach_v1 recommended)
-            system_prompt: System prompt version (if None, uses prompt_version)
             analysis_interval: Analyze every N generations (e.g., 10)
-            max_log_generations: Keep last N generations in logs
             auto_apply: Automatically apply recommendations
-            auto_reload_model: Auto unload/reload model after recommendations
             verbose: Print detailed logs
+            
+        Legacy parameters (ignored):
+            provider, base_url, model, max_log_generations, auto_reload_model
         """
-        # Load from settings if not provided
+        # Load from settings
         from config.settings import settings
         
-        self.base_url = base_url
-        self.model = model or settings.coach_model
-        self.prompt_version = prompt_version or "blocking_coach_v1"
-        self.system_prompt = system_prompt or getattr(
-            settings, 'coach_system_prompt', self.prompt_version
-        )
-        self.analysis_interval = analysis_interval or getattr(
-            settings, 'coach_analysis_interval', 10
-        )
-        self.population_window = getattr(
-            settings, 'coach_population_window', 10
-        )
-        self.max_log_generations = max_log_generations or getattr(
-            settings, 'coach_max_log_generations', 25
-        )
+        self.analysis_interval = analysis_interval or settings.coach_analysis_interval
         self.auto_apply = auto_apply
-        self.auto_reload_model = auto_reload_model if auto_reload_model is not None else getattr(
-            settings, 'coach_auto_reload_model', True
-        )
         self.verbose = verbose
-        self.debug_payloads = getattr(settings, 'coach_debug_payloads', False)
+        self.debug_payloads = settings.coach_debug_payloads
+        
+        # Island model state (evolves alongside main GA when created via tools)
+        self.islands: Dict[int, Population] = {}
+        # Policy controlled by agent via tool (defaults below)
+        self.island_policy = {
+            "migration_cadence": 5,        # ring migration between islands every N island gens
+            "migration_size": 1,           # top K moved between islands
+            "merge_to_main_cadence": 0,    # disabled by default (0 = off)
+            "merge_top_k": 1               # top K from each island to main
+        }
         
         # Log initialization to console
         print(f"✓ 🤖 Evolution Coach Manager initialized: "
-              f"interval={self.analysis_interval} gens, window={self.population_window} gens")
+              f"provider=openrouter, interval={self.analysis_interval} gens, full-history mode")
         if self.debug_payloads:
             logger.info("Evolution Coach debug payload logging ENABLED (full LLM traffic will be logged)")
             print("✓ 🧪 Coach debug payload logging enabled")
         
         # State tracking
-        self.coach_client: Optional[GemmaCoachClient] = None
+        self.coach_client: Optional[UnifiedLLMClient] = None
         self.mutation_manager = CoachMutationManager(verbose=verbose)
         
         self.last_session: Optional[CoachAnalysisSession] = None
@@ -224,12 +216,7 @@ class BlockingCoachManager:
             # Print to console
             print(f"[Gen {generation:3d}] {log_line}")
         
-        # Trim old logs
-        if len(self.generation_logs) > self.max_log_generations * 10:
-            min_gen = generation - self.max_log_generations
-            self.generation_logs = [
-                (g, line) for g, line in self.generation_logs if g >= min_gen
-            ]
+        # No trimming: keep full history (agent benefits from long context)
     
     def get_recent_logs(self, n_generations: Optional[int] = None) -> List[str]:
         """
@@ -237,16 +224,13 @@ class BlockingCoachManager:
         
         Args:
             n_generations: Number of generations to include. 
-                          If None, uses self.population_window
+                          If None, includes full history
         
         Returns:
             List of formatted log lines from agent_feed
         """
-        if n_generations is None:
-            n_generations = self.population_window
-        
-        # Get recent generations from agent_feed
-        recent_gens = agent_feed.get_generations(last_n=n_generations)
+        # Get ALL generations from agent_feed
+        recent_gens = agent_feed.get_generations(last_n=None)
         
         if not recent_gens:
             return ["No generation data available"]
@@ -390,11 +374,14 @@ class BlockingCoachManager:
             session=session,
             fitness_config=fitness_config,
             ga_config=ga_config,
-            mutation_manager=self.mutation_manager
+            mutation_manager=self.mutation_manager,
+            islands_registry=self.islands,
+            island_policy_reference=self.island_policy
         )
         
         # Step 4: Create agent executor
-        max_iterations = getattr(settings, 'coach_agent_max_iterations', 10)
+        # Fixed budget: allow up to 50 iterations/tool calls per session
+        max_iterations = 50
         agent = AgentExecutor(
             llm_client=self.coach_client,
             toolkit=toolkit,
@@ -441,17 +428,6 @@ class BlockingCoachManager:
                 # Store toolkit for later inspection
                 self.last_toolkit = toolkit
                 
-                # Step 7: Optionally reload model to clear context
-                if self.auto_reload_model:
-                    print(
-                        f"[AGENT  ] 🔄 Reloading model to clear context window"
-                    )
-                    try:
-                        await self.coach_client.reload_model()
-                        print(f"[AGENT  ] ✅ Model reloaded")
-                    except Exception as e:
-                        logger.warning(f"Failed to reload model: {e}")
-                
                 print(
                     f"[AGENT  ] ✅ Agent workflow complete - "
                     f"GA will resume with modified population"
@@ -463,18 +439,28 @@ class BlockingCoachManager:
                     "total_actions": len(toolkit.actions_log),
                     "iterations": result['iterations'],
                     "tool_calls": result['tool_calls_count'],
-                    "actions_log": toolkit.actions_log
+                    "actions_log": toolkit.actions_log,
+                    "description": result.get('final_summary', 'Agent completed analysis'),  # For backward compatibility
+                    "summary": result.get('final_summary', 'Agent completed analysis')  # Preferred field name
                 }
             else:
                 error = result.get("error", "Unknown error")
                 # Log to console only
                 logger.error("Agent failed: %s", error)
-                return False, {"error": error}
+                return False, {
+                    "error": error,
+                    "description": f"Agent failed: {error}",  # For backward compatibility
+                    "summary": f"Agent failed: {error}"  # Preferred field name
+                }
                 
         except Exception as e:
             # Log errors to console only - not useful for agent
             logger.exception("Agent analysis failed: %s", e)
-            return False, {"error": str(e)}
+            return False, {
+                "error": str(e),
+                "description": f"Analysis error: {str(e)}",  # For backward compatibility
+                "summary": f"Analysis error: {str(e)}"  # Preferred field name
+            }
     
     def _build_agent_observation(self, session: CoachAnalysisSession, fitness_config: FitnessConfig, ga_config: OptimizationConfig) -> str:
         """
@@ -532,10 +518,10 @@ GA CONFIGURATION:
 """
         
         # Add generation history from agent_feed
-        recent_gens = agent_feed.get_generations(last_n=self.population_window)
+        recent_gens = agent_feed.get_generations(last_n=None)
         
         if recent_gens:
-            obs += f"EVOLUTION HISTORY (last {len(recent_gens)} generations):\n\n"
+            obs += f"EVOLUTION HISTORY ({len(recent_gens)} generations):\n\n"
             
             # Header row
             obs += f"{'Gen':>4} | {'Best Fit':>8} | {'Mean Fit':>8} | {'Diversity':>9} | {'Trades':>6} | {'Events':>20}\n"
@@ -629,17 +615,20 @@ Start by calling analyze_population() to get detailed statistics.
             return "HIGH"
     
     async def _initialize_client(self):
-        """Initialize coach client if not already done."""
+        """Initialize OpenRouter LLM client if not already done."""
         if not self.coach_client:
-            self.coach_client = GemmaCoachClient(
-                base_url=self.base_url,
-                model=self.model,
-                prompt_version="agent01",  # Use agent prompt
-                system_prompt="agent01",
+            from config.settings import settings
+            
+            # Initialize UnifiedLLMClient (OpenRouter-only)
+            self.coach_client = UnifiedLLMClient(
+                openrouter_api_key=getattr(settings, 'openrouter_api_key', None),
+                openrouter_model=getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet'),
+                timeout=settings.coach_response_timeout,
+                temperature=0.3,
                 verbose=self.verbose,
                 debug_payloads=self.debug_payloads
             )
-            logger.debug(f"✓ 🔌 LM Studio agent client initialized")
+            logger.debug(f"✓ 🔌 OpenRouter LLM client initialized")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get coach manager statistics."""
@@ -650,7 +639,72 @@ Start by calling analyze_population() to get detailed statistics.
                 self.last_session.to_dict() if self.last_session else None
             ),
             "mutation_stats": self.mutation_manager.get_stats(),
+            "islands": {k: getattr(v, 'size', 0) for k, v in self.islands.items()},
         }
+
+    def evolve_islands_step(self, data, timeframe, fitness_config, ga_config: OptimizationConfig, main_population: Optional[Population] = None) -> None:
+        """Evolve islands one generation and perform periodic migrations.
+        No-op if no islands exist.
+        """
+        if not self.islands:
+            return
+        try:
+            from backtest.optimizer import evolution_step
+            from copy import deepcopy
+            # Evolve all islands
+            for island_id, pop in list(self.islands.items()):
+                new_pop = evolution_step(
+                    population=pop,
+                    data=data,
+                    tf=timeframe,
+                    fitness_config=fitness_config,
+                    ga_config=ga_config
+                )
+                self.islands[island_id] = new_pop
+                self.add_log(new_pop.generation, f"ISLAND {island_id} evolved → best={new_pop.get_best().fitness:.4f}")
+            # Periodic ring migration
+            ids = sorted(self.islands.keys())
+            if not ids:
+                return
+            ref_gen = self.islands[ids[0]].generation
+            mig_cad = int(self.island_policy.get("migration_cadence", 0))
+            mig_sz = int(self.island_policy.get("migration_size", 1))
+            if mig_cad > 0 and ref_gen % mig_cad == 0 and len(ids) > 1:
+                for i, src_id in enumerate(ids):
+                    dst_id = ids[(i + 1) % len(ids)]
+                    src = self.islands[src_id]
+                    dst = self.islands[dst_id]
+                    # Select migrants
+                    migrants = sorted(src.individuals, key=lambda x: x.fitness, reverse=True)[: mig_sz]
+                    migrants = [deepcopy(m) for m in migrants]
+                    # Replace worst in destination
+                    dst_sorted = sorted(dst.individuals, key=lambda x: x.fitness, reverse=True)
+                    keep = dst_sorted[: max(0, len(dst_sorted) - mig_sz)]
+                    dst.individuals = keep + migrants
+                    dst.size = len(dst.individuals)
+                    self.add_log(ref_gen, f"MIGRATE {len(migrants)} from island {src_id} → {dst_id}")
+
+            # Periodic merge from islands to main population
+            merge_cad = int(self.island_policy.get("merge_to_main_cadence", 0))
+            merge_k = int(self.island_policy.get("merge_top_k", 0))
+            if main_population is not None and merge_cad > 0 and merge_k > 0 and ref_gen % merge_cad == 0:
+                try:
+                    # Collect elites from all islands
+                    elites = []
+                    for island_id, pop in self.islands.items():
+                        top = sorted(pop.individuals, key=lambda x: x.fitness, reverse=True)[: merge_k]
+                        elites.extend([deepcopy(ind) for ind in top])
+                    if elites:
+                        # Replace worst in main population
+                        dst_sorted = sorted(main_population.individuals, key=lambda x: x.fitness, reverse=True)
+                        keep = dst_sorted[: max(0, len(dst_sorted) - len(elites))]
+                        main_population.individuals = keep + elites
+                        main_population.size = len(main_population.individuals)
+                        self.add_log(ref_gen, f"MERGE {len(elites)} island elites → main population")
+                except Exception as me:
+                    logger.exception("Island→main merge failed: %s", me)
+        except Exception as e:
+            logger.exception("Island evolution step failed")
 
 
 # Example usage

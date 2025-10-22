@@ -6,6 +6,10 @@ Uses genetic algorithm with:
 - Arithmetic crossover
 - Gaussian mutation (small, controlled changes)
 - Elitism to preserve best solutions
+
+Console output cleanliness:
+- Replaces per-individual print spam with a compact tqdm progress bar
+- Emits concise, human-friendly summaries via the shared logger
 """
 
 from dataclasses import dataclass, field
@@ -16,11 +20,16 @@ import random
 from copy import deepcopy
 import json
 from pathlib import Path
+from tqdm import tqdm
 
 from strategy.seller_exhaustion import SellerParams
 from core.models import BacktestParams, Timeframe, minutes_to_bars
 from backtest.engine import run_backtest
 from strategy.seller_exhaustion import build_features
+from core.logging_utils import get_logger
+from config.settings import settings
+
+logger = get_logger(__name__)
 
 
 # Valid Fibonacci target levels (discrete choices)
@@ -302,10 +311,11 @@ class Population:
     def get_stats(self) -> Dict[str, float]:
         """Get population statistics."""
         if not self.individuals:
-            return {}
+            return {'generation': self.generation}
         
         fitnesses = [ind.fitness for ind in self.individuals]
         return {
+            'generation': self.generation,
             'mean_fitness': float(np.mean(fitnesses)),
             'std_fitness': float(np.std(fitnesses)),
             'min_fitness': float(np.min(fitnesses)),
@@ -547,7 +557,7 @@ def evaluate_individual(
         return fitness, metrics
         
     except Exception as e:
-        print(f"Error evaluating individual: {e}")
+        logger.exception("Error evaluating individual: %s", e)
         return -1000.0, {'n': 0, 'error': str(e)}
 
 
@@ -791,7 +801,7 @@ def evolution_step(
     pop_size = population.size
     current_gen = population.generation
     
-    print(f"\n=== Generation {current_gen} ===")
+    logger.info("[Gen %s] Starting evolution step", current_gen)
     
     # Apply bounds override if Coach recommended changes
     if ga_config.override_bounds:
@@ -801,23 +811,29 @@ def evolution_step(
     unevaluated = [ind for ind in population.individuals if ind.fitness == 0.0]
     
     if unevaluated:
-        print(f"Evaluating {len(unevaluated)} individuals...")
-        for i, ind in enumerate(unevaluated):
-            fitness, metrics = evaluate_individual(
-                ind, data, tf, fitness_config,
-                generation=current_gen  # Pass generation for curriculum
-            )
-            ind.fitness = fitness
-            ind.metrics = metrics
-            
-            if i % 10 == 0 or i == len(unevaluated) - 1:
-                print(f"  [{i+1}/{len(unevaluated)}] Fitness: {fitness:.4f} | Trades: {metrics.get('n', 0)} | WR: {metrics.get('win_rate', 0):.1%}")
+        total = len(unevaluated)
+        logger.info("[Gen %s] Evaluating %s individuals", current_gen, total)
+        with tqdm(total=total, desc=f"Gen {current_gen} eval", unit="ind", leave=False, disable=not getattr(settings, 'log_progress_bars', True)) as pbar:
+            for ind in unevaluated:
+                fitness, metrics = evaluate_individual(
+                    ind, data, tf, fitness_config,
+                    generation=current_gen  # Pass generation for curriculum
+                )
+                ind.fitness = fitness
+                ind.metrics = metrics
+                pbar.update(1)
     
     # Update best ever
     current_best = population.get_best()
     if population.best_ever is None or current_best.fitness > population.best_ever.fitness:
         population.best_ever = deepcopy(current_best)
-        print(f"🌟 NEW BEST: Fitness={current_best.fitness:.4f}, Trades={current_best.metrics.get('n', 0)}")
+        logger.info(
+            "[Gen %s] New best: fitness=%.4f trades=%s win_rate=%.2f%%",
+            current_gen,
+            current_best.fitness,
+            current_best.metrics.get('n', 0),
+            100.0 * (current_best.metrics.get('win_rate', 0.0) or 0.0),
+        )
     
     # Population statistics
     stats = population.get_stats()
@@ -825,9 +841,13 @@ def evolution_step(
     below_min_trades = sum(1 for tc in trade_counts if tc < (fitness_config.get_effective_min_trades(current_gen) if fitness_config else 10))
     diversity = population.get_diversity_metric() if ga_config.track_diversity else 1.0
     
-    print(f"Population stats: mean={stats['mean_fitness']:.4f}, std={stats['std_fitness']:.4f}, best={stats['max_fitness']:.4f}")
-    print(f"  Below min_trades: {below_min_trades}/{pop_size} ({100*below_min_trades/pop_size:.1f}%)")
-    print(f"  Mean trades: {np.mean(trade_counts):.1f}, Diversity: {diversity:.2f}")
+    logger.info(
+        "[Gen %s] Pop: mean=%.4f std=%.4f best=%.4f | below_min=%d/%.0f (%.1f%%) | mean_trades=%.1f | diversity=%.2f",
+        current_gen,
+        stats['mean_fitness'], stats['std_fitness'], stats['max_fitness'],
+        below_min_trades, pop_size, 100 * below_min_trades / pop_size,
+        np.mean(trade_counts), diversity,
+    )
     
     # Detect stagnation (Coach cares about this)
     is_stagnant = False

@@ -114,8 +114,9 @@ class MainWindow(QMainWindow):
         self.stats_panel = StatsPanel()
         splitter.addWidget(self.stats_panel)
         
-        # Connect stats panel to param editor
+        # Connect stats panel to param editor and chart view
         self.stats_panel.set_param_editor(self.param_editor)
+        self.stats_panel.set_chart_view(self.chart_view)
         
         # Strategy editor button removed - use toolbar button instead
         
@@ -219,6 +220,12 @@ class MainWindow(QMainWindow):
         coach_action.setToolTip("Open concise optimization logs for agent analysis")
         coach_action.triggered.connect(self.show_evolution_coach)
         toolbar.addAction(coach_action)
+
+        # Classic Coach window
+        classic_coach_action = QAction("🤖 Classic Coach", self)
+        classic_coach_action.setToolTip("Open Classic Coach decision interface - view deterministic optimization logic")
+        classic_coach_action.triggered.connect(self.show_classic_coach)
+        toolbar.addAction(classic_coach_action)
         
         toolbar.addSeparator()
         
@@ -498,14 +505,32 @@ class MainWindow(QMainWindow):
         self.strategy_editor.exec()
 
     def show_evolution_coach(self):
-        """Evolution Coach window removed - using console logging now."""
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self,
-            "Evolution Coach",
-            "Evolution Coach logging has been moved to console output.\n\n"
-            "Check the terminal where you launched the application to see coach logs."
-        )
+        """Show Evolution Coach window with real-time monitoring."""
+        if not hasattr(self, 'coach_window') or self.coach_window is None:
+            from app.widgets.evolution_coach_window import EvolutionCoachWindow
+            self.coach_window = EvolutionCoachWindow(self)
+
+            # Connect to stats panel for real-time updates
+            if hasattr(self, 'stats_panel') and self.stats_panel:
+                self.stats_panel.set_coach_window(self.coach_window)
+
+        self.coach_window.show()
+        self.coach_window.raise_()
+        self.coach_window.activateWindow()
+
+    def show_classic_coach(self):
+        """Show Classic Coach window with deterministic decision interface."""
+        if not hasattr(self, 'classic_coach_window') or self.classic_coach_window is None:
+            from app.widgets.classic_coach_window import ClassicCoachWindow
+            self.classic_coach_window = ClassicCoachWindow(self)
+
+            # Connect to stats panel for coach manager access
+            if hasattr(self, 'stats_panel') and self.stats_panel:
+                self.stats_panel.set_classic_coach_window(self.classic_coach_window)
+
+        self.classic_coach_window.show()
+        self.classic_coach_window.raise_()
+        self.classic_coach_window.activateWindow()
 
     def on_data_downloaded(self, df):
         """Handle data download completion."""
@@ -791,6 +816,10 @@ class MainWindow(QMainWindow):
             # Apply new logging level immediately
             from core.logging_utils import configure_logging
             configure_logging(level=getattr(settings, 'ada_agent_log_level', 'INFO'))
+            
+            # Reinitialize coach manager with new settings
+            if hasattr(self, 'stats_panel') and hasattr(self.stats_panel, 'reinitialize_coach_manager'):
+                self.stats_panel.reinitialize_coach_manager()
         except Exception:
             pass
 

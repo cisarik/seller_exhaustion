@@ -195,6 +195,27 @@ class OptimizationConfig(BaseModel):
         extra = "allow"  # Allow additional fields for extensibility
 
 
+class AdamConfig(BaseModel):
+    """
+    ADAM optimizer configuration.
+    
+    Coach can adjust ALL of these parameters automatically.
+    """
+    # ADAM hyperparameters (Coach can tune)
+    learning_rate: float = 0.01
+    epsilon: float = 0.02  # For finite differences (2% step ensures meaningful changes in integer params)
+    max_grad_norm: float = 1.0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    adam_epsilon: float = 1e-8
+    
+    # Parallel evaluation
+    n_workers: int = 4
+    
+    class Config:
+        extra = "allow"  # Allow additional fields for extensibility
+
+
 class Timeframe(str, Enum):
     m1 = "1m"
     m3 = "3m"

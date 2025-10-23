@@ -19,7 +19,7 @@ from scipy.stats import pearsonr
 from backtest.optimizer import Population
 from backtest.coach_session import CoachAnalysisSession
 from backtest.coach_mutations import CoachMutationManager
-from core.models import FitnessConfig, OptimizationConfig, BacktestParams
+from core.models import FitnessConfig, OptimizationConfig, AdamConfig, BacktestParams
 from strategy.seller_exhaustion import SellerParams
 import logging
 
@@ -49,6 +49,7 @@ class CoachToolkit:
         fitness_config: FitnessConfig,
         ga_config: OptimizationConfig,
         mutation_manager: CoachMutationManager,
+        adam_config: Optional[AdamConfig] = None,
         islands_registry: Optional[Dict[int, Population]] = None,
         island_policy_reference: Optional[Dict[str, Any]] = None
     ):
@@ -56,6 +57,7 @@ class CoachToolkit:
         self.session = session
         self.fitness_config = fitness_config
         self.ga_config = ga_config
+        self.adam_config = adam_config or AdamConfig()
         self.mutation_manager = mutation_manager
         
         # Track actions taken
@@ -64,6 +66,10 @@ class CoachToolkit:
         self._islands: Dict[int, Population] = islands_registry if islands_registry is not None else {}
         # Optional policy dict reference owned by manager
         self._island_policy = island_policy_reference if island_policy_reference is not None else {}
+        
+        # Check if islands management is enabled
+        from config.settings import settings
+        self.islands_enabled = getattr(settings, 'coach_islands_enabled', False)
     
     # ========================================================================
     # CATEGORY 1: OBSERVABILITY (8 tools)
@@ -74,7 +80,8 @@ class CoachToolkit:
         group_by: str = "fitness",
         top_n: int = 5,
         bottom_n: int = 3,
-        include_params: bool = False
+        include_params: bool = False,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """
         Get comprehensive population statistics and identify patterns.
@@ -91,6 +98,7 @@ class CoachToolkit:
             top_n: Number of top individuals to show
             bottom_n: Number of bottom individuals to show
             include_params: Include full parameter sets
+            reason: Explanation for this analysis
         """
         try:
             individuals = self.population.individuals
@@ -161,7 +169,7 @@ class CoachToolkit:
                 "bottom_individuals": bottom_individuals
             }
             
-            self.actions_log.append({"action": "analyze_population", "result": "success"})
+            self.actions_log.append({"action": "analyze_population", "result": "success", "reason": reason})
             return result
         
         except Exception as e:
@@ -171,7 +179,8 @@ class CoachToolkit:
     async def get_correlation_matrix(
         self,
         include_params: Optional[List[str]] = None,
-        correlate_with: Optional[List[str]] = None
+        correlate_with: Optional[List[str]] = None,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Compute Pearson correlations between parameters and selected metrics."""
         try:
@@ -182,7 +191,7 @@ class CoachToolkit:
             ]
             params = include_params or all_params
             metrics_wanted = correlate_with or ['fitness','trade_count','win_rate','avg_r']
-
+            
             # Gather vectors
             def get_param(ind, name):
                 if hasattr(ind.seller_params, name):
@@ -190,7 +199,7 @@ class CoachToolkit:
                 if hasattr(ind.backtest_params, name):
                     return getattr(ind.backtest_params, name)
                 return None
-
+            
             inds = self.population.individuals
             by_param = {p: [get_param(ind, p) for ind in inds] for p in params}
             by_metric = {
@@ -199,7 +208,7 @@ class CoachToolkit:
                 'win_rate': [ind.metrics.get('win_rate', 0) for ind in inds],
                 'avg_r': [ind.metrics.get('avg_R', 0) for ind in inds],
             }
-
+            
             correlations = {}
             for metric in metrics_wanted:
                 correlations[metric] = {}
@@ -215,7 +224,7 @@ class CoachToolkit:
                         }
                     except Exception:
                         correlations[metric][p] = {'r': 0.0, 'p': 1.0, 'sig': False}
-
+            
             # Rank importance by |r| with fitness
             rank = sorted(
                 (
@@ -224,8 +233,8 @@ class CoachToolkit:
                 ), key=lambda t: t[1], reverse=True
             )
             ranked = [{'param': p, 'abs_r': v} for p, v in rank]
-
-            self.actions_log.append({"action": "get_correlation_matrix"})
+            
+            self.actions_log.append({"action": "get_correlation_matrix", "reason": reason})
             return {"success": True, "correlations": correlations, "ranked_by_fitness_abs_r": ranked}
         except Exception as e:
             logger.exception("get_correlation_matrix failed")
@@ -236,7 +245,8 @@ class CoachToolkit:
         parameter_name: str,
         bins: int = 5,
         correlate_with: Optional[str] = None,
-        show_by_fitness_quartile: bool = True
+        show_by_fitness_quartile: bool = True,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """
         Analyze how a specific parameter is distributed across population.
@@ -252,6 +262,7 @@ class CoachToolkit:
             bins: Number of histogram bins
             correlate_with: Metric to correlate with - "fitness", "trade_count", "win_rate", "avg_r"
             show_by_fitness_quartile: Split analysis by fitness quartile
+            reason: Explanation for this analysis
         """
         try:
             individuals = self.population.individuals
@@ -341,7 +352,7 @@ class CoachToolkit:
                 "by_quartile": by_quartile
             }
             
-            self.actions_log.append({"action": "get_param_distribution", "parameter": parameter_name})
+            self.actions_log.append({"action": "get_param_distribution", "parameter": parameter_name, "reason": reason})
             return result
         
         except Exception as e:
@@ -351,7 +362,8 @@ class CoachToolkit:
     async def get_param_bounds(
         self,
         parameters: Optional[List[str]] = None,
-        include_clustering: bool = True
+        include_clustering: bool = True,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """
         Query current search space bounds and identify boundary clustering.
@@ -364,17 +376,16 @@ class CoachToolkit:
         Args:
             parameters: Specific params to query, or None for all
             include_clustering: Show boundary clustering analysis
+            reason: Explanation for this query
         """
         try:
-            from backtest.optimizer import get_param_bounds_for_timeframe
-            from core.models import Timeframe
-            
-            # Get current bounds (assuming 15m timeframe for now)
-            bounds = get_param_bounds_for_timeframe(Timeframe.m15)
+            # Get current bounds from population
+            bounds = self.population.bounds
             
             result = {
                 "success": True,
-                "bounds": {}
+                "bounds": {},
+                "timeframe": str(self.population.timeframe) if hasattr(self.population, 'timeframe') else "unknown"
             }
             
             # Filter to requested parameters
@@ -386,7 +397,8 @@ class CoachToolkit:
                 param_info = {
                     "min": float(min_val),
                     "max": float(max_val),
-                    "type": "int" if isinstance(min_val, int) else "float"
+                    "type": "int" if isinstance(min_val, int) else "float",
+                    "range": float(max_val - min_val)
                 }
                 
                 if include_clustering:
@@ -395,7 +407,7 @@ class CoachToolkit:
                 
                 result["bounds"][param_name] = param_info
             
-            self.actions_log.append({"action": "get_param_bounds"})
+            self.actions_log.append({"action": "get_param_bounds", "reason": reason})
             return result
         
         except Exception as e:
@@ -436,15 +448,30 @@ class CoachToolkit:
             
             individual = self.population.individuals[individual_id]
             
-            # Get old value
+            # Validate parameter exists
+            target_obj = None
             if hasattr(individual.seller_params, parameter_name):
-                old_value = getattr(individual.seller_params, parameter_name)
-                setattr(individual.seller_params, parameter_name, new_value)
+                target_obj = individual.seller_params
             elif hasattr(individual.backtest_params, parameter_name):
-                old_value = getattr(individual.backtest_params, parameter_name)
-                setattr(individual.backtest_params, parameter_name, new_value)
+                target_obj = individual.backtest_params
             else:
                 return {"success": False, "error": f"Parameter {parameter_name} not found"}
+            
+            # Get old value
+            old_value = getattr(target_obj, parameter_name)
+            
+            # Validate bounds if requested
+            if respect_bounds and parameter_name in self.population.bounds:
+                min_val, max_val = self.population.bounds[parameter_name]
+                if new_value < min_val or new_value > max_val:
+                    return {
+                        "success": False, 
+                        "error": f"Value {new_value} out of bounds [{min_val}, {max_val}] for parameter {parameter_name}",
+                        "bounds": {"min": min_val, "max": max_val}
+                    }
+            
+            # Apply mutation
+            setattr(target_obj, parameter_name, new_value)
             
             # Reset fitness for re-evaluation
             individual.fitness = 0.0
@@ -455,8 +482,9 @@ class CoachToolkit:
                 "parameter": parameter_name,
                 "old_value": old_value,
                 "new_value": new_value,
-                "change": new_value - old_value if isinstance(new_value, (int, float)) else "N/A",
+                "change": new_value - old_value if isinstance(new_value, (int, float)) and isinstance(old_value, (int, float)) else "N/A",
                 "reason": reason,
+                "bounds_respected": respect_bounds,
                 "impact": {
                     "fitness_reset": True,
                     "will_compete_in_next_gen": True
@@ -468,7 +496,8 @@ class CoachToolkit:
                 "individual_id": individual_id,
                 "parameter": parameter_name,
                 "old_value": old_value,
-                "new_value": new_value
+                "new_value": new_value,
+                "bounds_respected": respect_bounds
             })
             
             return result
@@ -508,6 +537,8 @@ class CoachToolkit:
                 target = "main"
                 index = self.population.size - 1
             elif destination == "island":
+                if not self.islands_enabled:
+                    return {"success": False, "error": "Islands management is disabled in settings"}
                 if not hasattr(self, "_islands"):
                     self._islands = {}
                 if island_id is None or island_id not in self._islands:
@@ -530,9 +561,11 @@ class CoachToolkit:
             logger.exception("insert_llm_individual failed")
             return {"success": False, "error": str(e)}
 
-    async def create_islands(self, count: int = 2, strategy: str = "split") -> Dict[str, Any]:
+    async def create_islands(self, count: int = 2, strategy: str = "split", reason: str = "") -> Dict[str, Any]:
         """Create multiple sub‑populations (islands) from the current population."""
         try:
+            if not self.islands_enabled:
+                return {"success": False, "error": "Islands management is disabled in settings"}
             if count < 2:
                 return {"success": False, "error": "count must be >= 2"}
             # Reset previous islands
@@ -555,9 +588,9 @@ class CoachToolkit:
                     self._islands[target_id].size = len(self._islands[target_id].individuals)
             else:
                 return {"success": False, "error": f"Unsupported strategy: {strategy}"}
-
+            
             islands_info = [{"id": k, "size": v.size} for k, v in self._islands.items()]
-            self.actions_log.append({"action": "create_islands", "count": count, "strategy": strategy})
+            self.actions_log.append({"action": "create_islands", "count": count, "strategy": strategy, "reason": reason})
             return {"success": True, "islands": islands_info}
         except Exception as e:
             logger.exception("create_islands failed")
@@ -566,15 +599,20 @@ class CoachToolkit:
     async def migrate_between_islands(self, src_island: int, dst_island: int, individual_id: int, reason: str = "") -> Dict[str, Any]:
         """Migrate an individual from one island to another."""
         try:
+            if not self.islands_enabled:
+                return {"success": False, "error": "Islands management is disabled in settings"}
             if not hasattr(self, "_islands") or src_island not in self._islands or dst_island not in self._islands:
                 return {"success": False, "error": "Invalid island id"}
+            if src_island == dst_island:
+                return {"success": False, "error": "Cannot migrate to same island"}
             src = self._islands[src_island]
             dst = self._islands[dst_island]
             if individual_id < 0 or individual_id >= len(src.individuals):
                 return {"success": False, "error": "Invalid individual_id"}
+            from copy import deepcopy
             ind = src.individuals.pop(individual_id)
             src.size = len(src.individuals)
-            dst.individuals.append(ind)
+            dst.individuals.append(deepcopy(ind))
             dst.size = len(dst.individuals)
             self.actions_log.append({"action": "migrate_between_islands", "src": src_island, "dst": dst_island, "individual_id": individual_id, "reason": reason})
             return {"success": True}
@@ -587,10 +625,13 @@ class CoachToolkit:
         migration_cadence: Optional[int] = None,
         migration_size: Optional[int] = None,
         merge_to_main_cadence: Optional[int] = None,
-        merge_top_k: Optional[int] = None
+        merge_top_k: Optional[int] = None,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Configure island migration cadence/size and island→main merge policy."""
         try:
+            if not self.islands_enabled:
+                return {"success": False, "error": "Islands management is disabled in settings"}
             changes = {}
             def apply(name, val):
                 if val is not None:
@@ -601,7 +642,7 @@ class CoachToolkit:
             apply("migration_size", migration_size)
             apply("merge_to_main_cadence", merge_to_main_cadence)
             apply("merge_top_k", merge_top_k)
-            self.actions_log.append({"action": "configure_island_scheduler", "changes": changes})
+            self.actions_log.append({"action": "configure_island_scheduler", "changes": changes, "reason": reason})
             return {"success": True, "changes": changes}
         except Exception as e:
             logger.exception("configure_island_scheduler failed")
@@ -611,28 +652,28 @@ class CoachToolkit:
     # CATEGORY 3: GA / POPULATION UTILITIES (NEW)
     # ========================================================================
 
-    async def inject_immigrants(self, fraction: float = 0.15, strategy: str = "worst_replacement") -> Dict[str, Any]:
+    async def inject_immigrants(self, fraction: float = 0.15, strategy: str = "worst_replacement", reason: str = "") -> Dict[str, Any]:
         """Inject random immigrants into the main population to boost diversity."""
         try:
             added = self.population.add_immigrants(fraction=fraction, strategy=strategy, generation=self.population.generation)
-            self.actions_log.append({"action": "inject_immigrants", "fraction": fraction, "strategy": strategy, "added": added})
+            self.actions_log.append({"action": "inject_immigrants", "fraction": fraction, "strategy": strategy, "added": added, "reason": reason})
             return {"success": True, "added": int(added)}
         except Exception as e:
             logger.exception("inject_immigrants failed")
             return {"success": False, "error": str(e)}
 
-    async def export_population(self, path: str) -> Dict[str, Any]:
+    async def export_population(self, path: str, reason: str = "") -> Dict[str, Any]:
         """Export current population to JSON file."""
         try:
             from backtest.optimizer import export_population as exp
             exp(self.population, path)
-            self.actions_log.append({"action": "export_population", "path": path})
+            self.actions_log.append({"action": "export_population", "path": path, "reason": reason})
             return {"success": True, "path": path}
         except Exception as e:
             logger.exception("export_population failed")
             return {"success": False, "error": str(e)}
 
-    async def import_population(self, path: str, limit: Optional[int] = None) -> Dict[str, Any]:
+    async def import_population(self, path: str, limit: Optional[int] = None, reason: str = "") -> Dict[str, Any]:
         """Import population from JSON and replace current individuals (size preserved if limit provided)."""
         try:
             from backtest.optimizer import import_population as imp
@@ -641,13 +682,13 @@ class CoachToolkit:
             self.population.size = len(imported.individuals)
             self.population.bounds = imported.bounds
             self.population.generation = imported.generation
-            self.actions_log.append({"action": "import_population", "path": path, "size": self.population.size})
+            self.actions_log.append({"action": "import_population", "path": path, "size": self.population.size, "reason": reason})
             return {"success": True, "size": self.population.size}
         except Exception as e:
             logger.exception("import_population failed")
             return {"success": False, "error": str(e)}
 
-    async def drop_individual(self, individual_id: int, replace_with: str = "immigrant") -> Dict[str, Any]:
+    async def drop_individual(self, individual_id: int, replace_with: str = "immigrant", reason: str = "") -> Dict[str, Any]:
         """Drop an individual and optionally replace with a new immigrant to keep size constant."""
         try:
             if individual_id < 0 or individual_id >= len(self.population.individuals):
@@ -658,13 +699,13 @@ class CoachToolkit:
                 tmp = Population(size=1, timeframe=self.population.timeframe)
                 self.population.individuals.append(tmp.individuals[0])
                 self.population.size = len(self.population.individuals)
-            self.actions_log.append({"action": "drop_individual", "id": individual_id, "replaced": replace_with == 'immigrant'})
+            self.actions_log.append({"action": "drop_individual", "id": individual_id, "replaced": replace_with == 'immigrant', "reason": reason})
             return {"success": True, "size": self.population.size}
         except Exception as e:
             logger.exception("drop_individual failed")
             return {"success": False, "error": str(e)}
 
-    async def bulk_update_param(self, individual_ids: List[int], parameter_name: str, new_value) -> Dict[str, Any]:
+    async def bulk_update_param(self, individual_ids: List[int], parameter_name: str, new_value, reason: str = "") -> Dict[str, Any]:
         """Set a parameter to a new value for a group of individuals."""
         try:
             changed = 0
@@ -678,7 +719,7 @@ class CoachToolkit:
                         setattr(ind.backtest_params, parameter_name, new_value)
                         changed += 1
                     ind.fitness = 0.0
-            self.actions_log.append({"action": "bulk_update_param", "parameter": parameter_name, "changed": changed})
+            self.actions_log.append({"action": "bulk_update_param", "parameter": parameter_name, "changed": changed, "reason": reason})
             return {"success": True, "changed": changed}
         except Exception as e:
             logger.exception("bulk_update_param failed")
@@ -700,15 +741,27 @@ class CoachToolkit:
         try:
             if parameter not in self.population.bounds:
                 return {"success": False, "error": f"Unknown parameter: {parameter}"}
+            
             old_min, old_max = self.population.bounds[parameter]
             min_v = old_min if new_min is None else new_min
             max_v = old_max if new_max is None else new_max
-            # Apply override
-            self.population.apply_bounds_override({parameter: (min_v, max_v)})
-            impact = {"individuals_at_old_min": 0, "individuals_now_in_bounds": 0}
+            
+            # Validate new bounds
+            if min_v >= max_v:
+                return {"success": False, "error": f"Invalid bounds: min ({min_v}) must be < max ({max_v})"}
+            
+            # Apply bounds update directly to population
+            self.population.bounds[parameter] = (min_v, max_v)
+            
+            impact = {
+                "individuals_at_old_min": 0, 
+                "individuals_at_old_max": 0,
+                "individuals_clamped": 0,
+                "individuals_out_of_bounds": 0
+            }
+            
             if retroactive:
                 # Clamp existing values
-                import math
                 for ind in self.population.individuals:
                     # Determine which object has the parameter
                     target = None
@@ -716,19 +769,40 @@ class CoachToolkit:
                         target = ind.seller_params
                     elif hasattr(ind.backtest_params, parameter):
                         target = ind.backtest_params
+                    
                     if target is None:
                         continue
+                    
                     val = getattr(target, parameter)
-                    if val == old_min:
+                    
+                    # Count individuals at old bounds
+                    if abs(val - old_min) < 1e-6:
                         impact["individuals_at_old_min"] += 1
+                    if abs(val - old_max) < 1e-6:
+                        impact["individuals_at_old_max"] += 1
+                    
+                    # Clamp if out of new bounds
                     if val < min_v or val > max_v:
+                        impact["individuals_out_of_bounds"] += 1
                         new_val = min(max(val, min_v), max_v)
+                        
+                        # Preserve type
                         if isinstance(val, int):
                             new_val = int(round(new_val))
+                        
                         setattr(target, parameter, new_val)
-                        impact["individuals_now_in_bounds"] += 1
-                        ind.fitness = 0.0
-            self.actions_log.append({"action": "update_param_bounds", "parameter": parameter, "old": [old_min, old_max], "new": [min_v, max_v], "retroactive": retroactive, "reason": reason})
+                        impact["individuals_clamped"] += 1
+                        ind.fitness = 0.0  # Reset fitness for re-evaluation
+            
+            self.actions_log.append({
+                "action": "update_param_bounds", 
+                "parameter": parameter, 
+                "old": [old_min, old_max], 
+                "new": [min_v, max_v], 
+                "retroactive": retroactive, 
+                "reason": reason
+            })
+            
             return {
                 "success": True,
                 "parameter": parameter,
@@ -743,41 +817,91 @@ class CoachToolkit:
     async def update_bounds_multi(
         self,
         bounds: Dict[str, Dict[str, float]],
-        retroactive: bool = False
+        retroactive: bool = False,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Update bounds for multiple parameters at once. bounds={'ema_fast': {'min':24,'max':192}, ...}"""
         try:
             applied = {}
+            errors = []
+            
+            # Validate and apply bounds
             for param, b in bounds.items():
-                mn = b.get('min'); mx = b.get('max')
-                if param in self.population.bounds:
-                    old = self.population.bounds[param]
-                    self.population.apply_bounds_override({param: (mn if mn is not None else old[0], mx if mx is not None else old[1])})
-                    applied[param] = {'old': old, 'new': self.population.bounds[param]}
+                if param not in self.population.bounds:
+                    errors.append(f"Unknown parameter: {param}")
+                    continue
+                
+                mn = b.get('min')
+                mx = b.get('max')
+                old_min, old_max = self.population.bounds[param]
+                
+                # Use old values if not specified
+                new_min = mn if mn is not None else old_min
+                new_max = mx if mx is not None else old_max
+                
+                # Validate bounds
+                if new_min >= new_max:
+                    errors.append(f"Invalid bounds for {param}: min ({new_min}) must be < max ({new_max})")
+                    continue
+                
+                # Apply bounds update
+                self.population.bounds[param] = (new_min, new_max)
+                applied[param] = {'old': [old_min, old_max], 'new': [new_min, new_max]}
+            
+            if errors:
+                return {"success": False, "errors": errors, "applied": applied}
+            
             # Optionally clamp existing individuals
             clamped = 0
             if retroactive:
                 for ind in self.population.individuals:
                     for param in bounds.keys():
-                        target = ind.seller_params if hasattr(ind.seller_params, param) else (ind.backtest_params if hasattr(ind.backtest_params, param) else None)
-                        if target is None: continue
+                        if param not in applied:
+                            continue
+                            
+                        target = None
+                        if hasattr(ind.seller_params, param):
+                            target = ind.seller_params
+                        elif hasattr(ind.backtest_params, param):
+                            target = ind.backtest_params
+                        
+                        if target is None:
+                            continue
+                        
                         val = getattr(target, param)
                         mn, mx = self.population.bounds[param]
+                        
                         if val < mn or val > mx:
                             new_val = max(min(val, mx), mn)
-                            if isinstance(val, int): new_val = int(round(new_val))
-                            setattr(target, param, new_val); clamped += 1; ind.fitness = 0.0
-            self.actions_log.append({"action": "update_bounds_multi", "applied": applied, "retroactive": retroactive})
-            return {"success": True, "applied": applied, "clamped": clamped}
+                            if isinstance(val, int):
+                                new_val = int(round(new_val))
+                            setattr(target, param, new_val)
+                            clamped += 1
+                            ind.fitness = 0.0  # Reset fitness for re-evaluation
+            
+            self.actions_log.append({
+                "action": "update_bounds_multi", 
+                "applied": applied, 
+                "retroactive": retroactive, 
+                "clamped": clamped,
+                "reason": reason
+            })
+            
+            return {
+                "success": True, 
+                "applied": applied, 
+                "clamped": clamped,
+                "errors": errors if errors else None
+            }
         except Exception as e:
             logger.exception("update_bounds_multi failed")
             return {"success": False, "error": str(e)}
 
-    async def reseed_population(self, fraction: float = 0.2, strategy: str = "worst_replacement") -> Dict[str, Any]:
+    async def reseed_population(self, fraction: float = 0.2, strategy: str = "worst_replacement", reason: str = "") -> Dict[str, Any]:
         """Replace a fraction of the population immediately with random newcomers (hard reseed)."""
         try:
             added = self.population.add_immigrants(fraction=fraction, strategy=strategy, generation=self.population.generation)
-            self.actions_log.append({"action": "reseed_population", "fraction": fraction, "added": added})
+            self.actions_log.append({"action": "reseed_population", "fraction": fraction, "added": added, "reason": reason})
             return {"success": True, "reseeded": int(added)}
         except Exception as e:
             logger.exception("reseed_population failed")
@@ -832,30 +956,60 @@ class CoachToolkit:
             elif strategy == "hybrid":
                 if not parent_ids or len(parent_ids) < 2:
                     return {"success": False, "error": "parent_ids must include at least two ids"}
+                
+                # Validate parent IDs
+                for pid in parent_ids[:2]:
+                    if pid < 0 or pid >= len(self.population.individuals):
+                        return {"success": False, "error": f"Invalid parent_id: {pid}"}
+                
                 p1 = self.population.individuals[parent_ids[0]]
                 p2 = self.population.individuals[parent_ids[1]]
-                # Blend
-                def pick_num(a,b):
-                    return (a+b)/2 if blend_strategy == 'average' else (a if p1.fitness >= p2.fitness else b)
+                
+                # Improved blending logic
+                def blend_numeric(a, b, strategy_name):
+                    if strategy_name == 'average':
+                        return (a + b) / 2
+                    elif strategy_name == 'best_of_each':
+                        return a if p1.fitness >= p2.fitness else b
+                    elif strategy_name == 'weighted':
+                        # Weight by fitness
+                        total_fitness = p1.fitness + p2.fitness
+                        if total_fitness > 0:
+                            weight1 = p1.fitness / total_fitness
+                            return a * weight1 + b * (1 - weight1)
+                        else:
+                            return (a + b) / 2
+                    else:
+                        # Random selection
+                        return a if np.random.rand() < 0.5 else b
+                
+                def blend_discrete(a, b, strategy_name):
+                    if strategy_name == 'best_of_each':
+                        return a if p1.fitness >= p2.fitness else b
+                    else:
+                        # Random selection for discrete values
+                        return a if np.random.rand() < 0.5 else b
+                
+                # Create blended seller params
                 sp = SellerParams(
-                    ema_fast=int(round(pick_num(p1.seller_params.ema_fast, p2.seller_params.ema_fast))),
-                    ema_slow=int(round(pick_num(p1.seller_params.ema_slow, p2.seller_params.ema_slow))),
-                    z_window=int(round(pick_num(p1.seller_params.z_window, p2.seller_params.z_window))),
-                    vol_z=pick_num(p1.seller_params.vol_z, p2.seller_params.vol_z),
-                    tr_z=pick_num(p1.seller_params.tr_z, p2.seller_params.tr_z),
-                    cloc_min=pick_num(p1.seller_params.cloc_min, p2.seller_params.cloc_min),
-                    atr_window=int(round(pick_num(p1.seller_params.atr_window, p2.seller_params.atr_window))),
+                    ema_fast=int(round(blend_numeric(p1.seller_params.ema_fast, p2.seller_params.ema_fast, blend_strategy))),
+                    ema_slow=int(round(blend_numeric(p1.seller_params.ema_slow, p2.seller_params.ema_slow, blend_strategy))),
+                    z_window=int(round(blend_numeric(p1.seller_params.z_window, p2.seller_params.z_window, blend_strategy))),
+                    vol_z=blend_numeric(p1.seller_params.vol_z, p2.seller_params.vol_z, blend_strategy),
+                    tr_z=blend_numeric(p1.seller_params.tr_z, p2.seller_params.tr_z, blend_strategy),
+                    cloc_min=blend_numeric(p1.seller_params.cloc_min, p2.seller_params.cloc_min, blend_strategy),
+                    atr_window=int(round(blend_numeric(p1.seller_params.atr_window, p2.seller_params.atr_window, blend_strategy))),
                 )
-                from backtest.optimizer import VALID_FIB_LEVELS
-                def pick_discrete(a,b):
-                    return a if blend_strategy == 'best_of_each' and p1.fitness >= p2.fitness else (b if blend_strategy == 'best_of_each' else (a if np.random.rand()<0.5 else b))
+                
+                # Create blended backtest params
                 bp = BacktestParams(
-                    fib_swing_lookback=int(round(pick_num(p1.backtest_params.fib_swing_lookback, p2.backtest_params.fib_swing_lookback))),
-                    fib_swing_lookahead=int(round(pick_num(p1.backtest_params.fib_swing_lookahead, p2.backtest_params.fib_swing_lookahead))),
-                    fib_target_level=pick_discrete(p1.backtest_params.fib_target_level, p2.backtest_params.fib_target_level),
-                    fee_bp=pick_num(p1.backtest_params.fee_bp, p2.backtest_params.fee_bp),
-                    slippage_bp=pick_num(p1.backtest_params.slippage_bp, p2.backtest_params.slippage_bp),
+                    fib_swing_lookback=int(round(blend_numeric(p1.backtest_params.fib_swing_lookback, p2.backtest_params.fib_swing_lookback, blend_strategy))),
+                    fib_swing_lookahead=int(round(blend_numeric(p1.backtest_params.fib_swing_lookahead, p2.backtest_params.fib_swing_lookahead, blend_strategy))),
+                    fib_target_level=blend_discrete(p1.backtest_params.fib_target_level, p2.backtest_params.fib_target_level, blend_strategy),
+                    fee_bp=blend_numeric(p1.backtest_params.fee_bp, p2.backtest_params.fee_bp, blend_strategy),
+                    slippage_bp=blend_numeric(p1.backtest_params.slippage_bp, p2.backtest_params.slippage_bp, blend_strategy),
                 )
+                
                 new_ind = PopIndividual(seller_params=sp, backtest_params=bp, fitness=0.0, metrics={}, generation=self.population.generation)
             else:
                 return {"success": False, "error": f"Unknown strategy: {strategy}"}
@@ -1038,7 +1192,8 @@ class CoachToolkit:
         total_pnl_weight: Optional[float] = None,
         max_drawdown_penalty: Optional[float] = None,
         penalty_trades_strength: Optional[float] = None,
-        penalty_wr_strength: Optional[float] = None
+        penalty_wr_strength: Optional[float] = None,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Adjust fitness weights and penalty strengths; renormalize weights to sum≈1.0."""
         try:
@@ -1063,18 +1218,18 @@ class CoachToolkit:
                 fc.win_rate_weight /= s
                 fc.avg_r_weight /= s
                 fc.total_pnl_weight /= s
-            self.actions_log.append({"action": "update_fitness_weights", "changes": changes})
+            self.actions_log.append({"action": "update_fitness_weights", "changes": changes, "reason": reason})
             return {"success": True, "changes": changes}
         except Exception as e:
             logger.exception("update_fitness_weights failed")
             return {"success": False, "error": str(e)}
 
-    async def set_fitness_function_type(self, fitness_function_type: str) -> Dict[str, Any]:
+    async def set_fitness_function_type(self, fitness_function_type: str, reason: str = "") -> Dict[str, Any]:
         """Switch between 'hard_gates' and 'soft_penalties'."""
         try:
             old = self.fitness_config.fitness_function_type
             self.fitness_config.fitness_function_type = fitness_function_type
-            self.actions_log.append({"action": "set_fitness_function_type", "old": old, "new": fitness_function_type})
+            self.actions_log.append({"action": "set_fitness_function_type", "old": old, "new": fitness_function_type, "reason": reason})
             return {"success": True, "old": old, "new": fitness_function_type}
         except Exception as e:
             logger.exception("set_fitness_function_type failed")
@@ -1086,7 +1241,8 @@ class CoachToolkit:
         start_min_trades: Optional[int] = None,
         increase_per_gen: Optional[int] = None,
         checkpoint_gens: Optional[int] = None,
-        max_generations: Optional[int] = None
+        max_generations: Optional[int] = None,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Enable/adjust curriculum learning parameters for min_trades over generations."""
         try:
@@ -1103,7 +1259,7 @@ class CoachToolkit:
             seti('curriculum_increase_per_gen', increase_per_gen)
             seti('curriculum_checkpoint_gens', checkpoint_gens)
             seti('curriculum_max_generations', max_generations)
-            self.actions_log.append({"action": "configure_curriculum", "changes": changes})
+            self.actions_log.append({"action": "configure_curriculum", "changes": changes, "reason": reason})
             return {"success": True, "changes": changes}
         except Exception as e:
             logger.exception("configure_curriculum failed")
@@ -1113,27 +1269,35 @@ class CoachToolkit:
     # CATEGORY 6: HISTORY & PRESETS (NEW)
     # ========================================================================
 
-    async def get_generation_history(self, last_n: Optional[int] = None) -> Dict[str, Any]:
-        """Return generation history from agent_feed (full if last_n=None)."""
+    async def get_generation_history(self, last_n: Optional[int] = None, reason: str = "") -> Dict[str, Any]:
+        """Return generation history from session data (full if last_n=None)."""
         try:
-            from core.agent_feed import agent_feed
-            gens = agent_feed.get_generations(last_n=last_n)
-            data = [
-                {
-                    'generation': g.generation,
-                    'best_fitness': g.best_fitness,
-                    'mean_fitness': g.mean_fitness,
-                    'diversity': g.diversity,
-                    'best_metrics': g.best_metrics,
-                    'coach_triggered': g.coach_triggered
-                } for g in gens
-            ]
-            return {"success": True, "generations": data}
+            # Get history from session or create mock data if not available
+            if hasattr(self.session, 'generation_history') and self.session.generation_history:
+                history = self.session.generation_history
+            else:
+                # Create basic history from current population
+                history = [{
+                    'generation': self.population.generation,
+                    'best_fitness': max(ind.fitness for ind in self.population.individuals) if self.population.individuals else 0,
+                    'mean_fitness': np.mean([ind.fitness for ind in self.population.individuals]) if self.population.individuals else 0,
+                    'diversity': self.population.get_diversity_metric(),
+                    'best_metrics': max(self.population.individuals, key=lambda x: x.fitness).metrics if self.population.individuals else {},
+                    'coach_triggered': True,
+                    'population_size': len(self.population.individuals)
+                }]
+            
+            # Limit to last_n if specified
+            if last_n is not None and last_n > 0:
+                history = history[-last_n:]
+            
+            self.actions_log.append({"action": "get_generation_history", "reason": reason})
+            return {"success": True, "generations": history, "total_generations": len(history)}
         except Exception as e:
             logger.exception("get_generation_history failed")
             return {"success": False, "error": str(e)}
 
-    async def set_fitness_preset(self, preset: str) -> Dict[str, Any]:
+    async def set_fitness_preset(self, preset: str, reason: str = "") -> Dict[str, Any]:
         """Apply a FitnessConfig preset quickly (balanced, high_frequency, conservative, profit_focused)."""
         try:
             from core.models import FitnessConfig
@@ -1142,7 +1306,7 @@ class CoachToolkit:
             # Copy fields
             for k, v in new_fc.model_dump().items():
                 setattr(self.fitness_config, k, v)
-            self.actions_log.append({"action": "set_fitness_preset", "old": old, "new": preset})
+            self.actions_log.append({"action": "set_fitness_preset", "old": old, "new": preset, "reason": reason})
             return {"success": True, "preset": preset}
         except Exception as e:
             logger.exception("set_fitness_preset failed")
@@ -1158,7 +1322,8 @@ class CoachToolkit:
         use_stop_loss: Optional[bool] = None,
         use_traditional_tp: Optional[bool] = None,
         use_time_exit: Optional[bool] = None,
-        individual_id: Optional[int] = None
+        individual_id: Optional[int] = None,
+        reason: str = ""
     ) -> Dict[str, Any]:
         """Set exit toggles globally or for a specific individual."""
         try:
@@ -1182,13 +1347,13 @@ class CoachToolkit:
                 setb('use_traditional_tp', use_traditional_tp)
                 setb('use_time_exit', use_time_exit)
                 ind.fitness = 0.0
-            self.actions_log.append({"action": "set_exit_policy", "changed": changed, "scope": "individual" if individual_id is not None else "global"})
+            self.actions_log.append({"action": "set_exit_policy", "changed": changed, "scope": "individual" if individual_id is not None else "global", "reason": reason})
             return {"success": True, "changed": changed}
         except Exception as e:
             logger.exception("set_exit_policy failed")
             return {"success": False, "error": str(e)}
 
-    async def set_costs(self, fee_bp: Optional[float] = None, slippage_bp: Optional[float] = None, individual_id: Optional[int] = None) -> Dict[str, Any]:
+    async def set_costs(self, fee_bp: Optional[float] = None, slippage_bp: Optional[float] = None, individual_id: Optional[int] = None, reason: str = "") -> Dict[str, Any]:
         """Adjust transaction cost assumptions globally or per individual."""
         try:
             targets = self.population.individuals if individual_id is None else [self.population.individuals[individual_id]]
@@ -1199,12 +1364,95 @@ class CoachToolkit:
                 if slippage_bp is not None:
                     ind.backtest_params.slippage_bp = float(slippage_bp); changed += 1
                 ind.fitness = 0.0
-            self.actions_log.append({"action": "set_costs", "changed": changed})
+            self.actions_log.append({"action": "set_costs", "changed": changed, "reason": reason})
             return {"success": True, "changed": changed}
         except Exception as e:
             logger.exception("set_costs failed")
             return {"success": False, "error": str(e)}
     
+    # ========================================================================
+    # CATEGORY 8: ADDITIONAL UTILITIES (NEW)
+    # ========================================================================
+    
+    async def validate_population_health(self, reason: str = "") -> Dict[str, Any]:
+        """Validate population health and identify potential issues."""
+        try:
+            individuals = self.population.individuals
+            issues = []
+            warnings = []
+            
+            # Check population size
+            if len(individuals) == 0:
+                issues.append("Population is empty")
+            elif len(individuals) < 5:
+                warnings.append(f"Population size is very small: {len(individuals)}")
+            
+            # Check fitness distribution
+            fitness_values = [ind.fitness for ind in individuals]
+            if fitness_values:
+                fitness_std = np.std(fitness_values)
+                if fitness_std < 0.01:
+                    warnings.append("Very low fitness diversity - possible convergence")
+                
+                # Check for NaN or infinite fitness
+                nan_count = sum(1 for f in fitness_values if np.isnan(f) or np.isinf(f))
+                if nan_count > 0:
+                    issues.append(f"{nan_count} individuals have invalid fitness values")
+            
+            # Check parameter bounds compliance
+            bounds_violations = 0
+            for ind in individuals:
+                for param_name, (min_val, max_val) in self.population.bounds.items():
+                    # Check seller_params
+                    if hasattr(ind.seller_params, param_name):
+                        val = getattr(ind.seller_params, param_name)
+                        if val < min_val or val > max_val:
+                            bounds_violations += 1
+                            break
+                    # Check backtest_params
+                    elif hasattr(ind.backtest_params, param_name):
+                        val = getattr(ind.backtest_params, param_name)
+                        if val < min_val or val > max_val:
+                            bounds_violations += 1
+                            break
+            
+            if bounds_violations > 0:
+                issues.append(f"{bounds_violations} individuals violate parameter bounds")
+            
+            # Check diversity
+            diversity = self.population.get_diversity_metric()
+            if diversity < 0.1:
+                warnings.append(f"Very low diversity: {diversity:.3f}")
+            
+            health_status = "healthy"
+            if issues:
+                health_status = "critical"
+            elif warnings:
+                health_status = "warning"
+            
+            result = {
+                "success": True,
+                "health_status": health_status,
+                "population_size": len(individuals),
+                "diversity": float(diversity),
+                "fitness_stats": {
+                    "mean": float(np.mean(fitness_values)) if fitness_values else 0,
+                    "std": float(np.std(fitness_values)) if fitness_values else 0,
+                    "min": float(np.min(fitness_values)) if fitness_values else 0,
+                    "max": float(np.max(fitness_values)) if fitness_values else 0
+                },
+                "issues": issues,
+                "warnings": warnings,
+                "bounds_violations": bounds_violations
+            }
+            
+            self.actions_log.append({"action": "validate_population_health", "reason": reason})
+            return result
+            
+        except Exception as e:
+            logger.exception("validate_population_health failed")
+            return {"success": False, "error": str(e)}
+
     # ========================================================================
     # HELPER METHODS
     # ========================================================================
@@ -1321,3 +1569,291 @@ class CoachToolkit:
             "in_middle": in_middle,
             "interpretation": interpretation
         }
+
+    # ============================================================================
+    # OPTIMIZER CONTROL TOOLS
+    # ============================================================================
+
+    async def set_active_optimizer(self, optimizer_type: str, reason: str = "") -> Dict[str, Any]:
+        """
+        Switch between optimization algorithms: 'GA' (Genetic Algorithm) or 'ADAM' (Gradient-based).
+        
+        This is a powerful tool that allows the coach to dynamically change the optimization strategy:
+        
+        **GA (Genetic Algorithm)**:
+        - Population-based evolutionary approach
+        - Good for exploration and escaping local optima
+        - Uses crossover, mutation, and selection
+        - Better for complex, multi-modal fitness landscapes
+        - Slower convergence but more thorough search
+        
+        **ADAM (Adaptive Moment Estimation)**:
+        - Gradient-based optimization
+        - Faster convergence to local optima
+        - Good for smooth, continuous parameter spaces
+        - More efficient for fine-tuning near good solutions
+        - Can get stuck in local optima
+        
+        **When to use each**:
+        - Start with GA for broad exploration
+        - Switch to ADAM when population converges to a promising region
+        - Use GA again if ADAM gets stuck in local optima
+        - ADAM is excellent for final fine-tuning
+        
+        Args:
+            optimizer_type: Either 'GA' or 'ADAM'
+            reason: Explanation for switching optimizers
+        """
+        try:
+            if optimizer_type.upper() not in ['GA', 'ADAM']:
+                return {"success": False, "error": f"Invalid optimizer type: {optimizer_type}. Must be 'GA' or 'ADAM'"}
+            
+            # Store the request - actual switching happens in stats_panel
+            self.actions_log.append({
+                "action": "set_active_optimizer", 
+                "optimizer_type": optimizer_type.upper(),
+                "reason": reason
+            })
+            
+            return {
+                "success": True, 
+                "optimizer_type": optimizer_type.upper(),
+                "message": f"Requested switch to {optimizer_type.upper()} optimizer. This will take effect on next optimization run.",
+                "reason": reason
+            }
+        except Exception as e:
+            logger.exception("set_active_optimizer failed")
+            return {"success": False, "error": str(e)}
+
+    async def configure_ga_parameters(
+        self,
+        population_size: Optional[int] = None,
+        mutation_rate: Optional[float] = None,
+        mutation_sigma: Optional[float] = None,
+        elite_fraction: Optional[float] = None,
+        tournament_size: Optional[int] = None,
+        mutation_probability: Optional[float] = None,
+        reason: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Configure Genetic Algorithm (GA) parameters for evolutionary optimization.
+        
+        **Population Size** (population_size):
+        - Number of individuals in each generation
+        - Larger = more diversity, slower computation
+        - Smaller = faster, less diversity
+        - Recommended: 20-50 for most problems
+        
+        **Mutation Rate** (mutation_rate):
+        - Probability that an individual will be mutated
+        - Higher = more exploration, less exploitation
+        - Lower = more exploitation, less exploration
+        - Recommended: 0.1-0.5
+        
+        **Mutation Sigma** (mutation_sigma):
+        - Standard deviation for Gaussian mutation
+        - Higher = larger parameter changes
+        - Lower = smaller, fine-tuning changes
+        - Recommended: 0.05-0.2
+        
+        **Elite Fraction** (elite_fraction):
+        - Fraction of best individuals preserved each generation
+        - Higher = more exploitation, slower convergence
+        - Lower = more exploration, faster convergence
+        - Recommended: 0.1-0.3
+        
+        **Tournament Size** (tournament_size):
+        - Number of individuals competing in selection
+        - Higher = more selective pressure
+        - Lower = less selective pressure
+        - Recommended: 3-7
+        
+        **Mutation Probability** (mutation_probability):
+        - Probability of mutating each parameter
+        - Higher = more parameter changes per mutation
+        - Lower = fewer parameter changes
+        - Recommended: 0.5-1.0
+        
+        Args:
+            population_size: Number of individuals (20-100)
+            mutation_rate: Mutation probability (0.0-1.0)
+            mutation_sigma: Mutation strength (0.01-0.5)
+            elite_fraction: Elite preservation (0.0-0.5)
+            tournament_size: Selection pressure (2-10)
+            mutation_probability: Parameter mutation rate (0.0-1.0)
+            reason: Explanation for parameter changes
+        """
+        try:
+            changes = {}
+            
+            # Validate and apply population_size
+            if population_size is not None:
+                if not (10 <= population_size <= 200):
+                    return {"success": False, "error": f"population_size must be between 10-200, got {population_size}"}
+                old = self.ga_config.population_size
+                self.ga_config.population_size = int(population_size)
+                changes['population_size'] = {"old": old, "new": int(population_size)}
+            
+            # Validate and apply mutation_rate
+            if mutation_rate is not None:
+                if not (0.0 <= mutation_rate <= 1.0):
+                    return {"success": False, "error": f"mutation_rate must be between 0.0-1.0, got {mutation_rate}"}
+                old = self.ga_config.mutation_rate
+                self.ga_config.mutation_rate = float(mutation_rate)
+                changes['mutation_rate'] = {"old": old, "new": float(mutation_rate)}
+            
+            # Validate and apply mutation_sigma (sigma in OptimizationConfig)
+            if mutation_sigma is not None:
+                if not (0.01 <= mutation_sigma <= 1.0):
+                    return {"success": False, "error": f"mutation_sigma must be between 0.01-1.0, got {mutation_sigma}"}
+                old = self.ga_config.sigma
+                self.ga_config.sigma = float(mutation_sigma)
+                changes['mutation_sigma'] = {"old": old, "new": float(mutation_sigma)}
+            
+            # Validate and apply elite_fraction
+            if elite_fraction is not None:
+                if not (0.0 <= elite_fraction <= 0.5):
+                    return {"success": False, "error": f"elite_fraction must be between 0.0-0.5, got {elite_fraction}"}
+                old = self.ga_config.elite_fraction
+                self.ga_config.elite_fraction = float(elite_fraction)
+                changes['elite_fraction'] = {"old": old, "new": float(elite_fraction)}
+            
+            # Validate and apply tournament_size
+            if tournament_size is not None:
+                if not (2 <= tournament_size <= 20):
+                    return {"success": False, "error": f"tournament_size must be between 2-20, got {tournament_size}"}
+                old = self.ga_config.tournament_size
+                self.ga_config.tournament_size = int(tournament_size)
+                changes['tournament_size'] = {"old": old, "new": int(tournament_size)}
+            
+            # Validate and apply mutation_probability
+            if mutation_probability is not None:
+                if not (0.0 <= mutation_probability <= 1.0):
+                    return {"success": False, "error": f"mutation_probability must be between 0.0-1.0, got {mutation_probability}"}
+                old = self.ga_config.mutation_probability
+                self.ga_config.mutation_probability = float(mutation_probability)
+                changes['mutation_probability'] = {"old": old, "new": float(mutation_probability)}
+            
+            if changes:
+                self.actions_log.append({
+                    "action": "configure_ga_parameters",
+                    "changes": changes,
+                    "reason": reason
+                })
+                return {"success": True, "changes": changes, "message": f"Updated {len(changes)} GA parameters"}
+            else:
+                return {"success": True, "message": "No parameters changed"}
+                
+        except Exception as e:
+            logger.exception("configure_ga_parameters failed")
+            return {"success": False, "error": str(e)}
+
+    async def configure_adam_parameters(
+        self,
+        learning_rate: Optional[float] = None,
+        epsilon: Optional[float] = None,
+        beta1: Optional[float] = None,
+        beta2: Optional[float] = None,
+        max_perturbations: Optional[int] = None,
+        reason: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Configure ADAM (Adaptive Moment Estimation) optimizer parameters.
+        
+        **Learning Rate** (learning_rate):
+        - Step size for parameter updates
+        - Higher = faster convergence, risk of overshooting
+        - Lower = slower convergence, more stable
+        - Recommended: 0.001-0.1
+        
+        **Epsilon** (epsilon):
+        - Small constant for numerical stability
+        - Prevents division by zero in gradient calculations
+        - Higher = more stable, less sensitive
+        - Lower = more sensitive, potential instability
+        - Recommended: 1e-8 to 1e-4
+        
+        **Beta1** (beta1):
+        - Exponential decay rate for first moment estimates
+        - Controls momentum of gradient updates
+        - Higher = more momentum, smoother updates
+        - Lower = less momentum, more responsive
+        - Recommended: 0.9-0.99
+        
+        **Beta2** (beta2):
+        - Exponential decay rate for second moment estimates
+        - Controls adaptive learning rate
+        - Higher = more stable learning rate adaptation
+        - Lower = more adaptive learning rate
+        - Recommended: 0.999-0.9999
+        
+        **Max Perturbations** (max_perturbations):
+        - Maximum number of parameter perturbations per generation
+        - Higher = more thorough gradient estimation
+        - Lower = faster computation, less accurate gradients
+        - Recommended: 5-20
+        
+        Args:
+            learning_rate: Step size (0.001-0.1)
+            epsilon: Numerical stability constant (1e-8 to 1e-4)
+            beta1: First moment decay (0.9-0.99)
+            beta2: Second moment decay (0.999-0.9999)
+            max_perturbations: Gradient estimation samples (5-50)
+            reason: Explanation for parameter changes
+        """
+        try:
+            changes = {}
+            
+            # Validate and apply learning_rate
+            if learning_rate is not None:
+                if not (0.001 <= learning_rate <= 0.1):
+                    return {"success": False, "error": f"learning_rate must be between 0.001-0.1, got {learning_rate}"}
+                old = self.adam_config.learning_rate
+                self.adam_config.learning_rate = float(learning_rate)
+                changes['learning_rate'] = {"old": old, "new": float(learning_rate)}
+            
+            # Validate and apply epsilon (finite difference step size)
+            if epsilon is not None:
+                if not (0.01 <= epsilon <= 0.1):
+                    return {"success": False, "error": f"epsilon must be between 0.01-0.1, got {epsilon}"}
+                old = self.adam_config.epsilon
+                self.adam_config.epsilon = float(epsilon)
+                changes['epsilon'] = {"old": old, "new": float(epsilon)}
+            
+            # Validate and apply adam_beta1
+            if beta1 is not None:
+                if not (0.9 <= beta1 <= 0.99):
+                    return {"success": False, "error": f"beta1 must be between 0.9-0.99, got {beta1}"}
+                old = self.adam_config.adam_beta1
+                self.adam_config.adam_beta1 = float(beta1)
+                changes['adam_beta1'] = {"old": old, "new": float(beta1)}
+            
+            # Validate and apply adam_beta2
+            if beta2 is not None:
+                if not (0.999 <= beta2 <= 0.9999):
+                    return {"success": False, "error": f"beta2 must be between 0.999-0.9999, got {beta2}"}
+                old = self.adam_config.adam_beta2
+                self.adam_config.adam_beta2 = float(beta2)
+                changes['adam_beta2'] = {"old": old, "new": float(beta2)}
+            
+            # Validate and apply max_perturbations (n_workers)
+            if max_perturbations is not None:
+                if not (1 <= max_perturbations <= 16):
+                    return {"success": False, "error": f"max_perturbations must be between 1-16, got {max_perturbations}"}
+                old = self.adam_config.n_workers
+                self.adam_config.n_workers = int(max_perturbations)
+                changes['n_workers'] = {"old": old, "new": int(max_perturbations)}
+            
+            if changes:
+                self.actions_log.append({
+                    "action": "configure_adam_parameters",
+                    "changes": changes,
+                    "reason": reason
+                })
+                return {"success": True, "changes": changes, "message": f"Updated {len(changes)} ADAM parameters"}
+            else:
+                return {"success": True, "message": "No parameters changed"}
+                
+        except Exception as e:
+            logger.exception("configure_adam_parameters failed")
+            return {"success": False, "error": str(e)}

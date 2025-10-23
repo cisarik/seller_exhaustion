@@ -21,7 +21,7 @@ class OptimizationResult:
     best_backtest_params: BacktestParams
     fitness: float
     metrics: Dict[str, Any]
-    iteration: int  # Generation/iteration number
+    generation: int  # Generation number
     additional_info: Dict[str, Any] = field(default_factory=dict)
 
 

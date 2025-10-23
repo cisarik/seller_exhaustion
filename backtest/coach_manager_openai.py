@@ -13,6 +13,8 @@ import logging
 import threading
 import json
 
+logger = logging.getLogger(__name__)
+
 from backtest.coach_session import CoachAnalysisSession
 from backtest.coach_mutations import CoachMutationManager, MutationRecord
 from backtest.coach_protocol import (
@@ -20,7 +22,7 @@ from backtest.coach_protocol import (
 )
 from backtest.coach_agent_openai import CoachAgentOpenAI
 from backtest.optimizer import Population
-from core.models import FitnessConfig, OptimizationConfig
+from core.models import FitnessConfig, OptimizationConfig, AdamConfig
 from core.agent_feed import agent_feed
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,8 @@ class OpenAICoachManager:
         verbose: bool = True,
         openrouter_api_key: Optional[str] = None,
         openrouter_model: str = "anthropic/claude-3.5-sonnet",
+        status_callback: Optional[callable] = None,
+        coach_window=None,
     ):
         """
         Initialize OpenAI Agents coach manager.
@@ -51,6 +55,7 @@ class OpenAICoachManager:
             verbose: Print detailed logs
             openrouter_api_key: OpenRouter API key
             openrouter_model: OpenRouter model name
+            status_callback: Callback for status updates (tool_name, reason)
         """
         # Load from settings
         from config.settings import settings
@@ -63,8 +68,10 @@ class OpenAICoachManager:
         # OpenRouter settings
         self.openrouter_api_key = openrouter_api_key or getattr(settings, 'openrouter_api_key', '')
         self.openrouter_model = openrouter_model or getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet')
+        self.status_callback = status_callback
+        self.coach_window = coach_window
 
-        # Island model state
+        # Island model state (only if enabled)
         self.islands: Dict[int, Population] = {}
         self.island_policy = {
             "migration_cadence": 5,
@@ -72,9 +79,15 @@ class OpenAICoachManager:
             "merge_to_main_cadence": 0,
             "merge_top_k": 1
         }
+        
+        # Check if islands management is enabled
+        self.islands_enabled = getattr(settings, 'coach_islands_enabled', False)
+        if not self.islands_enabled and self.verbose:
+            print("🚫 Islands Management disabled in settings")
 
         # State tracking
         self.mutation_manager = CoachMutationManager(verbose=verbose)
+        self.adam_config = AdamConfig()  # Default ADAM configuration
 
         self.last_session: Optional[CoachAnalysisSession] = None
         self.session_history: List[CoachAnalysisSession] = []
@@ -85,13 +98,12 @@ class OpenAICoachManager:
         # Log collection
         self.generation_logs: List[Tuple[int, str]] = []
 
-        # Log initialization
-        print(f"✓ 🤖 OpenAI Agents Coach Manager initialized: "
-              f"model={self.openrouter_model}, interval={self.analysis_interval} gens")
-
-        if self.debug_payloads:
-            logger.info("OpenAI Agents Coach debug payload logging ENABLED")
-            print("✓ 🧪 Coach debug payload logging enabled")
+        # Log initialization (only if verbose)
+        if self.verbose:
+            print(f"✓ 🤖 Coach Manager initialized: model={self.openrouter_model}, interval={self.analysis_interval} gens")
+            
+            if self.debug_payloads:
+                print("✓ 🧪 Debug payload logging enabled")
 
     def should_analyze(self, generation: int) -> bool:
         """Check if we should trigger coach analysis this generation."""
@@ -195,7 +207,8 @@ class OpenAICoachManager:
         ga_config: OptimizationConfig
     ) -> CoachAnalysisSession:
         """Create a frozen analysis session from current population."""
-        print(f"[COACH  ] ❄️  Freezing population at Gen {population.generation}")
+        if self.verbose:
+            print(f"❄️  Freezing population at Gen {population.generation}")
 
         session = CoachAnalysisSession.from_population(
             population, fitness_config, ga_config
@@ -204,9 +217,9 @@ class OpenAICoachManager:
         self.last_session = session
         self.session_history.append(session)
 
-        print(f"[COACH  ] 📸 Session {session.session_id}: "
-             f"{session.population_size} individuals, "
-             f"diversity={session.get_population_metrics()['diversity']:.2f}")
+        if self.verbose:
+            metrics = session.get_population_metrics()
+            print(f"📸 Session created: {session.population_size} individuals, diversity={metrics['diversity']:.2f}")
 
         return session
 
@@ -215,7 +228,8 @@ class OpenAICoachManager:
         population: Population,
         fitness_config: FitnessConfig,
         ga_config: OptimizationConfig,
-        current_data=None  # Unused, kept for API compatibility
+        current_data=None,  # Unused, kept for API compatibility
+        coach_window=None  # Coach window for UI updates
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Full OpenAI Agents analysis workflow.
@@ -239,47 +253,56 @@ class OpenAICoachManager:
         )
 
         # Step 2: Create OpenAI Agents coach agent
+        # Each analysis creates a fresh coach agent to prevent context window overflow
+        # when running many analyses (e.g., 500+ analyses)
         coach_agent = CoachAgentOpenAI(
             population=population,
             session=session,
             fitness_config=fitness_config,
             ga_config=ga_config,
             mutation_manager=self.mutation_manager,
-            islands_registry=self.islands,
-            island_policy_reference=self.island_policy,
+            adam_config=getattr(self, 'adam_config', None),
+            islands_registry=self.islands if self.islands_enabled else None,
+            island_policy_reference=self.island_policy if self.islands_enabled else None,
             openrouter_api_key=self.openrouter_api_key,
             openrouter_model=self.openrouter_model,
-            verbose=self.verbose
+            verbose=self.verbose,
+            status_callback=self.status_callback,
+            coach_window=coach_window or getattr(self, 'coach_window', None)
         )
 
         # Step 3: Build initial observation
         observation = self._build_agent_observation(session, fitness_config, ga_config)
 
         # Step 4: RUN OpenAI Agents analysis
-        print(f"[AGENT  ] 🚀 Running OpenAI Agents analysis...")
+        # Each analysis starts with a fresh conversation history to prevent context window overflow
+        # when running many analyses (e.g., 500+ analyses)
+        logger.info(f"[AGENT  ] 🚀 Running OpenAI Agents analysis...")
+        logger.debug(f"[AGENT  ]   Observation: {observation[:500]}...")
 
         try:
             result = await coach_agent.run_analysis(observation)
 
             if result.get("success"):
-                print(f"[AGENT  ] ✅ Agent completed: "
+                logger.info(f"[AGENT  ] ✅ Agent completed: "
                      f"{result['iterations']} iterations, "
                      f"{result['tool_calls_count']} tool calls")
 
                 # Log actions taken
                 actions_taken = result.get("actions_taken", [])
                 if actions_taken:
-                    print(f"[AGENT  ] 📋 Actions taken: {len(actions_taken)}")
+                    logger.info(f"[AGENT  ] 📋 Actions taken: {len(actions_taken)}")
                     for i, action in enumerate(actions_taken[:5], 1):
                         action_name = action.get("action", "unknown")
-                        print(f"[AGENT  ]   {i}. {action_name}")
+                        logger.info(f"[AGENT  ]   {i}. {action_name}")
+                        logger.debug(f"[AGENT  ]      Action details: {action}")
 
                     if len(actions_taken) > 5:
-                        print(f"[AGENT  ]   ... and {len(actions_taken) - 5} more actions")
+                        logger.info(f"[AGENT  ]   ... and {len(actions_taken) - 5} more actions")
                 else:
-                    print("[AGENT  ] ⚠️  No actions logged")
+                    logger.warning("[AGENT  ] ⚠️  No actions logged")
 
-                print(f"[AGENT  ] ✅ OpenAI Agents workflow complete - "
+                logger.info(f"[AGENT  ] ✅ OpenAI Agents workflow complete - "
                      f"GA will resume with modified population")
 
                 # Show debugger with tool history (disabled to avoid Qt thread issues)
@@ -298,6 +321,7 @@ class OpenAICoachManager:
             else:
                 error = result.get("error", "Unknown error")
                 logger.error("OpenAI Agents failed: %s", error)
+                logger.debug(f"Full error result: {result}")
                 return False, {
                     "error": error,
                     "summary": f"Agent failed: {error}"
@@ -305,6 +329,9 @@ class OpenAICoachManager:
 
         except Exception as e:
             logger.exception("OpenAI Agents analysis failed: %s", e)
+            logger.debug(f"Exception details: {type(e).__name__}: {e}")
+            import traceback
+            logger.debug(f"Full traceback: {traceback.format_exc()}")
             return False, {
                 "error": str(e),
                 "summary": f"Analysis error: {str(e)}"
@@ -465,6 +492,8 @@ Start by calling analyze_population() to get detailed statistics.
 
     def evolve_islands_step(self, data, timeframe, fitness_config, ga_config: OptimizationConfig, main_population: Optional[Population] = None) -> None:
         """Evolve islands one generation and perform periodic migrations."""
+        if not self.islands_enabled:
+            return
         if not self.islands:
             return
         try:

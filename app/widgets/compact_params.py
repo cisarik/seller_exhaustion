@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QFormLayout, QSpinBox, QDoubleSpinBox, QScrollArea, QPushButton,
-    QCheckBox, QComboBox
+    QCheckBox, QComboBox, QProgressBar
 )
 from PySide6.QtCore import Signal
 
@@ -304,12 +304,12 @@ class CompactParamsEditor(QWidget):
         fitness_group.setLayout(fitness_layout)
         scroll_layout.addWidget(fitness_group)
         
-        # Evolution Coach Group (NEW - Enable checkbox + provider button)
+        # Evolution Coach Group (NEW - Enable checkbox + provider dropdown)
         coach_group = QGroupBox("Evolution Coach 🤖")
         coach_layout = QVBoxLayout()
         coach_layout.setSpacing(6)
         coach_layout.setContentsMargins(8, 8, 8, 8)
-        
+
         # Enable checkbox row
         enable_row = QHBoxLayout()
         enable_label = QLabel("Enable:")
@@ -321,31 +321,40 @@ class CompactParamsEditor(QWidget):
         enable_row.addWidget(enable_label)
         enable_row.addWidget(self.coach_enabled_check, 1)
         coach_layout.addLayout(enable_row)
+
+        # Coach mode dropdown row
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("Mode:")
+        mode_label.setMaximumWidth(60)
+        self.coach_mode_combo = QComboBox()
+        self.coach_mode_combo.addItem("🧠 OpenAI Agents", "openai")
+        self.coach_mode_combo.addItem("⚙️ Classic", "classic")
+        self.coach_mode_combo.setToolTip("Choose coach mode: OpenAI Agents (LLM-based) or Classic (deterministic)")
+        self.coach_mode_combo.currentIndexChanged.connect(self._on_coach_config_changed)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.coach_mode_combo, 1)
+        coach_layout.addLayout(mode_row)
         
-        # Provider buttons row
-        provider_row = QHBoxLayout()
-        
-        # Local LLM button (for LM Studio)
-        self.coach_local_btn = QPushButton("Local LLM")
-        self.coach_local_btn.setToolTip("Use local LM Studio for Evolution Coach")
-        self.coach_local_btn.clicked.connect(self._on_local_coach_clicked)
-        provider_row.addWidget(self.coach_local_btn)
-        
-        # Openrouter button (for online)
-        self.coach_openrouter_btn = QPushButton("Openrouter")
-        self.coach_openrouter_btn.setToolTip("Use online Openrouter API for Evolution Coach")
-        self.coach_openrouter_btn.clicked.connect(self._on_openrouter_coach_clicked)
-        provider_row.addWidget(self.coach_openrouter_btn)
-        
-        coach_layout.addLayout(provider_row)
-        
-        # Note: Configure coach settings in Settings → Evolution Coach
-        note_label = QLabel("⚙️ Configure in Settings")
-        note_label.setStyleSheet("color: #888; font-size: 10px;")
-        coach_layout.addWidget(note_label)
+        # Coach progress bar (shows when coach is active)
+        self.coach_progress = QProgressBar()
+        self.coach_progress.setVisible(False)  # Hidden by default
+        self.coach_progress.setRange(0, 0)  # Indeterminate progress
+        self.coach_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #2b2b2b;
+            }
+            QProgressBar::chunk {
+                background-color: #4caf50;
+                border-radius: 2px;
+            }
+        """)
+        self.coach_progress.setToolTip("Evolution Coach is analyzing population...")
+        coach_layout.addWidget(self.coach_progress)
         
         self._coach_model_loaded = False
-        self._update_coach_button_style()
         
         coach_group.setLayout(coach_layout)
         scroll_layout.addWidget(coach_group)
@@ -359,143 +368,73 @@ class CompactParamsEditor(QWidget):
     def _load_coach_settings(self):
         """Load coach settings from config and update UI."""
         from config.settings import settings
-        
+
         # Set enabled state
         self.coach_enabled_check.setChecked(getattr(settings, 'coach_enabled', True))
-        
+
+        # Set coach mode - default to 'classic' if not set
+        coach_mode = getattr(settings, 'coach_mode', 'classic')
+        index = self.coach_mode_combo.findData(coach_mode)
+        if index >= 0:
+            self.coach_mode_combo.setCurrentIndex(index)
+        else:
+            # Default to Classic if mode not found
+            self.coach_mode_combo.setCurrentIndex(1)  # Index 1 is "Classic"
+
         # Update button styles based on provider
-        self._update_coach_button_style()
-    
     def _on_coach_config_changed(self):
-        """Handle coach enable/disable change - save to settings."""
+        """Handle coach enable/disable and mode change - save to settings."""
         from config.settings import settings, SettingsManager
-        
+
         # Update enabled setting
         settings.coach_enabled = self.coach_enabled_check.isChecked()
-        
+
+        # Update coach mode setting
+        settings.coach_mode = self.coach_mode_combo.currentData()
+
         # Convert settings to dict and save to .env
         try:
             settings_dict = settings.model_dump()  # Pydantic v2
         except AttributeError:
             settings_dict = settings.dict()  # Pydantic v1 fallback
-        
+
         SettingsManager.save_to_env(settings_dict)
+
+    def set_coach_analyzing(self, is_analyzing: bool):
+        """Set coach analysis state and show/hide progress bar."""
+        if is_analyzing:
+            self.coach_progress.setVisible(True)
+            self.coach_progress.setRange(0, 0)  # Indeterminate progress
+        else:
+            self.coach_progress.setVisible(False)
+
+    def hide_coach_progress(self):
+        """Hide coach progress bar."""
+        self.coach_progress.setVisible(False)
         
-        # Update button states
-        self._update_coach_button_style()
     
-    def _on_local_coach_clicked(self):
-        """Handle Local LLM button click - open Settings to configure."""
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self,
-            "Configure Local LLM",
-            "Please configure Local LLM settings:\n\n"
-            "1. Go to Settings → Evolution Coach\n"
-            "2. Select 'Local (LM Studio)' provider\n"
-            "3. Choose model and adjust parameters\n"
-            "4. Save settings"
-        )
-    
-    def _on_openrouter_coach_clicked(self):
-        """Handle Openrouter button click - open Settings to configure."""
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self,
-            "Configure Openrouter",
-            "Please configure Openrouter settings:\n\n"
-            "1. Go to Settings → Evolution Coach\n"
-            "2. Select 'Online (Openrouter)' provider\n"
-            "3. Enter your API key\n"
-            "4. Choose model (Claude 3.5 Sonnet recommended)\n"
-            "5. Save settings"
-        )
     
     def get_coach_config(self) -> dict:
         """Get Evolution Coach configuration from settings."""
         from config.settings import settings
         return {
             "enabled": self.coach_enabled_check.isChecked(),
+            "mode": self.coach_mode_combo.currentData(),
             "provider": getattr(settings, 'coach_provider', 'local'),
             "model": getattr(settings, 'coach_model', 'google/gemma-3-12b'),
             "prompt_version": getattr(settings, 'coach_system_prompt', 'agent01')
         }
     
-    def _update_coach_button_style(self):
-        """Update button styles based on enabled state and provider."""
-        from config.settings import settings
-        
-        enabled = self.coach_enabled_check.isChecked()
-        provider = getattr(settings, 'coach_provider', 'local')
-        
-        # Update button enabled state
-        self.coach_local_btn.setEnabled(enabled)
-        self.coach_openrouter_btn.setEnabled(enabled)
-        
-        # Style active provider button
-        if provider == "local":
-            self.coach_local_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2f5c39;
-                    color: #e8f5e9;
-                    border: 2px solid #4caf50;
-                    padding: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #4caf50;
-                }
-            """)
-            self.coach_openrouter_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2a2a2a;
-                    color: #888;
-                    border: 1px solid #555;
-                    padding: 6px;
-                }
-                QPushButton:hover {
-                    background-color: #333;
-                    border: 1px solid #666;
-                }
-            """)
-        else:  # openrouter
-            self.coach_local_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2a2a2a;
-                    color: #888;
-                    border: 1px solid #555;
-                    padding: 6px;
-                }
-                QPushButton:hover {
-                    background-color: #333;
-                    border: 1px solid #666;
-                }
-            """)
-            self.coach_openrouter_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2f4a5c;
-                    color: #e3f2fd;
-                    border: 2px solid #2196f3;
-                    padding: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #2196f3;
-                }
-            """)
-        
-        # Disabled state
-        if not enabled:
-            disabled_style = """
-                QPushButton {
-                    background-color: #1a1a1a;
-                    color: #555;
-                    border: 1px solid #333;
-                    padding: 6px;
-                }
-            """
-            self.coach_local_btn.setStyleSheet(disabled_style)
-            self.coach_openrouter_btn.setStyleSheet(disabled_style)
+    def show_coach_progress(self, message: str = "Evolution Coach analyzing..."):
+        """Show coach progress bar with message."""
+        self.coach_progress.setVisible(True)
+        self.coach_progress.setFormat(message)
+        self.coach_progress.setToolTip(message)
+    
+    def hide_coach_progress(self):
+        """Hide coach progress bar."""
+        self.coach_progress.setVisible(False)
+    
     
     def _on_param_changed(self):
         """Handle parameter change and update tooltips."""

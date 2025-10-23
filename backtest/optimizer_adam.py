@@ -203,7 +203,7 @@ class AdamOptimizer(BaseOptimizer):
         self.initial_population_file = initial_population_file
         
         # Tracking
-        self.iteration = 0
+        self.generation = 0
         self.best_fitness = -float('inf')
         self.best_seller_params = None
         self.best_backtest_params = None
@@ -272,7 +272,7 @@ class AdamOptimizer(BaseOptimizer):
         self.best_seller_params = deepcopy(seed_seller_params)
         self.best_backtest_params = deepcopy(seed_backtest_params)
         
-        self.iteration = 0
+        self.generation = 0
         self.history = []
         
         print(
@@ -600,7 +600,7 @@ class AdamOptimizer(BaseOptimizer):
             raise RuntimeError("Optimizer not initialized. Call initialize() first.")
         
         print(f"\n{'='*60}")
-        print(f"ADAM Iteration {self.iteration}")
+        print(f"ADAM Generation {self.generation}")
         print(f"Workers: {self.get_worker_count()}")
         print(f"Fitness Preset: {fitness_config.preset}")
         print(f"{'='*60}")
@@ -647,7 +647,7 @@ class AdamOptimizer(BaseOptimizer):
         
         # Record history
         self.history.append({
-            'iteration': self.iteration,
+            'generation': self.generation,
             'fitness': fitness,
             'best_fitness': self.best_fitness,
             'grad_norm': grad_norm,
@@ -662,14 +662,14 @@ class AdamOptimizer(BaseOptimizer):
         print(f"   Trades: {metrics.get('n', 0)}")
         print(f"   Win Rate: {metrics.get('win_rate', 0):.2%}")
         
-        self.iteration += 1
+        self.generation += 1
         
         return OptimizationResult(
             best_seller_params=deepcopy(self.best_seller_params),
             best_backtest_params=deepcopy(self.best_backtest_params),
             fitness=self.best_fitness,
             metrics=self.best_metrics.copy(),
-            iteration=self.iteration,
+            generation=self.generation,
             additional_info={
                 'grad_norm': grad_norm,
                 'current_fitness': fitness,
@@ -688,7 +688,7 @@ class AdamOptimizer(BaseOptimizer):
     def get_stats(self) -> dict:
         """Return current optimization statistics."""
         stats = {
-            'iteration': self.iteration,
+            'generation': self.generation,
             'best_fitness': self.best_fitness,
         }
         

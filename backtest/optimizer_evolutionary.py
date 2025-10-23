@@ -188,7 +188,7 @@ class EvolutionaryOptimizer(BaseOptimizer):
             best_backtest_params=deepcopy(best.backtest_params),
             fitness=best.fitness,
             metrics=best.metrics.copy(),
-            iteration=self.population.generation,
+            generation=self.population.generation,
             additional_info={'population_stats': self.population.get_stats()}
         )
     
@@ -215,11 +215,11 @@ class EvolutionaryOptimizer(BaseOptimizer):
         if self.population is None:
             return []
         
-        # Convert generation to iteration for consistency
+        # Return history with generation (consistent naming)
         history = []
         for h in self.population.history:
             history.append({
-                'iteration': h['generation'],
+                'generation': h['generation'],
                 'best_fitness': h['best_fitness'],
                 'mean_fitness': h['mean_fitness'],
                 'std_fitness': h.get('std_fitness', 0.0)

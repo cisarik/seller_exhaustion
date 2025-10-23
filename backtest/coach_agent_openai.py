@@ -7,16 +7,79 @@ Integrates with OpenRouter API using the SDK's built-in OpenAI client replacemen
 
 import asyncio
 from typing import Dict, Any, Optional
-from agents import Agent, Runner, OpenAIChatCompletionsModel, set_default_openai_client, set_default_openai_api, set_tracing_disabled, function_tool
+from datetime import datetime
+from agents import Agent, Runner, OpenAIChatCompletionsModel, set_default_openai_client, set_default_openai_api, set_tracing_disabled, function_tool, AgentHooks
 from agents.tool import FunctionTool
 from backtest.coach_tools_agents import CoachToolsAgents
 from backtest.coach_protocol import load_coach_prompt
 from backtest.optimizer import Population
 from backtest.coach_session import CoachAnalysisSession
-from core.models import FitnessConfig, OptimizationConfig
+from core.models import FitnessConfig, OptimizationConfig, AdamConfig
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+class CoachAgentHooks(AgentHooks):
+    """Custom hooks for Evolution Coach Agent to handle status updates."""
+    
+    def __init__(self, status_callback=None, coach_window=None):
+        super().__init__()
+        self.status_callback = status_callback
+        self.coach_window = coach_window
+    
+    async def on_tool_start(self, context, agent, tool):
+        """Called when a tool starts executing."""
+        if self.status_callback:
+            try:
+                self.status_callback(tool.name, "Starting tool execution")
+            except Exception as e:
+                logger.error(f"Error in status callback: {e}")
+        
+        if self.coach_window:
+            try:
+                # Schedule UI update on main thread using QTimer
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.coach_window.add_tool_call(
+                    tool.name, {}, {}, "Starting execution"
+                ))
+            except Exception as e:
+                logger.error(f"Error updating coach window: {e}")
+    
+    async def on_tool_end(self, context, agent, tool, result):
+        """Called when a tool completes execution."""
+        if self.status_callback:
+            try:
+                self.status_callback(tool.name, "Tool completed")
+            except Exception as e:
+                logger.error(f"Error in status callback: {e}")
+        
+        if self.coach_window:
+            try:
+                # Schedule UI update on main thread using QTimer
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.coach_window.update_last_tool_call(
+                    {}, result, "Completed"
+                ))
+            except Exception as e:
+                logger.error(f"Error updating coach window: {e}")
+    
+    async def on_start(self, context, agent):
+        """Called when agent starts."""
+        if self.status_callback:
+            try:
+                self.status_callback("Agent", "Starting analysis")
+            except Exception as e:
+                logger.error(f"Error in status callback: {e}")
+    
+    async def on_end(self, context, agent, output):
+        """Called when agent completes."""
+        if self.status_callback:
+            try:
+                self.status_callback("Agent", "Analysis completed")
+            except Exception as e:
+                logger.error(f"Error in status callback: {e}")
 
 
 class CoachAgentOpenAI:
@@ -33,13 +96,18 @@ class CoachAgentOpenAI:
         fitness_config: FitnessConfig,
         ga_config: OptimizationConfig,
         mutation_manager,
+        adam_config: Optional[AdamConfig] = None,
         islands_registry: Optional[Dict[int, Population]] = None,
         island_policy_reference: Optional[Dict[str, Any]] = None,
         openrouter_api_key: Optional[str] = None,
         openrouter_model: str = "anthropic/claude-3.5-sonnet",
-        verbose: bool = True
+        verbose: bool = True,
+        status_callback: Optional[callable] = None,
+        coach_window=None
     ):
         self.tool_history = []  # To collect tool calls for debugger
+        self.status_callback = status_callback  # Callback for status updates
+        self.coach_window = coach_window  # Coach window for UI updates
         """
         Initialize OpenAI Agents coach agent.
 
@@ -74,6 +142,7 @@ class CoachAgentOpenAI:
             fitness_config=fitness_config,
             ga_config=ga_config,
             mutation_manager=mutation_manager,
+            adam_config=adam_config,
             islands_registry=islands_registry,
             island_policy_reference=island_policy_reference
         )
@@ -107,146 +176,135 @@ class CoachAgentOpenAI:
                     except Exception:
                         pass
 
-        if not openai_api_key and not openrouter_api_key:
-            raise ValueError("Either OPENAI_API_KEY or OPENROUTER_API_KEY required")
+        # Get provider from settings to check which API key is needed
+        from config.settings import settings
+        provider = getattr(settings, 'agent_provider', 'novita')
+        
+        if provider == "openai" and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY required for OpenAI provider")
+        elif provider == "openrouter" and not openrouter_api_key:
+            raise ValueError("OPENROUTER_API_KEY required for OpenRouter provider")
+        elif provider == "novita":
+            novita_api_key = getattr(settings, 'novita_api_key', '')
+            if not novita_api_key:
+                raise ValueError("NOVITA_API_KEY required for Novita provider")
 
         # Configure OpenAI Agents SDK
         from openai import AsyncOpenAI
-
-        if openai_api_key:
+        
+        if provider == "openai" and openai_api_key:
             # Use OpenAI API directly
-            openai_client = AsyncOpenAI(api_key=openai_api_key)
-            model_name = "gpt-4o"  # Use GPT-4o for OpenAI API
+            openai_base_url = getattr(settings, 'openai_base_url', 'https://api.openai.com/v1')
+            openai_model = getattr(settings, 'openai_model', 'gpt-4o')
+            
+            self.openai_client = AsyncOpenAI(
+                api_key=openai_api_key,
+                base_url=openai_base_url
+            )
+            model_name = openai_model
             if self.verbose:
-                print(f"🤖 Using OpenAI API with model: {model_name}")
-        else:
+                print(f"🤖 Using OpenAI API with model: {model_name} (base_url: {openai_base_url})")
+                
+        elif provider == "openrouter" and openrouter_api_key:
             # Use OpenRouter API
-            openai_client = AsyncOpenAI(
-                base_url="https://api.openai.com/v1/",
+            openrouter_base_url = getattr(settings, 'openrouter_base_url', 'https://openrouter.ai/api/v1')
+            openrouter_model = getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet')
+            
+            self.openai_client = AsyncOpenAI(
+                base_url=openrouter_base_url,
                 api_key=openrouter_api_key
             )
             model_name = openrouter_model
             if self.verbose:
-                print(f"🤖 Using OpenRouter API with model: {model_name}")
+                print(f"🤖 Using OpenRouter API with model: {model_name} (base_url: {openrouter_base_url})")
+                
+        else:
+            # Use Novita API (default)
+            novita_base_url = getattr(settings, 'novita_base_url', 'https://api.novita.ai/openai')
+            novita_model = getattr(settings, 'novita_model', 'deepseek/deepseek-r1')
+            
+            self.openai_client = AsyncOpenAI(
+                base_url=novita_base_url,
+                api_key=novita_api_key
+            )
+            model_name = novita_model
+            if self.verbose:
+                print(f"🤖 Using Novita API with model: {model_name} (base_url: {novita_base_url})")
 
         # Configure SDK to use our client
-        set_default_openai_client(openai_client)
+        set_default_openai_client(self.openai_client)
         set_default_openai_api("chat_completions")  # Use Chat Completions API
         set_tracing_disabled(True)  # Disable OpenAI tracing
 
         # Create model using OpenAI Chat Completions model
         self.model = OpenAIChatCompletionsModel(
             model=model_name,
-            openai_client=openai_client
+            openai_client=self.openai_client
         )
 
-        # Create tools manually using FunctionTool to avoid schema issues
+        # Use tools directly from CoachToolsAgents
         tools = []
         
-        # List of available tools with their descriptions
-        tool_definitions = [
-            ('analyze_population', 'Analyze current population state and provide detailed statistics'),
-            ('get_correlation_matrix', 'Get correlation matrix between parameters in the population'),
-            ('get_param_distribution', 'Get parameter distribution statistics'),
-            ('get_param_bounds', 'Get current parameter bounds for optimization'),
-            ('get_generation_history', 'Get fitness evolution history across generations'),
-            ('mutate_individual', 'Apply mutations to a specific individual'),
-            ('insert_llm_individual', 'Insert a new individual created by LLM'),
-            ('create_islands', 'Create island populations for parallel evolution'),
-            ('migrate_between_islands', 'Migrate individuals between island populations'),
-            ('configure_island_scheduler', 'Configure island migration scheduler'),
-            ('inject_immigrants', 'Inject new individuals into population'),
-            ('export_population', 'Export current population to file'),
-            ('import_population', 'Import population from file'),
-            ('drop_individual', 'Remove worst individual from population'),
-            ('bulk_update_param', 'Update parameter for multiple individuals'),
-            ('update_param_bounds', 'Update bounds for a specific parameter'),
-            ('update_bounds_multi', 'Update bounds for multiple parameters'),
-            ('reseed_population', 'Reseed population with new random individuals'),
-            ('insert_individual', 'Insert a new individual into population'),
-            ('update_fitness_gates', 'Update fitness gate thresholds'),
-            ('update_ga_params', 'Update genetic algorithm parameters'),
-            ('update_fitness_weights', 'Update fitness function weights'),
-            ('set_fitness_function_type', 'Set fitness function type'),
-            ('configure_curriculum', 'Configure curriculum learning parameters'),
-            ('set_fitness_preset', 'Set fitness function preset'),
-            ('set_exit_policy', 'Set exit policy for optimization'),
-            ('set_costs', 'Set transaction costs for backtesting'),
-            ('finish_analysis', 'Finish analysis and return final recommendations')
-        ]
+        # Get all tools from CoachToolsAgents that are enabled
+        for attr_name in dir(self.tools_wrapper):
+            if not attr_name.startswith('_') and attr_name != 'toolkit':
+                tool = getattr(self.tools_wrapper, attr_name)
+                # Check if it's a FunctionTool
+                if hasattr(tool, 'name') and hasattr(tool, 'description'):
+                    # Check if this tool is enabled in settings
+                    if getattr(settings, f'coach_tool_{attr_name}', True):
+                        # Check if islands management is disabled and this is an islands tool
+                        if not settings.coach_islands_enabled and self._is_islands_tool(attr_name):
+                            if self.verbose:
+                                print(f"🚫 Skipped islands tool: {tool.name} (islands disabled)")
+                            continue
+                        
+                        tools.append(tool)
+                        if self.verbose:
+                            print(f"✅ Added tool: {tool.name}")
         
-        # Create FunctionTool objects manually
-        for tool_name, description in tool_definitions:
-            if hasattr(self.tools_wrapper.toolkit, tool_name):
-                # Create a simple wrapper function with correct signature
-                def create_tool_wrapper(name):
-                    async def wrapper(context_wrapper, arguments):
-                        if self.verbose:
-                            print(f"🔧 Coach calling tool: {name}")
-                            if arguments:
-                                print(f"   Arguments: {arguments}")
-                        
-                        toolkit_method = getattr(self.tools_wrapper.toolkit, name)
-                        # Parse arguments if they are a string
-                        if arguments:
-                            if isinstance(arguments, str):
-                                try:
-                                    import json
-                                    parsed_args = json.loads(arguments)
-                                    result = await toolkit_method(**parsed_args)
-                                except json.JSONDecodeError:
-                                    # If not JSON, try calling without arguments
-                                    result = await toolkit_method()
-                            elif isinstance(arguments, dict):
-                                result = await toolkit_method(**arguments)
-                            else:
-                                result = await toolkit_method()
-                        else:
-                            result = await toolkit_method()
-                        
-                        if self.verbose:
-                            print(f"✅ Tool {name} completed")
-                            if isinstance(result, dict) and 'success' in result:
-                                print(f"   Success: {result['success']}")
-                        
-                        return result
-                    return wrapper
-                
-                wrapper_func = create_tool_wrapper(tool_name)
-                wrapper_func.__name__ = tool_name
-                wrapper_func.__doc__ = description
-                
-                # Create FunctionTool manually with simple schema
-                tool = FunctionTool(
-                    name=tool_name,
-                    description=description,
-                    params_json_schema={
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    },
-                    on_invoke_tool=wrapper_func
-                )
-                tools.append(tool)
-
         if self.verbose:
-            print(f"🤖 Collected {len(tools)} tools: {[t.name for t in tools]}")
-            print(f"🤖 System prompt loaded: {len(self.system_prompt)} chars from coach_prompts/agent.txt")
+            print(f"🤖 System prompt loaded: {len(self.system_prompt)} chars")
+            print(f"🤖 Tools available: {len(tools)} ({[t.name for t in tools[:5]]}{'...' if len(tools) > 5 else ''})")
+            print(f"🤖 configure_island_scheduler in tools: {'configure_island_scheduler' in [t.name for t in tools]}")
+            print(f"🤖 set_active_optimizer in tools: {'set_active_optimizer' in [t.name for t in tools]}")
+            print(f"🤖 configure_ga_parameters in tools: {'configure_ga_parameters' in [t.name for t in tools]}")
+            print(f"🤖 configure_adam_parameters in tools: {'configure_adam_parameters' in [t.name for t in tools]}")
 
-            # Debug: Check if tools have proper schemas
-            for tool in tools[:3]:  # Check first 3 tools
-                print(f"   Tool '{tool.name}': params={bool(hasattr(tool, 'params_json_schema'))}, func={bool(hasattr(tool, 'func'))}")
+        # Debug: Check if tools have proper schemas
+        for tool in tools[:3]:  # Check first 3 tools
+            print(f"   Tool '{tool.name}': params={bool(hasattr(tool, 'params_json_schema'))}, func={bool(hasattr(tool, 'func'))}")
+        
+        # Debug: List all tool names
+        if self.verbose:
+            print(f"🤖 All tool names: {[t.name for t in tools]}")
 
-        # Create agent without hooks to avoid import error
+        # Create custom hooks for status updates
+        self.hooks = CoachAgentHooks(
+            status_callback=self.status_callback,
+            coach_window=self.coach_window
+        )
+
+        # Create agent with hooks
         self.agent = Agent(
             name="Evolution Coach Agent",
             instructions=self.system_prompt,
             model=self.model,
-            tools=tools
+            tools=tools,
+            hooks=self.hooks
         )
 
         if self.verbose:
-            print(f"🤖 OpenAI Agents Evolution Coach initialized with {len(tools)} tools")
+            print(f"✓ 🤖 Coach Agent initialized with {len(tools)} tools")
+    
+    def _is_islands_tool(self, attr_name: str) -> bool:
+        """Check if a tool is related to islands management."""
+        islands_tools = {
+            'create_islands',
+            'migrate_between_islands', 
+            'configure_island_scheduler'
+        }
+        return attr_name in islands_tools
 
     async def run_analysis(self, initial_observation: str) -> Dict[str, Any]:
         """
@@ -259,19 +317,38 @@ class CoachAgentOpenAI:
             Analysis results with actions taken
         """
         if self.verbose:
-            print(f"🤖 Evolution Coach Agent starting analysis...")
-            print(f"   Population size: {len(self.population.individuals)}")
-            print(f"   Generation: {self.population.generation}")
-            print(f"   Initial observation: {initial_observation[:1000]}{'...' if len(initial_observation) > 1000 else ''}")
+            logger.info(f"🤖 Starting analysis: Gen {self.population.generation}, Pop {len(self.population.individuals)}")
+            logger.debug(f"   Initial observation: {initial_observation[:1000]}{'...' if len(initial_observation) > 1000 else ''}")
+
+        # Report analysis start to status callback
+        if self.status_callback:
+            try:
+                self.status_callback("Starting analysis", "Initializing agent")
+            except Exception as e:
+                logger.error(f"Error in status callback: {e}")
+
+        # Update coach window with request (thread-safe)
+        if hasattr(self, 'coach_window') and self.coach_window:
+            try:
+                # Schedule UI update on main thread using QTimer
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.coach_window.set_agent_request(initial_observation))
+            except Exception as e:
+                logger.error(f"Error updating coach window with request: {e}")
 
         try:
             # Count tool calls for logging
             tool_call_count = 0
 
             if self.verbose:
-                print(f"🚀 Starting agent analysis with OpenAI Agents Runner...")
+                logger.info(f"🚀 Starting agent analysis with OpenAI Agents Runner...")
+                logger.debug(f"   Agent model: {self.model}")
+                logger.debug(f"   Tools count: {len(self.agent.tools) if hasattr(self.agent, 'tools') else 'unknown'}")
+                logger.debug(f"   Max turns: 50")
 
             # Run agent with OpenAI Agents Runner
+            # Each analysis starts with a fresh conversation history to prevent context window overflow
+            # when running many analyses (e.g., 500+ analyses)
             result = await Runner.run(
                 self.agent,
                 input=initial_observation,
@@ -279,8 +356,26 @@ class CoachAgentOpenAI:
             )
 
             if self.verbose:
-                print(f"🏁 Agent analysis completed")
-                print(f"   Final output length: {len(str(result.final_output)) if result.final_output else 0} chars")
+                logger.info(f"🏁 Agent analysis completed")
+                logger.info(f"   Final output length: {len(str(result.final_output)) if result.final_output else 0} chars")
+                logger.debug(f"   Final output: {result.final_output}")
+
+            # Report analysis completion to status callback
+            if self.status_callback:
+                try:
+                    self.status_callback("Analysis completed", f"Tool calls: {tool_call_count}")
+                except Exception as e:
+                    logger.error(f"Error in status callback: {e}")
+
+            # Update coach window with response (thread-safe)
+            if hasattr(self, 'coach_window') and self.coach_window:
+                try:
+                    response_text = str(result.final_output) if result.final_output else "No response"
+                    # Schedule UI update on main thread using QTimer
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self.coach_window.set_agent_response(response_text))
+                except Exception as e:
+                    logger.error(f"Error updating coach window with response: {e}")
 
             # SDK should handle tool calls automatically, but let's log what happened
             if hasattr(result, 'new_items') and result.new_items:
@@ -290,15 +385,88 @@ class CoachAgentOpenAI:
                         for tool_call in item.tool_calls:
                             tool_call_count += 1
                             if self.verbose:
-                                print(f"🔧 SDK handled tool call #{tool_call_count}: {tool_call.name}")
+                                logger.info(f"🔧 SDK handled tool call #{tool_call_count}: {tool_call.name}")
+                                logger.debug(f"   Tool call arguments: {tool_call.arguments}")
+
+                            # Report tool call to status callback
+                            if self.status_callback:
+                                try:
+                                    # Extract reason from tool call arguments if available
+                                    reason = ""
+                                    parameters = {}
+                                    if hasattr(tool_call, 'arguments') and tool_call.arguments:
+                                        args = tool_call.arguments
+                                        if isinstance(args, dict):
+                                            parameters = args
+                                            if 'reason' in args:
+                                                reason = args['reason']
+
+                                    # Track tool call in history
+                                    self.tool_history.append({
+                                        'name': tool_call.name,
+                                        'parameters': parameters,
+                                        'response': {},  # Will be filled when response comes
+                                        'reason': reason,
+                                        'timestamp': datetime.now().isoformat()
+                                    })
+
+                                    logger.debug(f"   Tool call tracked: {tool_call.name} with {len(parameters)} parameters")
+                                    # Status callback now handled by hooks
+                                except Exception as e:
+                                    logger.error(f"Error in status callback: {e}")
+
                     elif isinstance(item, dict) and item.get('type') == 'tool_call_item':
                         tool_call_count += 1
+                        tool_name = item.get('name', 'unknown')
                         if self.verbose:
-                            print(f"🔧 SDK handled tool call #{tool_call_count}: {item.get('name')}")
+                            print(f"🔧 SDK handled tool call #{tool_call_count}: {tool_name}")
+
+                        # Report tool call to status callback
+                        if self.status_callback:
+                            try:
+                                reason = item.get('arguments', {}).get('reason', '')
+                                self.status_callback(tool_name, reason)
+                            except Exception as e:
+                                print(f"Error in status callback: {e}")
+
                     elif getattr(item, 'type', None) == 'tool_call_item':
                         tool_call_count += 1
+                        tool_name = getattr(item, 'name', 'unknown')
                         if self.verbose:
-                            print(f"🔧 SDK handled tool call #{tool_call_count}: {getattr(item, 'name', 'unknown')}")
+                            print(f"🔧 SDK handled tool call #{tool_call_count}: {tool_name}")
+
+                        # Report tool call to status callback
+                        if self.status_callback:
+                            try:
+                                reason = getattr(item, 'arguments', {}).get('reason', '')
+                                self.status_callback(tool_name, reason)
+                            except Exception as e:
+                                print(f"Error in status callback: {e}")
+
+            # Check if agent actually made tool calls
+            if tool_call_count == 0:
+                logger.warning("⚠️ Agent did not make any tool calls - this indicates the agent is not taking actions")
+                if hasattr(result, 'final_output') and result.final_output:
+                    logger.info(f"Agent output: {result.final_output[:500]}...")
+                    if '"tool_calls"' in result.final_output:
+                        logger.warning("Agent output contains 'tool_calls' key but no actual tool calls were executed")
+                    else:
+                        logger.warning("Agent output has no 'tool_calls' key - agent chose not to use tools")
+                # CRITICAL: Force the agent to make at least one tool call by calling analyze_population
+                logger.warning("🔄 Agent failed to make any tool calls - forcing analyze_population() call")
+                try:
+                    # Force a tool call to analyze_population to ensure the agent takes at least one action
+                    await self.tools_wrapper.analyze_population(
+                        group_by="fitness",
+                        top_n=5,
+                        bottom_n=3,
+                        include_params=False,
+                        reason="Forced analysis due to agent not making any tool calls"
+                    )
+                    tool_call_count += 1
+                    logger.info("✅ Forced analyze_population() tool call executed")
+                except Exception as force_error:
+                    logger.error(f"❌ Failed to force analyze_population() call: {force_error}")
 
             # Additional parsing for JSON in content
             if result.final_output and isinstance(result.final_output, str):
@@ -310,7 +478,7 @@ class CoachAgentOpenAI:
                             tool_call = type('ToolCall', (), {})()  # Mock tool call object
                             tool_call.name = tc['name']
                             tool_call.arguments = tc['arguments']
-                            await custom_tool_handler(tool_call)
+                            # await custom_tool_handler(tool_call)  # TODO: Implement custom tool handler
                 except json.JSONDecodeError:
                     pass
 
@@ -339,7 +507,7 @@ class CoachAgentOpenAI:
                                         for arg_name, arg_value in args.items():
                                             print(f"            {arg_name}={arg_value}")
                         elif hasattr(item, 'type'):
-                            print(f"     [{i}] Type: {item.type}")
+                            logger.debug(f"     [{i}] Type: {item.type}")
                             if hasattr(item, 'content') and item.content:
                                 # Try to parse as JSON for tool results
                                 try:
@@ -348,24 +516,26 @@ class CoachAgentOpenAI:
                                     if isinstance(parsed, dict) and 'success' in parsed:
                                         success = parsed.get('success', False)
                                         status = "✅" if success else "❌"
-                                        print(f"         {status} Tool result: {parsed.get('message', 'completed')}")
+                                        logger.info(f"         {status} Tool result: {parsed.get('message', 'completed')}")
                                         if not success and 'error' in parsed:
-                                            print(f"            Error: {parsed['error']}")
+                                            logger.error(f"            Error: {parsed['error']}")
+                                        logger.debug(f"         Full response: {json.dumps(parsed, indent=2)}")
                                     else:
-                                        print(f"         Content: {item.content[:200]}...")
+                                        logger.debug(f"         Content: {item.content[:200]}...")
                                 except json.JSONDecodeError:
-                                    print(f"         Content: {item.content[:200]}...")
+                                    logger.debug(f"         Content: {item.content[:200]}...")
 
                 # Log actions taken from toolkit
                 if hasattr(self.tools_wrapper, 'toolkit') and hasattr(self.tools_wrapper.toolkit, 'actions_log'):
                     actions = self.tools_wrapper.toolkit.actions_log
                     if actions:
-                        print(f"   📋 Actions taken by toolkit: {len(actions)}")
+                        logger.info(f"   📋 Actions taken by toolkit: {len(actions)}")
                         for j, action in enumerate(actions[-5:], 1):  # Show last 5 actions
                             action_type = action.get('action', 'unknown')
-                            print(f"      {j}. {action_type}")
+                            logger.info(f"      {j}. {action_type}")
+                            logger.debug(f"         Action details: {action}")
                     else:
-                        print(f"   ⚠️  No actions logged by toolkit")
+                        logger.warning(f"   ⚠️  No actions logged by toolkit")
 
             # Extract actions from tools wrapper
             actions_taken = self.tools_wrapper.toolkit.actions_log
@@ -378,6 +548,14 @@ class CoachAgentOpenAI:
                     if hasattr(item, 'tool_calls') and item.tool_calls:
                         tool_calls_made += len(item.tool_calls)
 
+            # CRITICAL: If no tool calls were made, this is a failure
+            if tool_calls_made == 0:
+                logger.error("🚨 CRITICAL FAILURE: Agent made 0 tool calls - this violates the core requirement")
+                logger.error("The Evolution Coach MUST use tools to take actions, not just describe them")
+                logger.error("This indicates the agent is not properly integrated with the tool system")
+                # We cannot force tool calls here, but we must report this as a failure
+                # The system should be designed so this never happens
+
             # DEBUG: Check if the agent actually made tool calls in its response
             if self.verbose and tool_calls_made == 0:
                 print("   ⚠️  Agent response contains NO tool calls!")
@@ -388,13 +566,19 @@ class CoachAgentOpenAI:
                         print("   📝 Agent output contains 'tool_calls' key - parsing issue?")
                     else:
                         print("   📝 Agent output has no 'tool_calls' key - agent chose not to use tools")
+                # Force the agent to make at least one tool call by calling analyze_population if none were made
+                if tool_calls_made == 0:
+                    logger.warning("Agent failed to make any tool calls - this is a critical failure")
+                    logger.warning("The agent should always start with analyze_population()")
+                    # We can't force tool calls here, but we can log the issue
 
             if self.verbose:
-                print(f"   Tool calls made: {tool_calls_made}")
-                print(f"   Actions taken: {len(actions_taken)}")
+                logger.info(f"   Tool calls made: {tool_calls_made}")
+                logger.info(f"   Actions taken: {len(actions_taken)}")
                 if actions_taken:
                     for i, action in enumerate(actions_taken[-3:], 1):  # Show last 3 actions
-                        print(f"     [{len(actions_taken)-3+i}] {action}")
+                        logger.info(f"     [{len(actions_taken)-3+i}] {action}")
+                        logger.debug(f"         Action details: {action}")
 
             # Parse final output for summary
             final_summary = self._extract_summary_from_output(result.final_output)
@@ -417,13 +601,16 @@ class CoachAgentOpenAI:
         except Exception as e:
             logger.exception(f"Agent analysis failed: {e}")
             if self.verbose:
-                print(f"❌ Agent analysis failed: {e}")
+                logger.error(f"❌ Agent analysis failed: {e}")
                 import traceback
-                traceback.print_exc()
+                logger.debug(f"Full traceback: {traceback.format_exc()}")
             return {
                 "success": False,
                 "error": str(e),
-                "actions_taken": []
+                "actions_taken": [],
+                "tool_calls_count": 0,
+                "iterations": 0,
+                "tool_history": []
             }
 
     def _extract_summary_from_output(self, final_output: Optional[str]) -> Dict[str, Any]:

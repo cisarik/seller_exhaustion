@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     
     # Evolution Coach Parameters (OpenRouter only)
     coach_enabled: bool = True  # Enable/disable Evolution Coach
+    coach_islands_enabled: bool = False  # Enable/disable Islands Management (adds complexity)
     coach_analysis_interval: int = 10  # Analyze every N generations (10, 15, 20, etc)
     coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses
     coach_response_timeout: int = 3600  # LLM response timeout in seconds (3600 = 1 hour)
@@ -83,15 +84,26 @@ class Settings(BaseSettings):
     log_progress_bars: bool = True      # Show tqdm progress bars during optimization
     log_feature_builds: bool = False    # Emit per-build feature logs (INFO); otherwise DEBUG
     
+    # Agent Configuration
+    agent_provider: str = "novita"  # openai, openrouter, or novita
+    
     # OpenAI Parameters
-    openai_api_key: str = ""  # OpenAI API key (preferred)
+    openai_api_key: str = ""  # OpenAI API key
+    openai_model: str = "gpt-4o"  # Default OpenAI model
+    openai_base_url: str = "https://api.openai.com/v1"  # OpenAI API base URL
     
     # Openrouter Parameters
-    openrouter_api_key: str = ""  # Openrouter API key (fallback)
+    openrouter_api_key: str = ""  # Openrouter API key
     openrouter_model: str = "anthropic/claude-3.5-sonnet"  # Default Openrouter model
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"  # OpenRouter API base URL
+    
+    # Novita Parameters
+    novita_api_key: str = ""  # Novita API key
+    novita_model: str = "deepseek/deepseek-r1"  # Default Novita model
+    novita_base_url: str = "https://api.novita.ai/openai"  # Novita API base URL
    
     # CPU Workers
-    cpu_workers: int = 7  # CPU worker processes for optimization
+    cpu_workers: int = 12  # CPU worker processes for optimization
     
     # Chart Indicator Display
     chart_ema_fast: bool = True
@@ -115,6 +127,36 @@ class Settings(BaseSettings):
     window_height: int = 1000
     splitter_left: int = 1120
     splitter_right: int = 480
+    
+    # Coach Tools
+    coach_tool_analyze_population: bool = True
+    coach_tool_get_correlation_matrix: bool = True
+    coach_tool_get_param_distribution: bool = True
+    coach_tool_get_param_bounds: bool = True
+    coach_tool_get_generation_history: bool = True
+    coach_tool_mutate_individual: bool = True
+    coach_tool_insert_llm_individual: bool = True
+    coach_tool_create_islands: bool = True
+    coach_tool_migrate_between_islands: bool = True
+    coach_tool_configure_island_scheduler: bool = True
+    coach_tool_inject_immigrants: bool = True
+    coach_tool_export_population: bool = True
+    coach_tool_import_population: bool = True
+    coach_tool_drop_individual: bool = True
+    coach_tool_bulk_update_param: bool = True
+    coach_tool_update_param_bounds: bool = True
+    coach_tool_update_bounds_multi: bool = True
+    coach_tool_reseed_population: bool = True
+    coach_tool_insert_individual: bool = True
+    coach_tool_update_fitness_gates: bool = True
+    coach_tool_update_ga_params: bool = True
+    coach_tool_update_fitness_weights: bool = True
+    coach_tool_set_fitness_function_type: bool = True
+    coach_tool_configure_curriculum: bool = True
+    coach_tool_set_fitness_preset: bool = True
+    coach_tool_set_exit_policy: bool = True
+    coach_tool_set_costs: bool = True
+    coach_tool_finish_analysis: bool = True
     
     @field_validator('chart_x_min', 'chart_x_max', 'chart_y_min', 'chart_y_max', mode='before')
     @classmethod
@@ -214,6 +256,7 @@ class SettingsManager:
             
             f.write("# Evolution Coach Parameters (OpenRouter only)\n")
             f.write(f"COACH_ENABLED={existing.get('COACH_ENABLED', 'True')}\n")
+            f.write(f"COACH_ISLANDS_ENABLED={existing.get('COACH_ISLANDS_ENABLED', 'False')}\n")
             f.write(f"COACH_ANALYSIS_INTERVAL={existing.get('COACH_ANALYSIS_INTERVAL', '10')}\n")
             f.write(f"COACH_DEBUG_PAYLOADS={existing.get('COACH_DEBUG_PAYLOADS', 'False')}\n")
             f.write(f"COACH_RESPONSE_TIMEOUT={existing.get('COACH_RESPONSE_TIMEOUT', '3600')}\n\n")
@@ -223,12 +266,23 @@ class SettingsManager:
             f.write(f"LOG_PROGRESS_BARS={existing.get('LOG_PROGRESS_BARS', 'True')}\n")
             f.write(f"LOG_FEATURE_BUILDS={existing.get('LOG_FEATURE_BUILDS', 'False')}\n\n")
             
+            f.write("# Agent Configuration\n")
+            f.write(f"AGENT_PROVIDER={existing.get('AGENT_PROVIDER', 'novita')}\n\n")
+            
             f.write("# OpenAI Parameters\n")
-            f.write(f"OPENAI_API_KEY={existing.get('OPENAI_API_KEY', '')}\n\n")
+            f.write(f"OPENAI_API_KEY={existing.get('OPENAI_API_KEY', '')}\n")
+            f.write(f"OPENAI_MODEL={existing.get('OPENAI_MODEL', 'gpt-4o')}\n")
+            f.write(f"OPENAI_BASE_URL={existing.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')}\n\n")
             
             f.write("# Openrouter Parameters\n")
             f.write(f"OPENROUTER_API_KEY={existing.get('OPENROUTER_API_KEY', '')}\n")
-            f.write(f"OPENROUTER_MODEL={existing.get('OPENROUTER_MODEL', 'anthropic/claude-3.5-sonnet')}\n\n")
+            f.write(f"OPENROUTER_MODEL={existing.get('OPENROUTER_MODEL', 'anthropic/claude-3.5-sonnet')}\n")
+            f.write(f"OPENROUTER_BASE_URL={existing.get('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')}\n\n")
+            
+            f.write("# Novita Parameters\n")
+            f.write(f"NOVITA_API_KEY={existing.get('NOVITA_API_KEY', '')}\n")
+            f.write(f"NOVITA_MODEL={existing.get('NOVITA_MODEL', 'deepseek/deepseek-r1')}\n")
+            f.write(f"NOVITA_BASE_URL={existing.get('NOVITA_BASE_URL', 'https://api.novita.ai/openai')}\n\n")
             
             f.write("# Chart Indicator Display\n")
             f.write(f"CHART_EMA_FAST={existing.get('CHART_EMA_FAST', 'True')}\n")
@@ -252,6 +306,36 @@ class SettingsManager:
             f.write(f"WINDOW_HEIGHT={existing.get('WINDOW_HEIGHT', '1000')}\n")
             f.write(f"SPLITTER_LEFT={existing.get('SPLITTER_LEFT', '1120')}\n")
             f.write(f"SPLITTER_RIGHT={existing.get('SPLITTER_RIGHT', '480')}\n")
+            
+            f.write("# Coach Tools\n")
+            f.write(f"COACH_TOOL_ANALYZE_POPULATION={existing.get('COACH_TOOL_ANALYZE_POPULATION', 'True')}\n")
+            f.write(f"COACH_TOOL_GET_CORRELATION_MATRIX={existing.get('COACH_TOOL_GET_CORRELATION_MATRIX', 'True')}\n")
+            f.write(f"COACH_TOOL_GET_PARAM_DISTRIBUTION={existing.get('COACH_TOOL_GET_PARAM_DISTRIBUTION', 'True')}\n")
+            f.write(f"COACH_TOOL_GET_PARAM_BOUNDS={existing.get('COACH_TOOL_GET_PARAM_BOUNDS', 'True')}\n")
+            f.write(f"COACH_TOOL_GET_GENERATION_HISTORY={existing.get('COACH_TOOL_GET_GENERATION_HISTORY', 'True')}\n")
+            f.write(f"COACH_TOOL_MUTATE_INDIVIDUAL={existing.get('COACH_TOOL_MUTATE_INDIVIDUAL', 'True')}\n")
+            f.write(f"COACH_TOOL_INSERT_LLM_INDIVIDUAL={existing.get('COACH_TOOL_INSERT_LLM_INDIVIDUAL', 'True')}\n")
+            f.write(f"COACH_TOOL_CREATE_ISLANDS={existing.get('COACH_TOOL_CREATE_ISLANDS', 'True')}\n")
+            f.write(f"COACH_TOOL_MIGRATE_BETWEEN_ISLANDS={existing.get('COACH_TOOL_MIGRATE_BETWEEN_ISLANDS', 'True')}\n")
+            f.write(f"COACH_TOOL_CONFIGURE_ISLAND_SCHEDULER={existing.get('COACH_TOOL_CONFIGURE_ISLAND_SCHEDULER', 'True')}\n")
+            f.write(f"COACH_TOOL_INJECT_IMMIGRANTS={existing.get('COACH_TOOL_INJECT_IMMIGRANTS', 'True')}\n")
+            f.write(f"COACH_TOOL_EXPORT_POPULATION={existing.get('COACH_TOOL_EXPORT_POPULATION', 'True')}\n")
+            f.write(f"COACH_TOOL_IMPORT_POPULATION={existing.get('COACH_TOOL_IMPORT_POPULATION', 'True')}\n")
+            f.write(f"COACH_TOOL_DROP_INDIVIDUAL={existing.get('COACH_TOOL_DROP_INDIVIDUAL', 'True')}\n")
+            f.write(f"COACH_TOOL_BULK_UPDATE_PARAM={existing.get('COACH_TOOL_BULK_UPDATE_PARAM', 'True')}\n")
+            f.write(f"COACH_TOOL_UPDATE_PARAM_BOUNDS={existing.get('COACH_TOOL_UPDATE_PARAM_BOUNDS', 'True')}\n")
+            f.write(f"COACH_TOOL_UPDATE_BOUNDS_MULTI={existing.get('COACH_TOOL_UPDATE_BOUNDS_MULTI', 'True')}\n")
+            f.write(f"COACH_TOOL_RESEED_POPULATION={existing.get('COACH_TOOL_RESEED_POPULATION', 'True')}\n")
+            f.write(f"COACH_TOOL_INSERT_INDIVIDUAL={existing.get('COACH_TOOL_INSERT_INDIVIDUAL', 'True')}\n")
+            f.write(f"COACH_TOOL_UPDATE_FITNESS_GATES={existing.get('COACH_TOOL_UPDATE_FITNESS_GATES', 'True')}\n")
+            f.write(f"COACH_TOOL_UPDATE_GA_PARAMS={existing.get('COACH_TOOL_UPDATE_GA_PARAMS', 'True')}\n")
+            f.write(f"COACH_TOOL_UPDATE_FITNESS_WEIGHTS={existing.get('COACH_TOOL_UPDATE_FITNESS_WEIGHTS', 'True')}\n")
+            f.write(f"COACH_TOOL_SET_FITNESS_FUNCTION_TYPE={existing.get('COACH_TOOL_SET_FITNESS_FUNCTION_TYPE', 'True')}\n")
+            f.write(f"COACH_TOOL_CONFIGURE_CURRICULUM={existing.get('COACH_TOOL_CONFIGURE_CURRICULUM', 'True')}\n")
+            f.write(f"COACH_TOOL_SET_FITNESS_PRESET={existing.get('COACH_TOOL_SET_FITNESS_PRESET', 'True')}\n")
+            f.write(f"COACH_TOOL_SET_EXIT_POLICY={existing.get('COACH_TOOL_SET_EXIT_POLICY', 'True')}\n")
+            f.write(f"COACH_TOOL_SET_COSTS={existing.get('COACH_TOOL_SET_COSTS', 'True')}\n")
+            f.write(f"COACH_TOOL_FINISH_ANALYSIS={existing.get('COACH_TOOL_FINISH_ANALYSIS', 'True')}\n")
     
     @staticmethod
     def reload_settings():

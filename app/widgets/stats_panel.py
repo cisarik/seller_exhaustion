@@ -32,6 +32,7 @@ from backtest.optimizer_factory import (
 
 # Evolution Coach integration
 from backtest.coach_manager_openai import OpenAICoachManager
+from backtest.coach_classic import ClassicCoachManager
 from backtest.coach_protocol import CoachAnalysis
 
 import multiprocessing
@@ -81,9 +82,10 @@ class StatsPanel(QWidget):
         self._last_init_signature: tuple | None = None
         self._last_init_signature_ts: float = 0.0  # Monotonic timestamp
         
-        # Evolution Coach integration (OpenAI Agents coach)
+        # Evolution Coach integration (OpenAI Agents or Classic coach)
         self.coach_manager: Optional[OpenAICoachManager] = None
         self.status_callback: callable = None  # Callback to update main window status bar
+        self.coach_window: Optional['EvolutionCoachWindow'] = None  # Reference to coach window
         
         self.init_ui()
         
@@ -97,36 +99,132 @@ class StatsPanel(QWidget):
         """Set a population file to initialize the optimizer from (one-time)."""
         self.initial_population_file = path
 
+    def set_coach_window(self, coach_window):
+        """Set the Evolution Coach window for real-time updates."""
+        self.coach_window = coach_window
+        # Update status callback to also update coach window
+        if self.coach_window:
+            self.status_callback = self._create_coach_status_callback()
+
+        # Update coach manager with coach window
+        if self.coach_manager:
+            self.coach_manager.coach_window = coach_window
+
+    def set_classic_coach_window(self, classic_coach_window):
+        """Set the Classic Coach window for deterministic decision visualization."""
+        self.classic_coach_window = classic_coach_window
+        # Update coach manager with classic coach window
+        if self.coach_manager and hasattr(self.coach_manager, 'set_classic_coach_window'):
+            self.coach_manager.set_classic_coach_window(classic_coach_window)
+
+    def _create_coach_status_callback(self):
+        """Create status callback that updates both main window and coach window."""
+        def status_callback(tool_name: str, reason: str = ""):
+            # Update main window status bar
+            if hasattr(self, 'status_callback') and self.status_callback:
+                self.status_callback(tool_name, reason)
+            
+            # Update coach window
+            if hasattr(self, 'coach_window') and self.coach_window:
+                try:
+                    # Add tool call to coach window
+                    self.coach_window.add_tool_call(
+                        tool_name=tool_name,
+                        parameters={},  # Will be filled by actual tool call
+                        response={},    # Will be filled by actual tool call
+                        reason=reason
+                    )
+                    
+                    # Update status
+                    self.coach_window.set_status(f"Tool: {tool_name}", is_analyzing=True)
+                    
+                except Exception as e:
+                    print(f"Error updating coach window: {e}")
+            
+            # Update progress bar in compact params editor
+            if hasattr(self, 'param_editor') and self.param_editor:
+                try:
+                    self.param_editor.set_coach_analyzing(True)
+                except Exception as e:
+                    print(f"Error updating coach progress bar: {e}")
+        
+        return status_callback
+
     # -------- Evolution Coach Integration --------
     def _initialize_coach_manager(self):
-        """Initialize Evolution Coach manager (OpenRouter-based)."""
+        """Initialize Evolution Coach manager based on selected mode."""
         try:
             from config.settings import settings
-            
-            # Coach requires OpenRouter API key and must be enabled
+
+            # Coach must be enabled
             if not settings.coach_enabled:
                 logger.info("Evolution Coach disabled in settings")
                 self.coach_manager = None
                 return
-            
-            openrouter_api_key = getattr(settings, 'openrouter_api_key', '')
-            if not openrouter_api_key:
-                logger.warning("⚠ OpenRouter API key not configured - Coach unavailable")
+
+            # Get coach mode from settings
+            coach_mode = getattr(settings, 'coach_mode', 'openai')
+
+            if coach_mode == 'classic':
+                # Initialize Classic Coach (deterministic, no API keys needed)
+                self.coach_manager = ClassicCoachManager(
+                        analysis_interval=settings.coach_analysis_interval,
+                        verbose=True,
+                        total_iterations=getattr(settings, 'optimizer_iterations', 200),
+                        enable_islands=getattr(settings, 'coach_islands_enabled', False),
+                        enable_fitness_tuning=True,
+                        enable_bounds_expansion=True,
+                        enable_immigration=True,
+                        enable_algorithm_switching=True
+                    )
+                logger.info("✓ Classic Coach initialized (deterministic mode)")
+                if self.status_callback:
+                    self.status_callback(f"✓ 🤖 Classic Coach ready (every {self.coach_manager.analysis_interval} gens)")
+
+            elif coach_mode == 'openai':
+                # Initialize OpenAI Coach (requires API keys)
+                provider = getattr(settings, 'agent_provider', 'novita')
+                api_key_configured = False
+
+                if provider == "openai":
+                    api_key = getattr(settings, 'openai_api_key', '')
+                    if api_key:
+                        api_key_configured = True
+                    else:
+                        logger.warning("⚠ OpenAI API key not configured - Coach unavailable")
+                elif provider == "openrouter":
+                    api_key = getattr(settings, 'openrouter_api_key', '')
+                    if api_key:
+                        api_key_configured = True
+                    else:
+                        logger.warning("⚠ OpenRouter API key not configured - Coach unavailable")
+                elif provider == "novita":
+                    api_key = getattr(settings, 'novita_api_key', '')
+                    if api_key:
+                        api_key_configured = True
+                    else:
+                        logger.warning("⚠ Novita API key not configured - Coach unavailable")
+
+                if not api_key_configured:
+                    self.coach_manager = None
+                    return
+
+                self.coach_manager = OpenAICoachManager(
+                    analysis_interval=settings.coach_analysis_interval,
+                    auto_apply=True,
+                    verbose=True,
+                    openrouter_api_key=getattr(settings, 'openrouter_api_key', ''),
+                    openrouter_model=getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet'),
+                    status_callback=self._coach_tool_status_callback,
+                    coach_window=getattr(self, 'coach_window', None)
+                )
+                # Update UI status bar if callback provided
+                if self.status_callback:
+                    self.status_callback(f"✓ 🤖 OpenAI Coach ready ({provider.title()}, every {self.coach_manager.analysis_interval} gens)")
+            else:
+                logger.warning(f"Unknown coach mode: {coach_mode}")
                 self.coach_manager = None
-                return
-            
-            self.coach_manager = OpenAICoachManager(
-                analysis_interval=settings.coach_analysis_interval,
-                auto_apply=True,
-                verbose=True,
-                openrouter_api_key=getattr(settings, 'openrouter_api_key', ''),
-                openrouter_model=getattr(settings, 'openrouter_model', 'anthropic/claude-3.5-sonnet')
-            )
-            # Log to main logger (terminal), not coach window
-            logger.info(f"✓ 🤖 Evolution Coach initialized (OpenRouter): interval={self.coach_manager.analysis_interval} gens")
-            # Update UI status bar if callback provided
-            if self.status_callback:
-                self.status_callback(f"✓ 🤖 Coach ready (every {self.coach_manager.analysis_interval} gens)")
+
         except Exception as e:
             logger.exception("Failed to initialize coach manager: %s", e)
             logger.warning("⚠ Evolution Coach unavailable - continuing without coach")
@@ -371,6 +469,9 @@ class StatsPanel(QWidget):
             self._log_parameter_snapshot(seller_params, backtest_params, prefix="Seed ")
             self._log_optimizer_config(prefix="  ")
             
+            # Update dropdown to show active optimizer status
+            self.update_optimizer_dropdown_status()
+            
             # Log initialization to coach manager (only once per optimizer instance)
             # Use optimizer object ID as unique identifier to prevent duplicates
             optimizer_id = id(self.optimizer)
@@ -447,6 +548,9 @@ class StatsPanel(QWidget):
         # Optimization controls
         self.optimization_group = self.create_optimization_section()
         layout.addWidget(self.optimization_group)
+        
+        # Initialize dropdown status
+        self.update_optimizer_dropdown_status()
     
     def create_metrics_section(self):
         """Create comprehensive metrics display."""
@@ -527,6 +631,28 @@ class StatsPanel(QWidget):
         """Set external parameter editor reference."""
         self.param_editor = param_editor
     
+    def set_chart_view(self, chart_view):
+        """Set external chart view reference for status updates."""
+        self.chart_view = chart_view
+    
+    def _coach_tool_status_callback(self, tool_name: str, reason: str = ""):
+        """Callback for coach tool status updates."""
+        if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_tool_status'):
+            self.chart_view.set_coach_tool_status(tool_name, reason)
+    
+    def reinitialize_coach_manager(self):
+        """Reinitialize coach manager after settings changes."""
+        # Reset coach manager to force re-initialization with new settings
+        self.coach_manager = None
+        self._initialize_coach_manager()
+
+        # If coach manager supports dynamic interval updates, apply the new interval
+        if self.coach_manager and hasattr(self.coach_manager, 'update_analysis_interval'):
+            from config.settings import settings
+            new_interval = getattr(settings, 'coach_analysis_interval', 5)
+            self.coach_manager.update_analysis_interval(new_interval)
+            logger.info(f"Updated coach analysis interval to {new_interval}")
+    
     def create_optimization_section(self):
         """Create optimization controls with modular optimizer selection."""
         group = QGroupBox("Strategy Optimization")
@@ -591,12 +717,81 @@ class StatsPanel(QWidget):
         
         # Reset optimizer (will be re-initialized on next run)
         self.optimizer = None
-        self._initialization_logged = False  # Reset flag so initialization gets logged again
-        self._logged_optimizer_ids = set()  # Clear logged optimizer IDs
-        self._last_init_signature = None
-        self._last_init_signature_ts = 0.0
         
-        logger.info("Optimizer type changed to: %s", get_optimizer_display_name(optimizer_type))
+        # Update dropdown to show no optimizer is active
+        self.update_optimizer_dropdown_status()
+    
+    def update_optimizer_dropdown_status(self):
+        """Update optimizer dropdown to show current active optimizer status."""
+        if self.optimizer is None:
+            # No optimizer active - show as selection dropdown
+            self.optimizer_type_combo.setEnabled(True)
+            self.optimizer_type_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #2b2b2b;
+                    color: #e8f5e9;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-top: 5px solid #e8f5e9;
+                    margin-right: 5px;
+                }
+            """)
+        else:
+            # Optimizer is active - show as status indicator
+            optimizer_name = self.optimizer.get_optimizer_name()
+
+            # Map optimizer names to dropdown data values
+            if optimizer_name == "Evolutionary Algorithm":
+                optimizer_type = "evolutionary"
+            elif optimizer_name == "ADAM":
+                optimizer_type = "adam"
+            else:
+                optimizer_type = "evolutionary"  # fallback
+
+            # Find the correct index for the active optimizer
+            for i in range(self.optimizer_type_combo.count()):
+                if self.optimizer_type_combo.itemData(i) == optimizer_type:
+                    self.optimizer_type_combo.setCurrentIndex(i)
+                    break
+
+            # Disable dropdown and change style to show status
+            self.optimizer_type_combo.setEnabled(False)
+            self.optimizer_type_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: white;
+                    color: black;
+                    border: 2px solid #4caf50;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-top: 5px solid #666;
+                    margin-right: 5px;
+                }
+            """)
+
+        # Log the current optimizer status
+        if self.optimizer is not None:
+            optimizer_name = self.optimizer.get_optimizer_name()
+            logger.info("Optimizer active: %s", optimizer_name)
+        else:
+            logger.info("No optimizer active")
     
     # Acceleration change handled via Settings tab
     
@@ -755,18 +950,18 @@ class StatsPanel(QWidget):
         if not history:
             return
         
-        # Extract iteration and fitness data
-        iterations = [h['iteration'] for h in history]
+        # Extract generation and fitness data
+        generations = [h['generation'] for h in history]
         best_fitness = [h.get('best_fitness', h.get('fitness', 0)) for h in history]
         
         # For evolutionary algorithms: mean_fitness (population average)
-        # For ADAM: current fitness (iteration-by-iteration fitness)
+        # For ADAM: current fitness (generation-by-generation fitness)
         mean_fitness = [h.get('mean_fitness') for h in history]
         current_fitness = [h.get('fitness', 0) for h in history]
         
         # Plot best fitness (line only, no symbols)
         self.fitness_plot.plot(
-            iterations, best_fitness,
+            generations, best_fitness,
             pen=pg.mkPen('#4caf50', width=3),
             name='Best Fitness'
         )
@@ -778,14 +973,14 @@ class StatsPanel(QWidget):
             # Evolutionary algorithm - plot mean fitness
             clean_mean = [m if m is not None else 0 for m in mean_fitness]
             self.fitness_plot.plot(
-                iterations, clean_mean,
+                generations, clean_mean,
                 pen=pg.mkPen('#ff9800', width=2),
                 name='Avg Fitness'
             )
         elif len(current_fitness) > 0:
             # ADAM - plot current fitness
             self.fitness_plot.plot(
-                iterations, current_fitness,
+                generations, current_fitness,
                 pen=pg.mkPen('#ff9800', width=2),
                 name='Current Fitness'
             )
@@ -977,18 +1172,26 @@ class StatsPanel(QWidget):
             if self.optimizer is None:
                 return
             
-            # Get current iteration from optimizer stats
+            # Get current generation from optimizer stats
             stats = self.optimizer.get_stats()
-            iteration = stats.get('iteration', stats.get('generation', 0))
+            generation = stats.get('generation', 0)
             
             # Check if coach should analyze (agent-based coach)
-            if self.coach_manager and self.coach_manager.should_analyze(iteration):
-                logger.info("🤖 Evolution Coach Agent triggering at generation %s", iteration)
+            if self.coach_manager and self.coach_manager.should_analyze(generation):
+                logger.info("🤖 Evolution Coach Agent triggering at generation %s", generation)
                 # Run coach analysis in background thread to avoid blocking UI
                 from threading import Thread
                 
                 def run_coach_analysis():
                     try:
+                        # Show coach progress in UI
+                        if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'show_coach_progress'):
+                            self.param_editor.show_coach_progress("Evolution Coach analyzing population...")
+                        
+                        # Update status bar with coach start
+                        if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
+                            self.chart_view.set_coach_status("🤖 Evolution Coach starting analysis...")
+                        
                         # Get current configs
                         _, _, fitness_config = self.get_current_params()
                         
@@ -1011,6 +1214,13 @@ class StatsPanel(QWidget):
                             immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
                         )
                         
+                        # Show progress bar before analysis
+                        if hasattr(self, 'param_editor') and self.param_editor:
+                            try:
+                                self.param_editor.set_coach_analyzing(True)
+                            except Exception as e:
+                                print(f"Error showing coach progress bar: {e}")
+                        
                         # Run agent analysis (blocking call but in background thread)
                         import asyncio
                         loop = asyncio.new_event_loop()
@@ -1020,11 +1230,20 @@ class StatsPanel(QWidget):
                                 self.coach_manager.analyze_and_apply_with_openai_agent(
                                     population=population,
                                     fitness_config=fitness_config,
-                                    ga_config=ga_config
+                                    ga_config=ga_config,
+                                    coach_window=self.coach_window,
+                                    status_callback=self.status_callback
                                 )
                             )
                             
                             if success:
+                                # Hide progress bar after successful analysis
+                                if hasattr(self, 'param_editor') and self.param_editor:
+                                    try:
+                                        self.param_editor.set_coach_analyzing(False)
+                                    except Exception as e:
+                                        print(f"Error hiding coach progress bar: {e}")
+                                
                                 # Coach may have modified ga_config - propagate changes back to optimizer
                                 if hasattr(self.optimizer, 'config'):
                                     self.optimizer.config.update({
@@ -1041,18 +1260,49 @@ class StatsPanel(QWidget):
                                     self._save_coach_modified_params_to_env()
                                 
                                 logger.info("✅ Coach agent completed: %s", summary)
+                                
+                                # Hide coach progress and update status
+                                if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
+                                    self.param_editor.hide_coach_progress()
+                                
+                                # Update status bar with coach completion
+                                if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
+                                    action_count = summary.get('total_actions', 0)
+                                    self.chart_view.set_coach_status(
+                                        f"✅ Coach completed: {action_count} actions taken", 
+                                        is_recommendation=True
+                                    )
+                                
                                 # Update status bar if callback available
                                 if self.status_callback:
                                     action_count = summary.get('total_actions', 0)
-                                    self.status_callback(f"✅ Coach: {action_count} actions taken at gen {iteration}")
+                                    self.status_callback(f"✅ Coach: {action_count} actions taken at gen {generation}")
                             else:
                                 logger.warning("⚠ Coach agent failed: %s", summary.get('error', 'Unknown'))
+                                
+                                # Hide coach progress and update status
+                                if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
+                                    self.param_editor.hide_coach_progress()
+                                
+                                # Update status bar with coach failure
+                                if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
+                                    self.chart_view.set_coach_status("⚠ Coach analysis failed")
+                                
                                 if self.status_callback:
-                                    self.status_callback(f"⚠ Coach failed at gen {iteration}")
+                                    self.status_callback(f"⚠ Coach failed at gen {generation}")
                         finally:
                             loop.close()
                     except Exception as e:
                         logger.exception("Error during coach analysis: %s", e)
+                        
+                        # Hide coach progress and update status
+                        if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
+                            self.param_editor.hide_coach_progress()
+                        
+                        # Update status bar with coach error
+                        if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
+                            self.chart_view.set_coach_status(f"❌ Coach error: {str(e)[:50]}")
+                        
                         if self.status_callback:
                             self.status_callback(f"❌ Coach error: {str(e)[:50]}")
                 
@@ -1076,7 +1326,7 @@ class StatsPanel(QWidget):
                 )
                 
                 # AUTO-APPLY: Update param editor immediately with best parameters
-                logger.info("Auto-applying best parameters from iteration %s", iteration)
+                logger.info("Auto-applying best parameters from generation %s", generation)
                 self.set_params_from_individual(best_individual)
                 
                 # Update stats display with backtest results if available
@@ -1123,13 +1373,13 @@ class StatsPanel(QWidget):
         
         self.set_params_from_individual(best)
         
-        # Get iteration from stats
+        # Get generation from stats
         stats = self.optimizer.get_stats()
-        iteration = stats.get('iteration', stats.get('generation', 0))
+        generation = stats.get('generation', 0)
         
         logger.info(
-            "Applied best parameters from iteration %s | Fitness=%.4f",
-            iteration,
+            "Applied best parameters from generation %s | Fitness=%.4f",
+            generation,
             best_fitness or 0.0,
         )
         self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
@@ -1202,17 +1452,17 @@ class StatsPanel(QWidget):
         fitness_config = self.get_current_params()[2]
         
         from config.settings import settings
-        n_iters = settings.optimizer_iterations
+        n_gens = settings.optimizer_iterations
         
         logger.info("=" * 70)
-        logger.info("🚀 Starting Multi-Step Optimization: %s iterations", n_iters)
+        logger.info("🚀 Starting Multi-Step Optimization: %s generations", n_gens)
         logger.info("=" * 70)
         try:
             workers = self.optimizer.get_worker_count()
         except Exception:
             workers = "unknown"
         print(
-            f"RUN start iters={n_iters} workers={workers}"
+            f"RUN start iters={n_gens} workers={workers}"
         )
         
         # Reset best fitness tracking for this optimization run
@@ -1231,13 +1481,13 @@ class StatsPanel(QWidget):
         self.optimizer_type_combo.setEnabled(False)
         
         # Emit initial progress
-        self.progress_updated.emit(0, n_iters, "Initializing optimization...")
+        self.progress_updated.emit(0, n_gens, "Initializing optimization...")
         
         # Run optimization in separate thread to not block UI
         import threading
         thread = threading.Thread(
             target=self._run_multi_step_thread,
-            args=(n_iters,),
+            args=(n_gens,),
             daemon=True
         )
         thread.start()
@@ -1289,8 +1539,8 @@ class StatsPanel(QWidget):
                         stop_flag=stop_check
                     )
                     
-                    # Evolve islands in parallel (if any were created by the coach)
-                    if self.coach_manager:
+                    # Evolve islands in parallel (if any were created by the coach and islands are enabled)
+                    if self.coach_manager and getattr(self.coach_manager, 'islands_enabled', False):
                         try:
                             from core.models import OptimizationConfig
                             optimizer_config = getattr(self.optimizer, 'config', {})
@@ -1365,7 +1615,7 @@ class StatsPanel(QWidget):
                             logger.info(
                                 "Population stats | generation=%s | mean_fitness=%.4f | std_fitness=%.4f | "
                                 "min=%.4f | max=%.4f | best_ever=%.4f | mean_trades=%s | below_min=%s | diversity=%s",
-                                result.iteration,
+                                result.generation,
                                 mean_fitness,
                                 std_fitness,
                                 min_fitness,
@@ -1392,7 +1642,7 @@ class StatsPanel(QWidget):
 
                             stat_message = "STAT " + " | ".join(stat_parts)
                             if self.coach_manager:
-                                self.coach_manager.add_log(result.iteration, stat_message)
+                                self.coach_manager.add_log(result.generation, stat_message)
                             else:
                                 print(stat_message)
                     
@@ -1409,7 +1659,7 @@ class StatsPanel(QWidget):
                         self.prev_best_fitness = current_best_fitness
                         
                         # Run backtest with new best to visualize
-                        logger.info("🎯 New best found in iteration %s | Fitness=%.4f", gen + 1, current_best_fitness)
+                        logger.info("🎯 New best found in generation %s | Fitness=%.4f", gen + 1, current_best_fitness)
                         self._log_metrics_snapshot(best_metrics, prefix="  ")
                         if best_seller is not None and best_backtest is not None:
                             self._log_parameter_snapshot(best_seller, best_backtest, prefix="  ")
@@ -1481,43 +1731,14 @@ class StatsPanel(QWidget):
                     
                     # Check if Evolution Coach should analyze this generation
                     if self.coach_manager and self.coach_manager.should_analyze(gen + 1):
-                        logger.info("=" * 70)
                         logger.info("⏸️  PAUSING OPTIMIZATION FOR COACH ANALYSIS (Generation %s)", gen + 1)
-                        logger.info("=" * 70)
-                        print(f"[COACH  ] ⏸️  Pausing for analysis at Gen {gen + 1}")
                         
                         # Get current population
                         population = getattr(self.optimizer, 'population', None)
                         if population:
                             try:
-                                # Log complete population snapshot for coach context
-                                print(f"[COACH  ] 📸 Population snapshot (Gen {gen + 1}):")
+                                # Log population summary for coach context
                                 if hasattr(population, 'individuals') and population.individuals:
-                                    for i, ind in enumerate(population.individuals):
-                                        # Complete individual parameters dump
-                                        seller_params = ind.seller_params
-                                        backtest_params = ind.backtest_params
-                                        fitness = ind.fitness if hasattr(ind, 'fitness') else 0.0
-                                        metrics = ind.metrics if hasattr(ind, 'metrics') else {}
-                                        trades = metrics.get('n', '--')
-                                        win_rate = metrics.get('win_rate', 0.0)
-                                        avg_r = metrics.get('avg_R', 0.0)
-                                        pnl = metrics.get('total_pnl', 0.0)
-                                        
-                                        # Complete parameter dump for coach analysis
-                                        print(f"  [IND {i:2d}] fit={fitness:.4f} | n={trades:3} | wr={win_rate:5.1%} | avgR={avg_r:5.2f} | pnl={pnl:6.3f}")
-                                        
-                                        # Seller parameters (strategy entry logic)
-                                        print(f"    SELLER: ema_f={seller_params.ema_fast:3d} ema_s={seller_params.ema_slow:3d} z_win={seller_params.z_window:3d} atr_win={seller_params.atr_window:3d}")
-                                        print(f"    THRESH: vol_z={seller_params.vol_z:.2f} tr_z={seller_params.tr_z:.2f} cloc_min={seller_params.cloc_min:.2f}")
-                                        
-                                        # Backtest parameters (exit logic and costs)
-                                        print(f"    EXIT: fib_lookback={backtest_params.fib_swing_lookback:3d} fib_lookahead={backtest_params.fib_swing_lookahead:2d} fib_target={backtest_params.fib_target_level:.3f}")
-                                        print(f"    COSTS: fee_bp={backtest_params.fee_bp:.1f} slippage_bp={backtest_params.slippage_bp:.1f} max_hold={backtest_params.max_hold:3d}")
-                                        
-                                        print("")  # Empty line for readability
-                                    
-                                    # Population summary line
                                     pop_size = len(population.individuals)
                                     avg_fitness = sum(ind.fitness for ind in population.individuals) / pop_size if pop_size > 0 else 0.0
                                     best_fitness = max((ind.fitness for ind in population.individuals), default=0.0)
@@ -1543,16 +1764,32 @@ class StatsPanel(QWidget):
                                     immigrant_fraction=optimizer_config.get('immigrant_fraction', 0.0)
                                 )
                                 
+                                # Show progress bar before analysis
+                                if hasattr(self, 'param_editor') and self.param_editor:
+                                    try:
+                                        self.param_editor.set_coach_analyzing(True)
+                                    except Exception as e:
+                                        print(f"Error showing coach progress bar: {e}")
+                                
                                 # Use OpenAI Agents coach analysis
                                 success, summary = loop.run_until_complete(
                                     self.coach_manager.analyze_and_apply_with_openai_agent(
                                         population=population,
                                         fitness_config=fitness_config,
-                                        ga_config=ga_config
+                                        ga_config=ga_config,
+                                        coach_window=self.coach_window,
+                                        status_callback=self.status_callback
                                     )
                                 )
                                 
                                 if success:
+                                    # Hide progress bar after successful analysis
+                                    if hasattr(self, 'param_editor') and self.param_editor:
+                                        try:
+                                            self.param_editor.set_coach_analyzing(False)
+                                        except Exception as e:
+                                            print(f"Error hiding coach progress bar: {e}")
+                                    
                                     # Coach may have modified ga_config - propagate changes back to optimizer
                                     if hasattr(self.optimizer, 'config'):
                                         self.optimizer.config.update({
@@ -1568,23 +1805,42 @@ class StatsPanel(QWidget):
                                     # Agent returns 'total_actions'
                                     action_count = summary.get('total_actions', 0)
                                     logger.info("✅ Coach agent completed: %s actions", action_count)
-                                    print(f"[COACH  ] ✅ Agent took {action_count} actions")
+
+                                    # Update status bar with completion message
+                                    if self.status_callback:
+                                        status_msg = f"✅ Coach completed: {action_count} actions at gen {generation}"
+                                        self.status_callback(status_msg)
                                 else:
+                                    # Hide progress bar after failed analysis
+                                    if hasattr(self, 'param_editor') and self.param_editor:
+                                        try:
+                                            self.param_editor.set_coach_analyzing(False)
+                                        except Exception as e:
+                                            print(f"Error hiding coach progress bar: {e}")
+                                    
                                     error_msg = summary.get('error', 'Unknown error')
                                     logger.warning("⚠️  Coach agent failed: %s", error_msg)
-                                    print(f"[COACH  ] ⚠️  {error_msg}")
+
+                                    # Update status bar with failure message
+                                    if self.status_callback:
+                                        self.status_callback(f"⚠ Coach failed at gen {generation}")
                             except Exception as e:
+                                # Hide progress bar after exception
+                                if hasattr(self, 'param_editor') and self.param_editor:
+                                    try:
+                                        self.param_editor.set_coach_analyzing(False)
+                                    except Exception as e:
+                                        print(f"Error hiding coach progress bar: {e}")
+                                
                                 logger.exception("Coach analysis error: %s", e)
-                                logger.debug(f"❌ Coach analysis failed: {e}")
-                                print(f"[COACH  ] ❌ Analysis error")
+
+                                # Update status bar with error message
+                                if self.status_callback:
+                                    self.status_callback(f"❌ Coach error: {str(e)[:50]}")
                         else:
                             logger.warning("⚠️  No population available for coach analysis")
-                            print(f"[COACH  ] ⚠️  No population")
                         
-                        logger.info("=" * 70)
                         logger.info("▶️  RESUMING OPTIMIZATION (Generation %s)", gen + 1)
-                        logger.info("=" * 70)
-                        print(f"[COACH  ] ▶️  Resuming optimization")
                     
                 except Exception as e:
                     logger.exception("Error in generation %s: %s", gen + 1, e)
@@ -1596,11 +1852,11 @@ class StatsPanel(QWidget):
             if not self.stop_requested:
                 self.progress_updated.emit(n_gens, n_gens, f"✓ Complete in {total_time:.1f}s")
                 logger.info("=" * 70)
-                logger.info("✓ Optimization complete! %s iterations in %.1fs", n_gens, total_time)
-                logger.info("  Average: %.2fs per iteration", total_time / n_gens if n_gens else 0.0)
+                logger.info("✓ Optimization complete! %s generations in %.1fs", n_gens, total_time)
+                logger.info("  Average: %.2fs per generation", total_time / n_gens if n_gens else 0.0)
                 logger.info("=" * 70)
                 run_summary = f"RUN done time={total_time:.1f}s avg={(total_time / n_gens if n_gens else 0.0):.2f}s"
-                self._coach_log(n_gens, run_summary)
+                # _coach_log removed (dead code)
                 
                 # Show final best results
                 best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
@@ -1618,7 +1874,7 @@ class StatsPanel(QWidget):
                     )
                     population = getattr(self.optimizer, 'population', None)
                     gen_index = getattr(population, 'generation', n_gens)
-                    self._coach_log(gen_index, final_line)
+                    # _coach_log removed (dead code)
         
         except Exception as e:
             logger.exception("Error in multi-step optimization: %s", e)
@@ -1643,18 +1899,18 @@ class StatsPanel(QWidget):
     @Slot(bool)
     def _update_after_multi_step_generation(self, new_best_found: bool):
         """
-        Update UI after each iteration during multi-step optimization.
+        Update UI after each generation during multi-step optimization.
         
         Args:
-            new_best_found: True if a new best was found this iteration
+            new_best_found: True if a new best was found this generation
         """
         try:
             if self.optimizer is None:
                 return
             
-            # Get current iteration
+            # Get current generation
             stats = self.optimizer.get_stats()
-            iteration = stats.get('iteration', stats.get('generation', 0))
+            generation = stats.get('generation', 0)
             
             # Always update fitness plot
             self.update_fitness_plot()
@@ -1672,7 +1928,7 @@ class StatsPanel(QWidget):
                 )
                 
                 # AUTO-APPLY: Update param editor immediately with best parameters
-                logger.info("Auto-applying new best parameters from iteration %s", iteration)
+                logger.info("Auto-applying new best parameters from generation %s", generation)
                 self.set_params_from_individual(best_individual)
                 self._log_parameter_snapshot(best_individual.seller_params, best_individual.backtest_params, prefix="  ")
                 
@@ -1695,7 +1951,7 @@ class StatsPanel(QWidget):
                     logger.warning("No backtest result available for new best")
             
         except Exception as e:
-            logger.exception("Error updating UI after multi-step iteration: %s", e)
+            logger.exception("Error updating UI after multi-step generation: %s", e)
     
     @Slot()
     @Slot()
@@ -1705,7 +1961,9 @@ class StatsPanel(QWidget):
         self.optimize_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)  # Disable stop button after optimization
         self.fitness_preset_combo.setEnabled(True)
-        self.optimizer_type_combo.setEnabled(True)
+        
+        # Update dropdown to show current optimizer status
+        self.update_optimizer_dropdown_status()
         
         # Run final backtest with best parameters
         best_seller, best_backtest, best_fitness = self.optimizer.get_best_params()
@@ -1749,7 +2007,7 @@ class StatsPanel(QWidget):
         """Stop ongoing multi-step optimization (keeps progress)."""
         if self.is_optimizing:
             self.stop_requested = True
-            logger.info("⏹ Stop requested... will finish current iteration and keep best parameters")
+            logger.info("⏹ Stop requested... will finish current generation and keep best parameters")
             print("RUN stop_requested")
             
             # Save current evolution parameters to .env (Coach may have modified them)
@@ -1863,7 +2121,7 @@ class StatsPanel(QWidget):
             for key, value in coach_modifiable_params.items():
                 logger.info(f"  {key}={value}")
 
-            print(f"COACH_ENV saved ga_params={len(coach_modifiable_params)}")
+            logger.info("COACH_ENV saved ga_params=%d", len(coach_modifiable_params))
 
         except Exception as e:
             logger.exception("Failed to save coach-modified evolution parameters: %s", e)

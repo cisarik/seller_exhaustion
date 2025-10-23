@@ -314,6 +314,45 @@ class CandleChartWidget(QWidget):
         
         self.status_label.setText(message)
     
+    def set_coach_tool_status(self, tool_name: str, reason: str = "", result: str = ""):
+        """
+        Update status bar with coach tool execution details.
+        
+        Args:
+            tool_name: Name of the tool being called
+            reason: Reason for calling the tool
+            result: Result or response from the tool
+        """
+        # Build status message
+        message_parts = [f"🤖 Coach: {tool_name}"]
+        
+        if reason:
+            message_parts.append(f"({reason})")
+        
+        if result:
+            # Truncate long results
+            if len(result) > 100:
+                result = result[:97] + "..."
+            message_parts.append(f"→ {result}")
+        
+        message = " ".join(message_parts)
+        
+        # Set blue background for tool execution
+        self.status_label.setStyleSheet("""
+            background-color: #1e3a5f;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: bold;
+            padding: 6px 10px;
+            border-radius: 3px;
+            border: 1px solid #2196f3;
+        """)
+        self.status_label.setCursor(Qt.ArrowCursor)
+        self._status_is_clickable = False
+        self._coach_analysis = None
+        
+        self.status_label.setText(message)
+    
     def _on_status_clicked(self, event):
         """Handle status label click - show coach recommendations if available."""
         if self._status_is_clickable and self._coach_analysis:

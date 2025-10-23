@@ -229,7 +229,8 @@ class OpenAICoachManager:
         fitness_config: FitnessConfig,
         ga_config: OptimizationConfig,
         current_data=None,  # Unused, kept for API compatibility
-        coach_window=None  # Coach window for UI updates
+        coach_window=None,  # Coach window for UI updates
+        status_callback=None  # Status callback for UI updates
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Full OpenAI Agents analysis workflow.
@@ -267,7 +268,7 @@ class OpenAICoachManager:
             openrouter_api_key=self.openrouter_api_key,
             openrouter_model=self.openrouter_model,
             verbose=self.verbose,
-            status_callback=self.status_callback,
+            status_callback=status_callback or self.status_callback,
             coach_window=coach_window or getattr(self, 'coach_window', None)
         )
 

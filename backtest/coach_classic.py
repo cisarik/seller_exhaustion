@@ -110,6 +110,9 @@ class ClassicCoachManager:
         self.recommendation_confidence = 0.5  # 0-1 confidence in current recommendation
         self.estimated_remaining_generations = None  # Prediction for optimization completion
 
+        # UI integration
+        self.classic_coach_window = None  # Reference to Classic Coach window for real-time updates
+
     def _calculate_phase_boundaries(self):
         """Calculate dynamic phase boundaries based on total optimization iterations."""
         total = self.total_iterations
@@ -162,7 +165,9 @@ class ClassicCoachManager:
                 logger.info(f"   → More aggressive: fitness threshold = {self.fitness_improvement_threshold:.4f}")
 
         # Reset analysis generation counter to avoid immediate analysis
-        self.last_analysis_generation = max(0, generation - new_interval) if 'generation' in locals() else 0
+        # Use current generation from last analysis or 0 if none
+        current_gen = getattr(self, 'last_analysis_generation', 0)
+        self.last_analysis_generation = max(0, current_gen - new_interval)
 
     def record_generation(self, population) -> None:
         """Record generation data for analysis (no-op for classic coach)."""
@@ -240,22 +245,25 @@ class ClassicCoachManager:
             # Enhanced coach window updates with more information
             if coach_window:
                 try:
-                    # Set status with confidence
-                    confidence_indicator = "🎯" if self.recommendation_confidence > 0.7 else "🤔" if self.recommendation_confidence > 0.5 else "❓"
-                    coach_window.set_status(f"{confidence_indicator} Classic Coach: {recommended_algorithm.upper()} recommended", is_analyzing=False)
-
-                    # Enhanced analysis info
+                    # Use the new Classic coach specific methods
                     phase_info = self.get_phase_info(generation)
                     phase_name = phase_info.name if phase_info else "Unknown"
 
-                    # Add convergence prediction if available
-                    convergence_info = ""
-                    if self.estimated_remaining_generations:
-                        convergence_info = f" | Est. {self.estimated_remaining_generations}g left"
+                    # Set status with enhanced Classic coach information
+                    coach_window.set_classic_coach_status(
+                        status=f"{recommended_algorithm.upper()} recommended",
+                        phase=phase_name,
+                        confidence=self.recommendation_confidence,
+                        actions=len(actions_taken)
+                    )
 
-                    coach_window.set_analysis_info(
-                        f"Gen {generation} | Phase: {phase_name} | Actions: {len(actions_taken)} | "
-                        f"Conf: {self.recommendation_confidence:.1f}{convergence_info}"
+                    # Set analysis info with structured Classic coach data
+                    coach_window.set_classic_coach_analysis_info(
+                        generation=generation,
+                        phase=phase_name,
+                        actions=len(actions_taken),
+                        confidence=self.recommendation_confidence,
+                        remaining_gens=self.estimated_remaining_generations
                     )
 
                     # Enhanced tool call with more context
@@ -290,8 +298,42 @@ class ClassicCoachManager:
                         reason=f"Enhanced phase-based optimization analysis with historical learning"
                     )
 
+                    # Set request/response text for Classic coach
+                    request_text = f"Classic Coach Analysis Request (Generation {generation}):\n"
+                    request_text += f"- Phase: {phase_name}\n"
+                    request_text += f"- Population: size={pop_state.population_size}, diversity={pop_state.diversity:.2f}\n"
+                    request_text += f"- Fitness: best={pop_state.best_fitness:.4f}, trend={pop_state.fitness_trend}\n"
+                    request_text += f"- Coach State: stagnation={self.consecutive_stagnation}, confidence={self.recommendation_confidence:.2f}"
+
+                    response_text = f"Classic Coach Analysis Response:\n"
+                    response_text += f"- Recommended Algorithm: {recommended_algorithm.upper()}\n"
+                    response_text += f"- Actions Taken: {len(actions_taken)}\n"
+                    for i, action in enumerate(actions_taken[:5], 1):  # Show first 5 actions
+                        response_text += f"  {i}. {action}\n"
+                    if len(actions_taken) > 5:
+                        response_text += f"  ... and {len(actions_taken) - 5} more actions\n"
+                    response_text += f"- Confidence: {self.recommendation_confidence:.2f}\n"
+                    if self.estimated_remaining_generations:
+                        response_text += f"- Estimated Completion: {self.estimated_remaining_generations} generations"
+
+                    coach_window.set_agent_request(request_text)
+                    coach_window.set_agent_response(response_text)
+
                 except Exception as e:
                     logger.warning(f"Error updating coach window: {e}")
+
+            # Also update the classic_coach_window reference if it exists
+            if self.classic_coach_window:
+                try:
+                    # Trigger update in Classic Coach window using Qt thread-safe method
+                    from PySide6.QtCore import QMetaObject, Qt
+                    QMetaObject.invokeMethod(
+                        self.classic_coach_window,
+                        "update_display",
+                        Qt.QueuedConnection
+                    )
+                except Exception as e:
+                    logger.warning(f"Error triggering classic coach window update: {e}")
 
             # Enhanced state tracking with trend analysis
             fitness_improvement = pop_state.best_fitness - self.last_best_fitness

@@ -537,7 +537,8 @@ class ClassicCoachWindow(QMainWindow):
     def set_coach_manager(self, coach_manager):
         """Set the coach manager reference."""
         self.coach_manager = coach_manager
-        self.update_display()
+        # Don't call update_display here to avoid recursion
+        # update_display will be called by refresh_timer
 
     def update_display(self):
         """Update all display elements with current coach data."""

@@ -25,7 +25,7 @@ class EvolutionCoachWindow(QMainWindow):
     Hlavné okno pre Evolution Coach s real-time monitoring.
     
     Zobrazuje:
-    - Request/Response komunikáciu s agentom
+    - Request/Response komunikáciu s agentoml
     - Tool Call History tabulku
     - Real-time status updates
     - Agent analysis progress
@@ -140,7 +140,7 @@ class EvolutionCoachWindow(QMainWindow):
         self.communication_widget = QWidget()
         layout = QVBoxLayout(self.communication_widget)
         layout.setSpacing(10)
-        
+
         # Request section
         request_group = QGroupBox("📤 Agent Request")
         request_group.setStyleSheet("""
@@ -158,9 +158,8 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         request_layout = QVBoxLayout(request_group)
-        
+
         self.request_text = QTextEdit()
-        self.request_text.setMaximumHeight(200)
         self.request_text.setPlaceholderText("Agent request will appear here...")
         self.request_text.setStyleSheet("""
             QTextEdit {
@@ -173,10 +172,10 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         self.request_text.setReadOnly(True)
-        request_layout.addWidget(self.request_text)
-        
-        layout.addWidget(request_group)
-        
+        request_layout.addWidget(self.request_text, 1)  # Add stretch factor
+
+        layout.addWidget(request_group, 1)  # Allow request section to expand
+
         # Response section
         response_group = QGroupBox("📥 Agent Response")
         response_group.setStyleSheet("""
@@ -194,7 +193,7 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         response_layout = QVBoxLayout(response_group)
-        
+
         self.response_text = QTextEdit()
         self.response_text.setPlaceholderText("Agent response will appear here...")
         self.response_text.setStyleSheet("""
@@ -208,16 +207,16 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         self.response_text.setReadOnly(True)
-        response_layout.addWidget(self.response_text)
-        
-        layout.addWidget(response_group)
+        response_layout.addWidget(self.response_text, 1)  # Add stretch factor
+
+        layout.addWidget(response_group, 1)  # Allow response section to expand
         
     def create_tool_history_panel(self):
         """Create tool history panel with table."""
         self.tool_history_widget = QWidget()
         layout = QVBoxLayout(self.tool_history_widget)
         layout.setSpacing(10)
-        
+
         # Tool history group
         history_group = QGroupBox("🔧 Tool Call History")
         history_group.setStyleSheet("""
@@ -235,14 +234,14 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         history_layout = QVBoxLayout(history_group)
-        
+
         # Tool calls table
         self.tool_calls_table = QTableWidget()
         self.tool_calls_table.setColumnCount(5)
         self.tool_calls_table.setHorizontalHeaderLabels([
             "Time", "Tool Name", "Parameters", "Response", "Reason"
         ])
-        
+
         # Configure table
         header = self.tool_calls_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Time
@@ -250,7 +249,7 @@ class EvolutionCoachWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.Stretch)          # Parameters
         header.setSectionResizeMode(3, QHeaderView.Stretch)          # Response
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents) # Reason
-        
+
         self.tool_calls_table.setStyleSheet("""
             QTableWidget {
                 background-color: #1e1e1e;
@@ -277,16 +276,15 @@ class EvolutionCoachWindow(QMainWindow):
                 font-weight: bold;
             }
         """)
-        
+
         self.tool_calls_table.setAlternatingRowColors(True)
         self.tool_calls_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.tool_calls_table.itemSelectionChanged.connect(self.on_tool_call_selected)
-        
+
         history_layout.addWidget(self.tool_calls_table)
-        
-        # Tool call details
+
+        # Tool call details - make it expand to fill space
         self.tool_details = QTextEdit()
-        self.tool_details.setMaximumHeight(150)
         self.tool_details.setPlaceholderText("Select a tool call to view details...")
         self.tool_details.setStyleSheet("""
             QTextEdit {
@@ -299,8 +297,9 @@ class EvolutionCoachWindow(QMainWindow):
             }
         """)
         self.tool_details.setReadOnly(True)
-        history_layout.addWidget(self.tool_details)
-        
+        # Remove maximum height to allow expansion
+        history_layout.addWidget(self.tool_details, 1)  # Add stretch factor
+
         layout.addWidget(history_group)
         
     def create_control_buttons(self):
@@ -409,6 +408,9 @@ class EvolutionCoachWindow(QMainWindow):
         # Schedule UI update on main thread
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.update_tool_calls_table)
+
+        # Auto-scroll to bottom
+        QTimer.singleShot(10, self.scroll_table_to_bottom)
         
     def update_tool_calls_table(self):
         """Update the tool calls table with current history."""
@@ -438,6 +440,15 @@ class EvolutionCoachWindow(QMainWindow):
             
         # Scroll to bottom
         self.tool_calls_table.scrollToBottom()
+
+    def scroll_table_to_bottom(self):
+        """Scroll the tool calls table to the bottom."""
+        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+        QMetaObject.invokeMethod(
+            self.tool_calls_table,
+            "scrollToBottom",
+            Qt.QueuedConnection
+        )
         
     def set_agent_request(self, request: str):
         """Set the current agent request."""
@@ -451,6 +462,14 @@ class EvolutionCoachWindow(QMainWindow):
         )
         self.agent_requests.append(request)
 
+        # Auto-scroll to bottom
+        QMetaObject.invokeMethod(
+            self.request_text,
+            "moveCursor",
+            Qt.QueuedConnection,
+            Q_ARG(QTextCursor.MoveOperation, QTextCursor.End)
+        )
+
     def set_agent_response(self, response: str):
         """Set the current agent response."""
         # Ensure UI update happens on main thread
@@ -462,6 +481,14 @@ class EvolutionCoachWindow(QMainWindow):
             Q_ARG(str, response)
         )
         self.agent_responses.append(response)
+
+        # Auto-scroll to bottom
+        QMetaObject.invokeMethod(
+            self.response_text,
+            "moveCursor",
+            Qt.QueuedConnection,
+            Q_ARG(QTextCursor.MoveOperation, QTextCursor.End)
+        )
     
     def update_last_tool_call(self, parameters: dict, response: dict, reason: str):
         """Update the last tool call with new parameters and response."""
@@ -513,9 +540,73 @@ class EvolutionCoachWindow(QMainWindow):
                 }
                 """)
             )
+
+    def set_classic_coach_status(self, status: str, phase: str = "", confidence: float = 0.5, actions: int = 0):
+        """Set status specifically for Classic coach with enhanced information."""
+        confidence_icon = "🎯" if confidence > 0.7 else "🤔" if confidence > 0.5 else "❓"
+        phase_info = f" | Phase: {phase}" if phase else ""
+        actions_info = f" | {actions} actions" if actions > 0 else ""
+
+        full_status = f"{confidence_icon} Classic Coach: {status}{phase_info}{actions_info}"
+
+        # Ensure UI update happens on main thread
+        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+        QMetaObject.invokeMethod(
+            self.status_label,
+            "setText",
+            Qt.QueuedConnection,
+            Q_ARG(str, f"🔍 Agent Status: {full_status}")
+        )
+
+        # Show progress bar for analysis
+        is_analyzing = "analyzing" in status.lower() or "processing" in status.lower()
+        QMetaObject.invokeMethod(self.progress_bar, "setVisible", Qt.QueuedConnection, Q_ARG(bool, is_analyzing))
+
+        if is_analyzing:
+            QMetaObject.invokeMethod(
+                self.status_label,
+                "setStyleSheet",
+                Qt.QueuedConnection,
+                Q_ARG(str, """
+                QLabel {
+                    color: #ff9800;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                """)
+            )
+        else:
+            QMetaObject.invokeMethod(
+                self.status_label,
+                "setStyleSheet",
+                Qt.QueuedConnection,
+                Q_ARG(str, """
+                QLabel {
+                    color: #4caf50;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                """)
+            )
             
     def set_analysis_info(self, info: str):
         """Set analysis information."""
+        # Ensure UI update happens on main thread
+        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+        QMetaObject.invokeMethod(
+            self.analysis_info,
+            "setText",
+            Qt.QueuedConnection,
+            Q_ARG(str, info)
+        )
+
+    def set_classic_coach_analysis_info(self, generation: int, phase: str, actions: int, confidence: float, remaining_gens: int = None):
+        """Set analysis info specifically for Classic coach with structured information."""
+        confidence_pct = int(confidence * 100)
+        remaining_info = f" | Est. {remaining_gens}g left" if remaining_gens else ""
+
+        info = f"Gen {generation} | Phase: {phase} | Actions: {actions} | Conf: {confidence_pct}%{remaining_info}"
+
         # Ensure UI update happens on main thread
         from PySide6.QtCore import QMetaObject, Qt, Q_ARG
         QMetaObject.invokeMethod(

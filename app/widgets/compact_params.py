@@ -1,9 +1,10 @@
+
 """Compact parameter editor for main window integration."""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QFormLayout, QSpinBox, QDoubleSpinBox, QScrollArea, QPushButton,
-    QCheckBox, QComboBox, QProgressBar
+    QCheckBox, QComboBox, QProgressBar, QFrame, QLineEdit
 )
 from PySide6.QtCore import Signal
 
@@ -304,32 +305,21 @@ class CompactParamsEditor(QWidget):
         fitness_group.setLayout(fitness_layout)
         scroll_layout.addWidget(fitness_group)
         
-        # Evolution Coach Group (NEW - Enable checkbox + provider dropdown)
-        coach_group = QGroupBox("Evolution Coach 🤖")
+        # Optimization Coach Group (Enable/disable via dropdown)
+        coach_group = QGroupBox("Optimization Coach 🤖")
         coach_layout = QVBoxLayout()
         coach_layout.setSpacing(6)
         coach_layout.setContentsMargins(8, 8, 8, 8)
 
-        # Enable checkbox row
-        enable_row = QHBoxLayout()
-        enable_label = QLabel("Enable:")
-        enable_label.setMaximumWidth(60)
-        self.coach_enabled_check = QCheckBox()
-        self.coach_enabled_check.setChecked(True)
-        self.coach_enabled_check.setToolTip("Enable/disable Evolution Coach agent")
-        self.coach_enabled_check.stateChanged.connect(self._on_coach_config_changed)
-        enable_row.addWidget(enable_label)
-        enable_row.addWidget(self.coach_enabled_check, 1)
-        coach_layout.addLayout(enable_row)
-
-        # Coach mode dropdown row
+        # Coach mode dropdown row (controls enable/disable)
         mode_row = QHBoxLayout()
         mode_label = QLabel("Mode:")
         mode_label.setMaximumWidth(60)
         self.coach_mode_combo = QComboBox()
-        self.coach_mode_combo.addItem("🧠 OpenAI Agents", "openai")
-        self.coach_mode_combo.addItem("⚙️ Classic", "classic")
-        self.coach_mode_combo.setToolTip("Choose coach mode: OpenAI Agents (LLM-based) or Classic (deterministic)")
+        self.coach_mode_combo.addItem("🤖 OpenAI Agents", "openai")
+        self.coach_mode_combo.addItem("🧠 Classic Coach", "classic")
+        self.coach_mode_combo.addItem("❌ Disabled", "disabled")
+        self.coach_mode_combo.setToolTip("Choose coach mode: OpenAI Agents (LLM-based), Classic (deterministic), or Disabled")
         self.coach_mode_combo.currentIndexChanged.connect(self._on_coach_config_changed)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.coach_mode_combo, 1)
@@ -369,9 +359,6 @@ class CompactParamsEditor(QWidget):
         """Load coach settings from config and update UI."""
         from config.settings import settings
 
-        # Set enabled state
-        self.coach_enabled_check.setChecked(getattr(settings, 'coach_enabled', True))
-
         # Set coach mode - default to 'classic' if not set
         coach_mode = getattr(settings, 'coach_mode', 'classic')
         index = self.coach_mode_combo.findData(coach_mode)
@@ -383,14 +370,15 @@ class CompactParamsEditor(QWidget):
 
         # Update button styles based on provider
     def _on_coach_config_changed(self):
-        """Handle coach enable/disable and mode change - save to settings."""
+        """Handle coach mode change - save to settings."""
         from config.settings import settings, SettingsManager
 
-        # Update enabled setting
-        settings.coach_enabled = self.coach_enabled_check.isChecked()
-
         # Update coach mode setting
-        settings.coach_mode = self.coach_mode_combo.currentData()
+        coach_mode = self.coach_mode_combo.currentData()
+        settings.coach_mode = coach_mode
+
+        # Update enabled setting based on mode (disabled when mode is 'disabled')
+        settings.coach_enabled = (coach_mode != 'disabled')
 
         # Convert settings to dict and save to .env
         try:
@@ -415,11 +403,12 @@ class CompactParamsEditor(QWidget):
     
     
     def get_coach_config(self) -> dict:
-        """Get Evolution Coach configuration from settings."""
+        """Get Optimization Coach configuration from settings."""
         from config.settings import settings
+        coach_mode = self.coach_mode_combo.currentData()
         return {
-            "enabled": self.coach_enabled_check.isChecked(),
-            "mode": self.coach_mode_combo.currentData(),
+            "enabled": coach_mode != 'disabled',
+            "mode": coach_mode,
             "provider": getattr(settings, 'coach_provider', 'local'),
             "model": getattr(settings, 'coach_model', 'google/gemma-3-12b'),
             "prompt_version": getattr(settings, 'coach_system_prompt', 'agent01')

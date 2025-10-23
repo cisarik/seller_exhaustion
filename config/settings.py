@@ -72,8 +72,9 @@ class Settings(BaseSettings):
     # Optimizer execution
     optimizer_workers: int = max(1, multiprocessing.cpu_count() - 1)
     
-    # Evolution Coach Parameters (OpenRouter only)
+    # Evolution Coach Parameters
     coach_enabled: bool = True  # Enable/disable Evolution Coach
+    coach_mode: str = "classic"  # Coach mode: "classic" (deterministic) or "openai" (LLM-based)
     coach_islands_enabled: bool = False  # Enable/disable Islands Management (adds complexity)
     coach_analysis_interval: int = 10  # Analyze every N generations (10, 15, 20, etc)
     coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses
@@ -254,8 +255,9 @@ class SettingsManager:
             f.write(f"ADAM_BETA2={existing.get('ADAM_BETA2', '0.999')}\n")
             f.write(f"ADAM_EPSILON_STABILITY={existing.get('ADAM_EPSILON_STABILITY', '1e-8')}\n\n")
             
-            f.write("# Evolution Coach Parameters (OpenRouter only)\n")
+            f.write("# Evolution Coach Parameters\n")
             f.write(f"COACH_ENABLED={existing.get('COACH_ENABLED', 'True')}\n")
+            f.write(f"COACH_MODE={existing.get('COACH_MODE', 'classic')}\n")
             f.write(f"COACH_ISLANDS_ENABLED={existing.get('COACH_ISLANDS_ENABLED', 'False')}\n")
             f.write(f"COACH_ANALYSIS_INTERVAL={existing.get('COACH_ANALYSIS_INTERVAL', '10')}\n")
             f.write(f"COACH_DEBUG_PAYLOADS={existing.get('COACH_DEBUG_PAYLOADS', 'False')}\n")

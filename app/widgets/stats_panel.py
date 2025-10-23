@@ -104,6 +104,9 @@ class StatsPanel(QWidget):
         self.coach_window = coach_window
         # Update status callback to also update coach window
         if self.coach_window:
+            # Store original callback to avoid recursion
+            if not hasattr(self, '_original_status_callback'):
+                self._original_status_callback = self.status_callback
             self.status_callback = self._create_coach_status_callback()
 
         # Update coach manager with coach window
@@ -116,15 +119,53 @@ class StatsPanel(QWidget):
         # Update coach manager with classic coach window
         if self.coach_manager and hasattr(self.coach_manager, 'set_classic_coach_window'):
             self.coach_manager.set_classic_coach_window(classic_coach_window)
+        
+        # Set coach manager reference in classic coach window
+        if self.coach_manager and hasattr(classic_coach_window, 'set_coach_manager'):
+            classic_coach_window.set_coach_manager(self.coach_manager)
+        
+        # Store original callback to avoid recursion (if not already stored)
+        if not hasattr(self, '_original_status_callback'):
+            self._original_status_callback = self.status_callback
+        
+        # Create a combined status callback that updates both main window and coach tool status
+        if not hasattr(self, '_combined_status_callback'):
+            def combined_callback(tool_name: str, reason: str = ""):
+                # Update main window status bar
+                if hasattr(self, '_original_status_callback') and self._original_status_callback:
+                    try:
+                        self._original_status_callback(tool_name, reason)
+                    except Exception as e:
+                        print(f"Error in original status callback: {e}")
+                
+                # Update coach tool status for progress bar
+                if hasattr(self, '_coach_tool_status_callback') and self._coach_tool_status_callback:
+                    try:
+                        self._coach_tool_status_callback(tool_name, reason)
+                    except Exception as e:
+                        print(f"Error in coach tool status callback: {e}")
+            
+            self._combined_status_callback = combined_callback
+            self.status_callback = self._combined_status_callback
 
     def _create_coach_status_callback(self):
         """Create status callback that updates both main window and coach window."""
         def status_callback(tool_name: str, reason: str = ""):
-            # Update main window status bar
-            if hasattr(self, 'status_callback') and self.status_callback:
-                self.status_callback(tool_name, reason)
+            # Update main window status bar (avoid recursion by not calling self.status_callback)
+            if hasattr(self, '_original_status_callback') and self._original_status_callback:
+                try:
+                    self._original_status_callback(tool_name, reason)
+                except Exception as e:
+                    print(f"Error in original status callback: {e}")
             
-            # Update coach window
+            # Also call the coach tool status callback for progress bar updates
+            if hasattr(self, '_coach_tool_status_callback') and self._coach_tool_status_callback:
+                try:
+                    self._coach_tool_status_callback(tool_name, reason)
+                except Exception as e:
+                    print(f"Error in coach tool status callback: {e}")
+            
+            # Update coach window (only for Evolution Coach, not Classic Coach)
             if hasattr(self, 'coach_window') and self.coach_window:
                 try:
                     # Add tool call to coach window
@@ -178,6 +219,13 @@ class StatsPanel(QWidget):
                         enable_algorithm_switching=True
                     )
                 logger.info("✓ Classic Coach initialized (deterministic mode)")
+                
+                # Set coach manager reference in classic coach window if it exists
+                if hasattr(self, 'classic_coach_window') and self.classic_coach_window:
+                    if hasattr(self.classic_coach_window, 'set_coach_manager'):
+                        self.classic_coach_window.set_coach_manager(self.coach_manager)
+                
+                # Update UI status bar if callback provided
                 if self.status_callback:
                     self.status_callback(f"✓ 🤖 Classic Coach ready (every {self.coach_manager.analysis_interval} gens)")
 
@@ -218,6 +266,8 @@ class StatsPanel(QWidget):
                     status_callback=self._coach_tool_status_callback,
                     coach_window=getattr(self, 'coach_window', None)
                 )
+                # Store the original status callback for coach manager
+                # (This line is redundant but kept for clarity)
                 # Update UI status bar if callback provided
                 if self.status_callback:
                     self.status_callback(f"✓ 🤖 OpenAI Coach ready ({provider.title()}, every {self.coach_manager.analysis_interval} gens)")
@@ -1808,7 +1858,7 @@ class StatsPanel(QWidget):
 
                                     # Update status bar with completion message
                                     if self.status_callback:
-                                        status_msg = f"✅ Coach completed: {action_count} actions at gen {generation}"
+                                        status_msg = f"✅ Coach completed: {action_count} actions at gen {gen + 1}"
                                         self.status_callback(status_msg)
                                 else:
                                     # Hide progress bar after failed analysis
@@ -1823,7 +1873,7 @@ class StatsPanel(QWidget):
 
                                     # Update status bar with failure message
                                     if self.status_callback:
-                                        self.status_callback(f"⚠ Coach failed at gen {generation}")
+                                        self.status_callback(f"⚠ Coach failed at gen {gen + 1}")
                             except Exception as e:
                                 # Hide progress bar after exception
                                 if hasattr(self, 'param_editor') and self.param_editor:

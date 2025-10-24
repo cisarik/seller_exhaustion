@@ -18,8 +18,8 @@ class PhaseProgressBar(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(40)
-        self.setMaximumHeight(50)
+        self.setMinimumHeight(32)
+        self.setMaximumHeight(38)
         
         # Phase configuration
         self.phases = [
@@ -33,6 +33,13 @@ class PhaseProgressBar(QWidget):
         self.phase_progress = 0  # 0-100 within current phase
         self.total_generation = 1
         self.current_generation = 1
+        
+        # Analysis count tracking (for Classic Coach)
+        self.current_analysis_count = 0
+        self.total_analysis_count = 0  # Start at 0 to indicate "not initialized"
+        
+        # Hide initially until first analysis
+        self.setVisible(False)
         
         # Phase boundaries
         self.exploration_end = 25
@@ -59,6 +66,34 @@ class PhaseProgressBar(QWidget):
         self.total_generation = total_gens
         self.update_generation_progress()
         self.update()
+    
+    def set_analysis_counts(self, current_count: int, total_count: int):
+        """Update analysis counts for Classic Coach display."""
+        self.current_analysis_count = current_count
+        self.total_analysis_count = max(1, total_count)  # Avoid division by zero
+        # Update progress percentage based on analysis count
+        self.phase_progress = int((current_count / self.total_analysis_count) * 100)
+        # Determine which phase we're in (don't recalculate phase_progress)
+        self._update_current_phase_only()
+        
+        print(f"📊 PhaseProgressBar.set_analysis_counts: {current_count}/{total_count}, phase={self.current_phase}, progress={self.phase_progress}%")
+        
+        # Show the progress bar now that we have analysis data
+        if current_count > 0:
+            self.setVisible(True)
+            print(f"✓ PhaseProgressBar is now visible")
+        self.update()
+    
+    def _update_current_phase_only(self):
+        """Update only current_phase index without changing phase_progress."""
+        gen = self.current_generation
+        
+        if gen <= self.exploration_end:
+            self.current_phase = 0  # Exploration
+        elif gen <= self.exploitation_end:
+            self.current_phase = 1  # Exploitation
+        else:
+            self.current_phase = 2  # Refinement
     
     def update_generation_progress(self):
         """Calculate which phase we're in and progress within it."""
@@ -117,19 +152,16 @@ class PhaseProgressBar(QWidget):
         phase_name = self.phases[self.current_phase]['name']
         phase_icon = self.phases[self.current_phase]['icon']
         
-        # Calculate generation range text
-        if self.current_phase == 0:
-            range_text = f"(1-{self.exploration_end})"
-        elif self.current_phase == 1:
-            range_text = f"({self.exploration_end+1}-{self.exploitation_end})"
+        # Format text: "Phase Name (X of Y)" - show analysis count
+        if self.total_analysis_count > 0:
+            # Show analysis count (for Classic Coach)
+            display_text = f"{phase_icon} {phase_name} ({self.current_analysis_count} of {self.total_analysis_count})"
         else:
-            range_text = f"({self.exploitation_end+1}-{self.total_generation})"
-        
-        # Format text: "Phase Name (range) - X%"
-        display_text = f"{phase_icon} {phase_name} {range_text} - {self.phase_progress}%"
+            # Not initialized - shouldn't be visible, but show placeholder
+            display_text = f"⏳ {phase_name} phase"
         
         # Draw text centered
-        font = QFont('Arial', 11, QFont.Bold)
+        font = QFont('Arial', 10, QFont.Bold)
         painter.setFont(font)
         painter.setPen(QColor('#FFFFFF'))
         painter.drawText(rect, Qt.AlignCenter, display_text)
@@ -138,7 +170,7 @@ class PhaseProgressBar(QWidget):
     
     def sizeHint(self) -> QSize:
         """Return preferred size."""
-        return QSize(400, 50)
+        return QSize(400, 35)
 
 
 class AnimatedProgressBar(QWidget):
@@ -149,11 +181,12 @@ class AnimatedProgressBar(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(30)
-        self.setMaximumHeight(40)
+        self.setMinimumHeight(32)
+        self.setMaximumHeight(38)
         
         self.is_animating = False
         self.animation_offset = 0
+        self.has_completed_analysis = False  # Track if any analysis completed
         
         # Animation timer
         self.timer = QTimer()
@@ -177,6 +210,7 @@ class AnimatedProgressBar(QWidget):
     def stop_animation(self):
         """Stop the progress bar animation."""
         self.is_animating = False
+        self.has_completed_analysis = True
         self.timer.stop()
         self.update()
     
@@ -219,16 +253,22 @@ class AnimatedProgressBar(QWidget):
             painter.setFont(font)
             painter.setPen(QColor('#4CAF50'))
             painter.drawText(rect, Qt.AlignCenter, "🤖 Agent analyzing...")
-        else:
-            # Draw completed state
+        elif self.has_completed_analysis:
+            # Draw completed state (only if we actually completed an analysis)
             painter.fillRect(rect, QColor('#1b5e20'))
             font = QFont('Arial', 10, QFont.Bold)
             painter.setFont(font)
             painter.setPen(QColor('#81C784'))
             painter.drawText(rect, Qt.AlignCenter, "✓ Analysis complete")
+        else:
+            # Initial state - waiting for first analysis
+            font = QFont('Arial', 10, QFont.Bold)
+            painter.setFont(font)
+            painter.setPen(QColor('#888888'))
+            painter.drawText(rect, Qt.AlignCenter, "⏳ Waiting for coach analysis...")
         
         painter.end()
     
     def sizeHint(self) -> QSize:
         """Return preferred size."""
-        return QSize(400, 40)
+        return QSize(400, 35)

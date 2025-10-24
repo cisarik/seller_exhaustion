@@ -30,6 +30,15 @@ class CompactParamsEditor(QWidget):
         
         # Load coach settings from config
         self._load_coach_settings()
+        
+        # Connect to coach signals for progress bar updates
+        try:
+            from app.signals import get_coach_signals
+            signals = get_coach_signals()
+            if hasattr(signals, 'phase_info_updated'):
+                signals.phase_info_updated.connect(self._on_phase_info_updated)
+        except Exception as e:
+            print(f"⚠ Could not connect to coach signals: {e}")
     
     def set_timeframe(self, timeframe: Timeframe):
         """Update the timeframe for time-based conversions."""
@@ -317,8 +326,8 @@ class CompactParamsEditor(QWidget):
         mode_label = QLabel("Mode:")
         mode_label.setMaximumWidth(60)
         self.coach_mode_combo = QComboBox()
+        self.coach_mode_combo.addItem("🧠 Classic Coach", "classic")  # Default first
         self.coach_mode_combo.addItem("🤖 OpenAI Agents", "openai")
-        self.coach_mode_combo.addItem("🧠 Classic Coach", "classic")
         self.coach_mode_combo.addItem("❌ Disabled", "disabled")
         self.coach_mode_combo.setToolTip(
             "🤖 OpenAI Agents: LLM-based analysis (requires API keys)\n"
@@ -373,8 +382,11 @@ class CompactParamsEditor(QWidget):
         if index >= 0:
             self.coach_mode_combo.setCurrentIndex(index)
         else:
-            # Default to Classic if mode not found
-            self.coach_mode_combo.setCurrentIndex(1)  # Index 1 is "Classic"
+            # Default to Classic if mode not found (index 0 after reorder)
+            self.coach_mode_combo.setCurrentIndex(0)  # Index 0 is "Classic Coach"
+        
+        # Manually trigger config change to set up progress bars correctly
+        self._on_coach_config_changed()
 
         # Update button styles based on provider
     def _on_coach_config_changed(self):
@@ -401,16 +413,20 @@ class CompactParamsEditor(QWidget):
             # No progress bar when coach disabled
             self.phase_progress_bar.setVisible(False)
             self.agent_progress_bar.setVisible(False)
+            print(f"🔧 Coach mode: DISABLED - hiding all progress bars")
         elif coach_mode == 'classic':
-            # Show phase progress bar for Classic Coach
-            self.phase_progress_bar.setVisible(True)
+            # Don't show phase progress bar initially - it will show after first analysis
+            # (PhaseProgressBar starts hidden in __init__)
+            self.phase_progress_bar.setVisible(False)  # Will show when first analysis happens
             self.agent_progress_bar.setVisible(False)
             self.coach_progress = self.phase_progress_bar
+            print(f"🔧 Coach mode: CLASSIC - PhaseProgressBar will show after first analysis")
         elif coach_mode == 'openai':
             # Show animated progress bar for OpenAI Agents
             self.phase_progress_bar.setVisible(False)
             self.agent_progress_bar.setVisible(True)
             self.coach_progress = self.agent_progress_bar
+            print(f"🔧 Coach mode: OPENAI - hiding PhaseProgressBar, showing AnimatedProgressBar")
 
         # Convert settings to dict and save to .env
         try:
@@ -419,6 +435,10 @@ class CompactParamsEditor(QWidget):
             settings_dict = settings.dict()  # Pydantic v1 fallback
 
         SettingsManager.save_to_env(settings_dict)
+        
+        # Reload settings to ensure they're current everywhere
+        SettingsManager.reload_settings()
+        print(f"✓ Coach mode saved to .env: {coach_mode}")
 
     def _open_coach_window(self):
         """Open the unified optimization coach window."""
@@ -444,12 +464,20 @@ class CompactParamsEditor(QWidget):
         """Set coach analysis state and show/hide progress bar."""
         if is_analyzing:
             self.coach_progress.setVisible(True)
-            self.coach_progress.setRange(0, 0)  # Indeterminate progress
+            # Start animation if AnimatedProgressBar, no-op for PhaseProgressBar
+            if hasattr(self.coach_progress, 'start_animation'):
+                self.coach_progress.start_animation()
         else:
             self.coach_progress.setVisible(False)
+            # Stop animation if AnimatedProgressBar
+            if hasattr(self.coach_progress, 'stop_animation'):
+                self.coach_progress.stop_animation()
 
     def hide_coach_progress(self):
         """Hide coach progress bar."""
+        # Stop animation if AnimatedProgressBar
+        if hasattr(self.coach_progress, 'stop_animation'):
+            self.coach_progress.stop_animation()
         self.coach_progress.setVisible(False)
         
     
@@ -469,11 +497,16 @@ class CompactParamsEditor(QWidget):
     def show_coach_progress(self, message: str = "Evolution Coach analyzing..."):
         """Show coach progress bar with message."""
         self.coach_progress.setVisible(True)
-        self.coach_progress.setFormat(message)
         self.coach_progress.setToolTip(message)
+        # Start animation if AnimatedProgressBar
+        if hasattr(self.coach_progress, 'start_animation'):
+            self.coach_progress.start_animation()
     
     def hide_coach_progress(self):
         """Hide coach progress bar."""
+        # Stop animation if AnimatedProgressBar
+        if hasattr(self.coach_progress, 'stop_animation'):
+            self.coach_progress.stop_animation()
         self.coach_progress.setVisible(False)
     
     
@@ -642,11 +675,53 @@ class CompactParamsEditor(QWidget):
         # Update tooltips after setting values
         self._update_tooltips()
     
+    def _on_phase_info_updated(self, data: dict):
+        """Handle phase_info_updated signal from Classic Coach."""
+        try:
+            current_gen = data.get('generation', data.get('phase_start', 0))
+            phase_end = data.get('phase_end', 0)
+            exploration_end = data.get('exploration_end', 25)
+            exploitation_end = data.get('exploitation_end', 50)
+            current_analysis_count = data.get('current_analysis_count', 0)
+            total_analysis_count = data.get('total_analysis_count', 1)
+            
+            # Calculate total from phase_end or use default
+            estimated_remaining = data.get('estimated_remaining', 0)
+            if isinstance(estimated_remaining, str):
+                est_remaining_val = int(estimated_remaining) if estimated_remaining != '—' else 0
+            else:
+                est_remaining_val = estimated_remaining
+            total_gens = phase_end + est_remaining_val if phase_end > 0 else 200
+            
+            print(f"📊 Phase info signal received: gen={current_gen}, analysis={current_analysis_count}/{total_analysis_count}")
+            
+            # Update progress bar
+            self.update_phase_progress(
+                current_gen, total_gens, exploration_end, exploitation_end,
+                current_analysis_count, total_analysis_count
+            )
+        except Exception as e:
+            print(f"⚠ Error handling phase_info_updated: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def update_phase_progress(self, current_gen: int, total_gens: int, 
-                            exploration_end: int, exploitation_end: int):
+                            exploration_end: int, exploitation_end: int,
+                            current_analysis_count: int = 0, total_analysis_count: int = 1):
         """Update phase progress bar for Classic Coach."""
+        # Set boundaries and current generation first
         self.phase_progress_bar.set_phase_boundaries(exploration_end, exploitation_end, total_gens)
-        self.phase_progress_bar.set_generation_progress(current_gen, total_gens)
+        self.phase_progress_bar.current_generation = current_gen  # Must set before analysis counts
+        self.phase_progress_bar.total_generation = total_gens
+        
+        print(f"🔧 update_phase_progress: gen={current_gen}, analysis={current_analysis_count}/{total_analysis_count}")
+        
+        # Update analysis counts (for display "Phase (X of Y)")
+        if current_analysis_count > 0:
+            self.phase_progress_bar.set_analysis_counts(current_analysis_count, total_analysis_count)
+        else:
+            # Fallback to generation-based progress
+            self.phase_progress_bar.set_generation_progress(current_gen, total_gens)
     
     def start_agent_animation(self):
         """Start animated progress bar for OpenAI Agents Coach."""

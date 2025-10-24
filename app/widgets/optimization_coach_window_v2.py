@@ -926,7 +926,7 @@ Next Phase Transition: Gen {data.get('next_transition', '—')}"""
         
         try:
             # Get current generation from data
-            current_gen = data.get('phase_start', 0)
+            current_gen = data.get('generation', data.get('phase_start', 0))
             
             # Get total generations (use estimated_remaining to calculate)
             phase_end = data.get('phase_end', 0)
@@ -946,10 +946,16 @@ Next Phase Transition: Gen {data.get('next_transition', '—')}"""
             exploration_end = data.get('exploration_end', 25)
             exploitation_end = data.get('exploitation_end', 50)
             
-            # Try to find param_editor in parent
-            if hasattr(self.parent_widget, 'param_editor'):
-                self.parent_widget.param_editor.update_phase_progress(
-                    current_gen, total_gens, exploration_end, exploitation_end
+            # Get analysis counts from data
+            current_analysis_count = data.get('current_analysis_count', 0)
+            total_analysis_count = data.get('total_analysis_count', 1)
+            
+            # parent_widget IS the CompactParamsEditor (param_editor)
+            if hasattr(self.parent_widget, 'update_phase_progress'):
+                print(f"🔧 Updating progress bar: gen={current_gen}, analysis={current_analysis_count}/{total_analysis_count}")
+                self.parent_widget.update_phase_progress(
+                    current_gen, total_gens, exploration_end, exploitation_end,
+                    current_analysis_count, total_analysis_count
                 )
         except Exception as e:
             # Silently fail if progress bar update fails

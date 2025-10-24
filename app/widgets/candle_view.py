@@ -313,49 +313,27 @@ class CandleChartWidget(QWidget):
             self.status_label.setCursor(Qt.PointingHandCursor)
         else:
             # Check if this is a coach status message to determine background color
-            if message.startswith('🤖') or 'Coach' in message:
-                # Coach-related message - use appropriate background
-                if 'OpenAI' in message or '🤖' in message:
-                    # OpenAI Agents mode - blue background
-                    self.status_label.setStyleSheet("""
-                        background-color: #1e3a5f;
-                        color: #ffffff;
-                        font-size: 14px;
-                        font-weight: bold;
-                        padding: 6px 10px;
-                        border-radius: 4px;
-                        border: 1px solid #2196f3;
-                    """)
-                elif 'Classic' in message or '🧠' in message:
-                    # Classic Coach mode - green background
-                    self.status_label.setStyleSheet("""
-                        background-color: #2e5c39;
-                        color: #ffffff;
-                        font-size: 14px;
-                        font-weight: bold;
-                        padding: 6px 10px;
-                        border-radius: 4px;
-                        border: 1px solid #4caf50;
-                    """)
-                else:
-                    # General coach message - neutral background
-                    self.status_label.setStyleSheet("""
-                        background-color: #3a3a3a;
-                        color: #ffffff;
-                        font-size: 14px;
-                        font-weight: bold;
-                        padding: 6px 10px;
-                        border-radius: 4px;
-                        border: 1px solid #666;
-                    """)
-            else:
-                # Normal transparent background for non-coach messages
+            if message.startswith('🤖') or message.startswith('🧠') or 'Coach' in message:
+                # ALL Coach-related messages - blue background for easy visual identification
                 self.status_label.setStyleSheet("""
-                    background: transparent;
+                    background-color: #1565C0;
+                    color: #ffffff;
+                    font-size: 14px;
+                    font-weight: bold;
+                    padding: 6px 10px;
+                    border-radius: 4px;
+                    border: 1px solid #2196f3;
+                """)
+            else:
+                # Normal messages - black background with green text
+                self.status_label.setStyleSheet("""
+                    background-color: #000000;
                     color: #4caf50;
                     font-size: 14px;
                     font-weight: bold;
-                    padding: 0;
+                    padding: 6px 10px;
+                    border-radius: 4px;
+                    border: 1px solid #2f5c39;
                 """)
             self.status_label.setCursor(Qt.ArrowCursor)
 
@@ -458,15 +436,15 @@ class CandleChartWidget(QWidget):
         QTimer.singleShot(delay_ms, self._reset_status_bar)
     
     def _reset_status_bar(self):
-        """Reset status bar to normal appearance."""
+        """Reset status bar to normal appearance (black with green text)."""
         self.status_label.setStyleSheet("""
-            background-color: #2b2b2b;
-            color: #ffffff;
-            font-size: 13px;
-            font-weight: normal;
+            background-color: #000000;
+            color: #4caf50;
+            font-size: 14px;
+            font-weight: bold;
             padding: 6px 10px;
-            border-radius: 3px;
-            border: 1px solid #555;
+            border-radius: 4px;
+            border: 1px solid #2f5c39;
         """)
         self.status_label.setCursor(Qt.ArrowCursor)
         self._status_is_clickable = False

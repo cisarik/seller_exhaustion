@@ -118,6 +118,15 @@ class ClassicCoachManager:
 
         # UI integration
         self.classic_coach_window = None  # Reference to Classic Coach window for real-time updates
+        
+        # Analysis count tracking for progress display
+        self.analysis_count = 0  # Total analyses performed
+        self.phase_analysis_counts = {  # Analysis count per phase
+            'Exploration': 0,
+            'Exploitation': 0,
+            'Refinement': 0
+        }
+        self.current_phase_name = None  # Track current phase for count updates
 
     def _calculate_phase_boundaries(self):
         """Calculate dynamic phase boundaries based on total optimization iterations."""
@@ -134,16 +143,53 @@ class ClassicCoachManager:
             'exploitation_end': exploitation_end,
             'refinement_start': exploitation_end + 1
         }
+        
+        # Calculate expected analysis counts per phase
+        self.phase_analysis_totals = {
+            'Exploration': max(1, exploration_end // self.analysis_interval),
+            'Exploitation': max(1, (exploitation_end - exploration_end) // self.analysis_interval),
+            'Refinement': max(1, (total - exploitation_end) // self.analysis_interval)
+        }
 
         if self.verbose:
             logger.info(f"Classic Coach phases calculated for {total} iterations:")
-            logger.info(f"  Exploration: 1-{exploration_end} generations")
-            logger.info(f"  Exploitation: {exploration_end+1}-{exploitation_end} generations")
-            logger.info(f"  Refinement: {exploitation_end+1}+ generations")
+            logger.info(f"  Exploration: 1-{exploration_end} generations (~{self.phase_analysis_totals['Exploration']} analyses)")
+            logger.info(f"  Exploitation: {exploration_end+1}-{exploitation_end} generations (~{self.phase_analysis_totals['Exploitation']} analyses)")
+            logger.info(f"  Refinement: {exploitation_end+1}+ generations (~{self.phase_analysis_totals['Refinement']} analyses)")
 
     def should_analyze(self, generation: int) -> bool:
         """Check if coach should analyze at this generation."""
         return generation >= self.last_analysis_generation + self.analysis_interval
+    
+    def _update_analysis_count(self, generation: int):
+        """Update analysis count for the current phase."""
+        # Determine current phase
+        exploration_end = self.phase_boundaries.get('exploration_end', 50)
+        exploitation_end = self.phase_boundaries.get('exploitation_end', 125)
+        
+        if generation <= exploration_end:
+            phase_name = 'Exploration'
+        elif generation <= exploitation_end:
+            phase_name = 'Exploitation'
+        else:
+            phase_name = 'Refinement'
+        
+        # Reset count if phase changed
+        if phase_name != self.current_phase_name:
+            if self.current_phase_name is not None:  # Not the first analysis
+                if self.verbose:
+                    logger.info(f"🔄 Phase transition: {self.current_phase_name} → {phase_name}")
+            self.current_phase_name = phase_name
+            # Don't reset the count - we want to track within current phase
+        
+        # Increment count for current phase
+        self.phase_analysis_counts[phase_name] += 1
+        self.analysis_count += 1
+        
+        if self.verbose:
+            total_for_phase = self.phase_analysis_totals.get(phase_name, 1)
+            current_for_phase = self.phase_analysis_counts[phase_name]
+            logger.info(f"📊 Analysis count: {current_for_phase} of ~{total_for_phase} in {phase_name} phase")
 
     def update_analysis_interval(self, new_interval: int):
         """
@@ -375,6 +421,9 @@ class ClassicCoachManager:
             }
             self.recommendations_history.append(recommendation)
 
+            # Update analysis count for the current phase
+            self._update_analysis_count(generation)
+            
             # Update last analysis generation
             self.last_analysis_generation = generation
 
@@ -432,6 +481,10 @@ class ClassicCoachManager:
                     phase_start = phase_info.start_generation if phase_info else 0
                     phase_end = phase_info.end_generation if phase_info else self.total_iterations
                     
+                    # Get analysis counts for current phase
+                    current_analysis_count = self.phase_analysis_counts.get(phase_name, 0)
+                    total_analysis_count = self.phase_analysis_totals.get(phase_name, 1)
+                    
                     signals.phase_info_updated.emit({
                         'current_phase': phase_name,
                         'phase_start': phase_start,
@@ -439,7 +492,10 @@ class ClassicCoachManager:
                         'exploration_end': self.phase_boundaries.get('exploration_end', '—'),
                         'exploitation_end': self.phase_boundaries.get('exploitation_end', '—'),
                         'estimated_remaining': self.estimated_remaining_generations or '—',
-                        'next_transition': phase_end + 1 if phase_info else '—'
+                        'next_transition': phase_end + 1 if phase_info else '—',
+                        'current_analysis_count': current_analysis_count,
+                        'total_analysis_count': total_analysis_count,
+                        'generation': generation
                     })
                     
                     # Emit crisis detection if applicable

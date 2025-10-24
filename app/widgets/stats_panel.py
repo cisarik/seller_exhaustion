@@ -198,6 +198,8 @@ class StatsPanel(QWidget):
             
             except Exception as e:
                 logger.error(f"Coach status callback error: {e}")
+                import traceback
+                traceback.print_exc()
         
         return status_callback
 
@@ -213,8 +215,9 @@ class StatsPanel(QWidget):
                 self.coach_manager = None
                 return
 
-            # Get coach mode from settings
-            coach_mode = getattr(settings, 'coach_mode', 'openai')
+            # Get coach mode from settings (default to 'classic')
+            coach_mode = getattr(settings, 'coach_mode', 'classic')
+            print(f"🔧 Initializing coach with mode: {coach_mode}")
 
             if coach_mode == 'classic':
                 # Initialize Classic Coach (deterministic, no API keys needed)
@@ -1292,7 +1295,7 @@ class StatsPanel(QWidget):
                             self.param_editor.show_coach_progress("Evolution Coach analyzing population...")
                         
                         # Update status bar with coach start - show mode-specific message
-                        coach_mode = getattr(settings, 'coach_mode', 'openai')
+                        coach_mode = getattr(settings, 'coach_mode', 'classic')
                         if coach_mode == 'openai':
                             status_msg = "🤖 OpenAI Coach analyzing population..."
                         elif coach_mode == 'classic':
@@ -1331,6 +1334,8 @@ class StatsPanel(QWidget):
                                 self.param_editor.set_coach_analyzing(True)
                             except Exception as e:
                                 print(f"Error showing coach progress bar: {e}")
+                                import traceback
+                                traceback.print_exc()
                         
                         # Run agent analysis (blocking call but in background thread)
                         import asyncio
@@ -1385,7 +1390,7 @@ class StatsPanel(QWidget):
                                 
                                 # Update status bar with coach completion - show mode-specific message
                                 action_count = summary.get('total_actions', 0)
-                                coach_mode = getattr(settings, 'coach_mode', 'openai')
+                                coach_mode = getattr(settings, 'coach_mode', 'classic')
                                 if coach_mode == 'openai':
                                     completion_msg = f"✅ OpenAI Coach completed: {action_count} actions taken"
                                 elif coach_mode == 'classic':
@@ -1407,7 +1412,7 @@ class StatsPanel(QWidget):
                                     self.param_editor.hide_coach_progress()
                                 
                                 # Update status bar with coach failure - show mode-specific message
-                                coach_mode = getattr(settings, 'coach_mode', 'openai')
+                                coach_mode = getattr(settings, 'coach_mode', 'classic')
                                 if coach_mode == 'openai':
                                     failure_msg = "⚠ OpenAI Coach analysis failed"
                                 elif coach_mode == 'classic':
@@ -1430,7 +1435,7 @@ class StatsPanel(QWidget):
                             self.param_editor.hide_coach_progress()
                         
                         # Update status bar with coach error - show mode-specific message
-                        coach_mode = getattr(settings, 'coach_mode', 'openai')
+                        coach_mode = getattr(settings, 'coach_mode', 'classic')
                         if coach_mode == 'openai':
                             error_msg = f"❌ OpenAI Coach error: {str(e)[:50]}"
                         elif coach_mode == 'classic':
@@ -1908,6 +1913,8 @@ class StatsPanel(QWidget):
                                         self.param_editor.set_coach_analyzing(True)
                                     except Exception as e:
                                         print(f"Error showing coach progress bar: {e}")
+                                        import traceback
+                                        traceback.print_exc()
                                 
                                 # Use OpenAI Agents coach analysis
                                 # Check if coach is disabled

@@ -23,7 +23,6 @@ from app.widgets.stats_panel import StatsPanel
 from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
 from app.widgets.data_bar import DataBar
-# Removed: EvolutionCoachWindow (now using console logging)
 from strategy.seller_exhaustion import build_features, SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe
@@ -214,18 +213,6 @@ class MainWindow(QMainWindow):
         strategy_action.setToolTip("Edit strategy parameters and manage parameter sets")
         strategy_action.triggered.connect(self.show_strategy_editor)
         toolbar.addAction(strategy_action)
-
-        # Evolution Coach logs
-        coach_action = QAction("🧠 Evolution Coach", self)
-        coach_action.setToolTip("Open concise optimization logs for agent analysis")
-        coach_action.triggered.connect(self.show_evolution_coach)
-        toolbar.addAction(coach_action)
-
-        # Classic Coach window
-        classic_coach_action = QAction("🤖 Classic Coach", self)
-        classic_coach_action.setToolTip("Open Classic Coach decision interface - view deterministic optimization logic")
-        classic_coach_action.triggered.connect(self.show_classic_coach)
-        toolbar.addAction(classic_coach_action)
         
         toolbar.addSeparator()
         
@@ -503,34 +490,6 @@ class MainWindow(QMainWindow):
             self.strategy_editor_widget = editor
         
         self.strategy_editor.exec()
-
-    def show_evolution_coach(self):
-        """Show Evolution Coach window with real-time monitoring."""
-        if not hasattr(self, 'coach_window') or self.coach_window is None:
-            from app.widgets.evolution_coach_window import EvolutionCoachWindow
-            self.coach_window = EvolutionCoachWindow(self)
-
-            # Connect to stats panel for real-time updates
-            if hasattr(self, 'stats_panel') and self.stats_panel:
-                self.stats_panel.set_coach_window(self.coach_window)
-
-        self.coach_window.show()
-        self.coach_window.raise_()
-        self.coach_window.activateWindow()
-
-    def show_classic_coach(self):
-        """Show Classic Coach window with deterministic decision interface."""
-        if not hasattr(self, 'classic_coach_window') or self.classic_coach_window is None:
-            from app.widgets.classic_coach_window import ClassicCoachWindow
-            self.classic_coach_window = ClassicCoachWindow(self)
-
-            # Connect to stats panel for coach manager access
-            if hasattr(self, 'stats_panel') and self.stats_panel:
-                self.stats_panel.set_classic_coach_window(self.classic_coach_window)
-
-        self.classic_coach_window.show()
-        self.classic_coach_window.raise_()
-        self.classic_coach_window.activateWindow()
 
     def on_data_downloaded(self, df):
         """Handle data download completion."""

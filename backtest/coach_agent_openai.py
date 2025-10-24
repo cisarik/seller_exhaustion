@@ -18,6 +18,12 @@ from core.models import FitnessConfig, OptimizationConfig, AdamConfig
 import logging
 import re
 
+try:
+    from app.signals import get_coach_signals
+    SIGNALS_AVAILABLE = True
+except ImportError:
+    SIGNALS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -582,6 +588,28 @@ class CoachAgentOpenAI:
 
             # Parse final output for summary
             final_summary = self._extract_summary_from_output(result.final_output)
+
+            # Emit signals for real-time window updates (OpenAI Coach)
+            if SIGNALS_AVAILABLE:
+                try:
+                    signals = get_coach_signals()
+                    
+                    # Emit coach message (shows in window)
+                    signals.coach_message.emit(
+                        f"✓ 🤖 OpenAI Agent Analysis: {tool_calls_made} tool calls, {len(actions_taken)} actions",
+                        "blue"
+                    )
+                    
+                    # Emit all tool calls to history table
+                    for tool_call in self.tool_history:
+                        signals.tool_call_complete.emit(
+                            tool_call.get('name', 'unknown'),
+                            tool_call.get('parameters', {}),
+                            tool_call.get('response', {}),
+                            tool_call.get('reason', '')
+                        )
+                except Exception as e:
+                    logger.debug(f"Signals emission skipped: {e}")
 
             # Show debugger if history collected (disabled to avoid Qt thread issues)
             # from app.widgets.coach_debugger import CoachDebugger

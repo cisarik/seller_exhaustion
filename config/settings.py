@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     
     # Evolution Coach Parameters
     coach_enabled: bool = True  # Enable/disable Evolution Coach
-    coach_mode: str = "classic"  # Coach mode: "classic" (deterministic) or "openai" (LLM-based)
+    coach_mode: str = "disabled"  # Coach mode: "disabled", "classic" (deterministic) or "openai" (LLM-based)
     coach_islands_enabled: bool = False  # Enable/disable Islands Management (adds complexity)
     coach_analysis_interval: int = 10  # Analyze every N generations (10, 15, 20, etc)
     coach_debug_payloads: bool = False  # When True, log full LLM payloads/responses

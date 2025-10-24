@@ -12,6 +12,12 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from core.logging_utils import get_logger
 
+try:
+    from app.signals import get_coach_signals
+    SIGNALS_AVAILABLE = True
+except ImportError:
+    SIGNALS_AVAILABLE = False
+
 logger = get_logger(__name__)
 
 
@@ -205,6 +211,9 @@ class ClassicCoachManager:
         """
         try:
             generation = getattr(population, 'generation', 0)
+            
+            # Store status_callback for use in this analysis
+            self.status_callback = status_callback
 
             # Get population state
             pop_state = self._analyze_population_state(population, generation)
@@ -216,7 +225,8 @@ class ClassicCoachManager:
             actions_taken = self._apply_recommendations(ga_config, recommended_algorithm, recommended_params, pop_state)
 
             # Update status bar with key decisions
-            if status_callback:
+            print(f"🔍 DEBUG: coach_classic.py self.status_callback = {self.status_callback}")
+            if self.status_callback:
                 try:
                     phase_info = self.get_phase_info(generation)
                     phase_name = phase_info.name if phase_info else "Unknown"
@@ -231,7 +241,8 @@ class ClassicCoachManager:
                     confidence_indicator = "🎯" if self.recommendation_confidence > 0.7 else "🤔" if self.recommendation_confidence > 0.5 else "❓"
                     status_msg += f" {confidence_indicator} {len(actions_taken)} actions"
 
-                    status_callback(status_msg)
+                    print(f"🔍 DEBUG: coach_classic.py calling status_callback with 'ClassicCoach_Analysis', '{status_msg}'")
+                    self.status_callback("ClassicCoach_Analysis", status_msg)
                 except Exception as e:
                     logger.warning(f"Error updating status bar: {e}")
 
@@ -366,6 +377,114 @@ class ClassicCoachManager:
 
             # Update last analysis generation
             self.last_analysis_generation = generation
+
+            # Emit signals for real-time window updates
+            if SIGNALS_AVAILABLE:
+                try:
+                    signals = get_coach_signals()
+                    
+                    # Emit population state update with full fitness history
+                    signals.population_state_updated.emit({
+                        'generation': pop_state.generation,
+                        'population_size': pop_state.population_size,
+                        'best_fitness': pop_state.best_fitness,
+                        'mean_fitness': pop_state.mean_fitness,
+                        'diversity': pop_state.diversity,
+                        'fitness_trend': pop_state.fitness_trend,
+                        'fitness_history': self.fitness_history[-10:] if self.fitness_history else []
+                    })
+                    
+                    # Emit recommendation update
+                    signals.recommendation_updated.emit({
+                        'recommended_algorithm': recommended_algorithm,
+                        'confidence': self.recommendation_confidence,
+                        'generation': generation,
+                        'actions': len(actions_taken)
+                    })
+                    
+                    # Emit detailed decision reasoning
+                    reasoning_lines = [
+                        f"🎯 Algorithm Selection: {recommended_algorithm.upper()}",
+                        f"📊 Population Analysis:",
+                        f"  • Best Fitness: {pop_state.best_fitness:.4f}",
+                        f"  • Mean Fitness: {pop_state.mean_fitness:.4f}",
+                        f"  • Diversity: {pop_state.diversity:.3f}",
+                        f"  • Population Size: {pop_state.population_size}",
+                        f"🔍 Coach State:",
+                        f"  • Stagnation Streak: {self.consecutive_stagnation}",
+                        f"  • Low Diversity Streak: {self.consecutive_low_diversity}",
+                        f"  • Confidence Level: {self.recommendation_confidence:.1%}"
+                    ]
+                    
+                    # Build parameters adjusted dict if any
+                    params_adjusted = {}
+                    if recommended_algorithm == 'adam':
+                        params_adjusted['algorithm_switch'] = ('GA', 'ADAM')
+                    
+                    signals.decision_reasoning_updated.emit({
+                        'reasoning': '\n'.join(reasoning_lines),
+                        'parameters_adjusted': params_adjusted
+                    })
+                    
+                    # Emit phase information
+                    phase_info = self.get_phase_info(generation)
+                    phase_name = phase_info.name if phase_info else "Unknown"
+                    phase_start = phase_info.start_generation if phase_info else 0
+                    phase_end = phase_info.end_generation if phase_info else self.total_iterations
+                    
+                    signals.phase_info_updated.emit({
+                        'current_phase': phase_name,
+                        'phase_start': phase_start,
+                        'phase_end': phase_end,
+                        'exploration_end': self.phase_boundaries.get('exploration_end', '—'),
+                        'exploitation_end': self.phase_boundaries.get('exploitation_end', '—'),
+                        'estimated_remaining': self.estimated_remaining_generations or '—',
+                        'next_transition': phase_end + 1 if phase_info else '—'
+                    })
+                    
+                    # Emit crisis detection if applicable
+                    active_crises = []
+                    if self.consecutive_stagnation > 3:
+                        active_crises.append({
+                            'type': 'STAGNATION',
+                            'description': f'{self.consecutive_stagnation} generations without improvement',
+                            'response': 'Increasing mutation rate',
+                            'outcome': 'in_progress'
+                        })
+                    if pop_state.diversity < 0.1:
+                        active_crises.append({
+                            'type': 'LOW_DIVERSITY',
+                            'description': f'Diversity: {pop_state.diversity:.3f} (below 0.1 threshold)',
+                            'response': 'Applying immigration strategy',
+                            'outcome': 'in_progress'
+                        })
+                    
+                    if active_crises:
+                        signals.crisis_detection_updated.emit({
+                            'generation': generation,
+                            'active_crises': active_crises
+                        })
+                    
+                    # Emit learning insights
+                    insights_lines = [
+                        f"📚 Learning Insights (Gen {generation}):",
+                        f"• Strategy Success: {len([r for r in self.recommendations_history if r['recommended_algorithm'] == 'ga'])}/{len(self.recommendations_history)} GA recommendations",
+                        f"• Average Confidence: {sum(r.get('recommendation_confidence', 0.5) for r in self.recommendations_history) / max(len(self.recommendations_history), 1):.2f}",
+                        f"• Best Ever Fitness: {self.last_best_fitness:.4f}",
+                        f"• Phase: {phase_name}"
+                    ]
+                    
+                    signals.learning_insights_updated.emit({
+                        'insights': '\n'.join(insights_lines)
+                    })
+                    
+                    # Emit coach message in blue
+                    signals.coach_message.emit(
+                        f"✓ 🧠 Classic Coach Analysis (Gen {generation}): {recommended_algorithm.upper()} | {len(actions_taken)} actions | confidence={self.recommendation_confidence:.2f}",
+                        "blue"
+                    )
+                except Exception as e:
+                    logger.debug(f"Signals emission skipped: {e}")
 
             # Return success and summary
             summary = {

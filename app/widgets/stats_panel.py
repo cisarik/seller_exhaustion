@@ -53,6 +53,12 @@ class StatsPanel(QWidget):
     # Signal emitted after generation completes (for thread-safe UI updates)
     generation_complete = Signal()
     
+    # Signal emitted to reset progress bar (thread-safe)
+    reset_progress_bar = Signal()
+    
+    # Signal emitted to hide progress bar immediately (thread-safe)
+    hide_progress_bar = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.trades_df = None
@@ -92,6 +98,12 @@ class StatsPanel(QWidget):
         # Connect generation_complete signal for thread-safe UI updates
         self.generation_complete.connect(self._update_after_generation)
         
+        # Connect reset_progress_bar signal for thread-safe UI updates
+        self.reset_progress_bar.connect(self._reset_progress_bar)
+        
+        # Connect hide_progress_bar signal for thread-safe UI updates
+        self.hide_progress_bar.connect(self._hide_progress_bar)
+        
         # Initialize coach manager
         self._initialize_coach_manager()
 
@@ -109,13 +121,26 @@ class StatsPanel(QWidget):
                 self._original_status_callback = self.status_callback
             self.status_callback = self._create_coach_status_callback()
 
-        # Update coach manager with coach window
+        # Update coach manager with coach window and new status callback
         if self.coach_manager:
             self.coach_manager.coach_window = coach_window
+            # Update coach manager's status callback to use the new combined callback
+            if hasattr(self.coach_manager, 'status_callback'):
+                self.coach_manager.status_callback = self.status_callback
 
     def set_classic_coach_window(self, classic_coach_window):
         """Set the Classic Coach window for deterministic decision visualization."""
+        print(f"🔍 DEBUG: set_classic_coach_window called with classic_coach_window={classic_coach_window}")
         self.classic_coach_window = classic_coach_window
+        
+        # Create combined status callback for Classic Coach (same as Evolution Coach)
+        if classic_coach_window:
+            # Store original callback to avoid recursion
+            if not hasattr(self, '_original_status_callback'):
+                self._original_status_callback = self.status_callback
+            self.status_callback = self._create_coach_status_callback()
+            print(f"🔍 DEBUG: set_classic_coach_window created status_callback: {self.status_callback}")
+        
         # Update coach manager with classic coach window
         if self.coach_manager and hasattr(self.coach_manager, 'set_classic_coach_window'):
             self.coach_manager.set_classic_coach_window(classic_coach_window)
@@ -124,9 +149,9 @@ class StatsPanel(QWidget):
         if self.coach_manager and hasattr(classic_coach_window, 'set_coach_manager'):
             classic_coach_window.set_coach_manager(self.coach_manager)
         
-        # Store original callback to avoid recursion (if not already stored)
-        if not hasattr(self, '_original_status_callback'):
-            self._original_status_callback = self.status_callback
+        # Update coach manager's status callback to use the new combined callback
+        if self.coach_manager and hasattr(self.coach_manager, 'status_callback'):
+            self.coach_manager.status_callback = self.status_callback
         
         # Create a combined status callback that updates both main window and coach tool status
         if not hasattr(self, '_combined_status_callback'):
@@ -138,8 +163,8 @@ class StatsPanel(QWidget):
                     except Exception as e:
                         print(f"Error in original status callback: {e}")
                 
-                # Update coach tool status for progress bar
-                if hasattr(self, '_coach_tool_status_callback') and self._coach_tool_status_callback:
+                # Update coach tool status for progress bar (only for OpenAI Agent, not Classic Coach)
+                if tool_name.startswith('OpenAI_') and hasattr(self, '_coach_tool_status_callback') and self._coach_tool_status_callback:
                     try:
                         self._coach_tool_status_callback(tool_name, reason)
                     except Exception as e:
@@ -147,47 +172,32 @@ class StatsPanel(QWidget):
             
             self._combined_status_callback = combined_callback
             self.status_callback = self._combined_status_callback
+            
+            # Update coach manager's status callback to use the new combined callback
+            if self.coach_manager and hasattr(self.coach_manager, 'status_callback'):
+                self.coach_manager.status_callback = self.status_callback
 
     def _create_coach_status_callback(self):
-        """Create status callback that updates both main window and coach window."""
+        """Create simple status callback that updates coach window."""
         def status_callback(tool_name: str, reason: str = ""):
-            # Update main window status bar (avoid recursion by not calling self.status_callback)
-            if hasattr(self, '_original_status_callback') and self._original_status_callback:
-                try:
-                    self._original_status_callback(tool_name, reason)
-                except Exception as e:
-                    print(f"Error in original status callback: {e}")
-            
-            # Also call the coach tool status callback for progress bar updates
-            if hasattr(self, '_coach_tool_status_callback') and self._coach_tool_status_callback:
-                try:
-                    self._coach_tool_status_callback(tool_name, reason)
-                except Exception as e:
-                    print(f"Error in coach tool status callback: {e}")
-            
-            # Update coach window (only for Evolution Coach, not Classic Coach)
-            if hasattr(self, 'coach_window') and self.coach_window:
-                try:
-                    # Add tool call to coach window
+            """Simple callback for coach tool status - just update UI."""
+            try:
+                # Update coach window if available
+                if hasattr(self, 'coach_window') and self.coach_window:
                     self.coach_window.add_tool_call(
                         tool_name=tool_name,
-                        parameters={},  # Will be filled by actual tool call
-                        response={},    # Will be filled by actual tool call
+                        parameters={},
+                        response={},
                         reason=reason
                     )
-                    
-                    # Update status
                     self.coach_window.set_status(f"Tool: {tool_name}", is_analyzing=True)
-                    
-                except Exception as e:
-                    print(f"Error updating coach window: {e}")
-            
-            # Update progress bar in compact params editor
-            if hasattr(self, 'param_editor') and self.param_editor:
-                try:
+                
+                # Update progress bar in compact params editor
+                if hasattr(self, 'param_editor') and self.param_editor:
                     self.param_editor.set_coach_analyzing(True)
-                except Exception as e:
-                    print(f"Error updating coach progress bar: {e}")
+            
+            except Exception as e:
+                logger.error(f"Coach status callback error: {e}")
         
         return status_callback
 
@@ -225,9 +235,15 @@ class StatsPanel(QWidget):
                     if hasattr(self.classic_coach_window, 'set_coach_manager'):
                         self.classic_coach_window.set_coach_manager(self.coach_manager)
                 
+                # Ensure status_callback is set for Classic Coach even if window is not opened
+                if not hasattr(self, '_original_status_callback'):
+                    self._original_status_callback = self.status_callback
+                self.status_callback = self._create_coach_status_callback()
+                print(f"🔍 DEBUG: _initialize_coach_manager created status_callback for Classic Coach: {self.status_callback}")
+                
                 # Update UI status bar if callback provided
                 if self.status_callback:
-                    self.status_callback(f"✓ 🤖 Classic Coach ready (every {self.coach_manager.analysis_interval} gens)")
+                    self.status_callback(f"✓ 🧠 Classic Coach ready (every {self.coach_manager.analysis_interval} gens)")
 
             elif coach_mode == 'openai':
                 # Initialize OpenAI Coach (requires API keys)
@@ -687,8 +703,45 @@ class StatsPanel(QWidget):
     
     def _coach_tool_status_callback(self, tool_name: str, reason: str = ""):
         """Callback for coach tool status updates."""
+        # print(f"🔍 DEBUG: _coach_tool_status_callback called with tool_name='{tool_name}', reason='{reason}'")
         if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_tool_status'):
+            # print(f"🔍 DEBUG: Calling chart_view.set_coach_tool_status")
             self.chart_view.set_coach_tool_status(tool_name, reason)
+        else:
+            print(f"🔍 DEBUG: chart_view not available or missing set_coach_tool_status method")
+        
+        # Also update progress bar in compact params editor
+        if hasattr(self, 'param_editor') and self.param_editor:
+            try:
+                # Show progress bar for analysis start, hide for completion
+                if tool_name.startswith('✅ Coach completed'):
+                    # Hide progress bar immediately using Signal
+                    self.hide_progress_bar.emit()
+                    # print(f"🔍 DEBUG: Hiding progress bar - coach analysis completed")
+                else:
+                    self.param_editor.set_coach_analyzing(True)
+                    # print(f"🔍 DEBUG: Showing progress bar - coach analysis started")
+            except Exception as e:
+                print(f"Error updating coach progress bar: {e}")
+        
+        # No need to schedule progress bar reset - it's handled immediately by Signal
+    
+    def _reset_progress_bar(self):
+        """Reset progress bar to normal state."""
+        if hasattr(self, 'param_editor') and self.param_editor:
+            try:
+                self.param_editor.set_coach_analyzing(False)
+            except Exception as e:
+                print(f"Error resetting coach progress bar: {e}")
+    
+    def _hide_progress_bar(self):
+        """Hide progress bar immediately."""
+        if hasattr(self, 'param_editor') and self.param_editor:
+            try:
+                self.param_editor.set_coach_analyzing(False)
+                # print(f"🔍 DEBUG: Progress bar hidden immediately via Signal")
+            except Exception as e:
+                print(f"Error hiding coach progress bar: {e}")
     
     def reinitialize_coach_manager(self):
         """Reinitialize coach manager after settings changes."""
@@ -1238,9 +1291,17 @@ class StatsPanel(QWidget):
                         if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'show_coach_progress'):
                             self.param_editor.show_coach_progress("Evolution Coach analyzing population...")
                         
-                        # Update status bar with coach start
+                        # Update status bar with coach start - show mode-specific message
+                        coach_mode = getattr(settings, 'coach_mode', 'openai')
+                        if coach_mode == 'openai':
+                            status_msg = "🤖 OpenAI Coach analyzing population..."
+                        elif coach_mode == 'classic':
+                            status_msg = "🧠 Classic Coach analyzing population..."
+                        else:
+                            status_msg = "🤖 Coach analyzing population..."
+        
                         if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
-                            self.chart_view.set_coach_status("🤖 Evolution Coach starting analysis...")
+                            self.chart_view.set_coach_status(status_msg)
                         
                         # Get current configs
                         _, _, fitness_config = self.get_current_params()
@@ -1273,18 +1334,25 @@ class StatsPanel(QWidget):
                         
                         # Run agent analysis (blocking call but in background thread)
                         import asyncio
+                        from config.settings import settings
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            success, summary = loop.run_until_complete(
-                                self.coach_manager.analyze_and_apply_with_openai_agent(
-                                    population=population,
-                                    fitness_config=fitness_config,
-                                    ga_config=ga_config,
-                                    coach_window=self.coach_window,
-                                    status_callback=self.status_callback
+                            # Check if coach is disabled
+                            if settings.coach_mode == "disabled":
+                                print("🔍 DEBUG: Coach mode is disabled, skipping analysis")
+                                success, summary = True, "Coach disabled"
+                            else:
+                                print(f"🔍 DEBUG: stats_panel.py calling analyze_and_apply_with_openai_agent with status_callback={self.status_callback}")
+                                success, summary = loop.run_until_complete(
+                                    self.coach_manager.analyze_and_apply_with_openai_agent(
+                                        population=population,
+                                        fitness_config=fitness_config,
+                                        ga_config=ga_config,
+                                        coach_window=self.coach_window,
+                                        status_callback=self.status_callback
+                                    )
                                 )
-                            )
                             
                             if success:
                                 # Hide progress bar after successful analysis
@@ -1315,17 +1383,21 @@ class StatsPanel(QWidget):
                                 if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
                                     self.param_editor.hide_coach_progress()
                                 
-                                # Update status bar with coach completion
+                                # Update status bar with coach completion - show mode-specific message
+                                action_count = summary.get('total_actions', 0)
+                                coach_mode = getattr(settings, 'coach_mode', 'openai')
+                                if coach_mode == 'openai':
+                                    completion_msg = f"✅ OpenAI Coach completed: {action_count} actions taken"
+                                elif coach_mode == 'classic':
+                                    completion_msg = f"✅ Classic Coach completed: {action_count} actions taken"
+                                else:
+                                    completion_msg = f"✅ Coach completed: {action_count} actions taken"
+
                                 if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
-                                    action_count = summary.get('total_actions', 0)
-                                    self.chart_view.set_coach_status(
-                                        f"✅ Coach completed: {action_count} actions taken", 
-                                        is_recommendation=True
-                                    )
-                                
+                                    self.chart_view.set_coach_status(completion_msg, is_recommendation=True)
+
                                 # Update status bar if callback available
                                 if self.status_callback:
-                                    action_count = summary.get('total_actions', 0)
                                     self.status_callback(f"✅ Coach: {action_count} actions taken at gen {generation}")
                             else:
                                 logger.warning("⚠ Coach agent failed: %s", summary.get('error', 'Unknown'))
@@ -1334,10 +1406,18 @@ class StatsPanel(QWidget):
                                 if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
                                     self.param_editor.hide_coach_progress()
                                 
-                                # Update status bar with coach failure
+                                # Update status bar with coach failure - show mode-specific message
+                                coach_mode = getattr(settings, 'coach_mode', 'openai')
+                                if coach_mode == 'openai':
+                                    failure_msg = "⚠ OpenAI Coach analysis failed"
+                                elif coach_mode == 'classic':
+                                    failure_msg = "⚠ Classic Coach analysis failed"
+                                else:
+                                    failure_msg = "⚠ Coach analysis failed"
+
                                 if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
-                                    self.chart_view.set_coach_status("⚠ Coach analysis failed")
-                                
+                                    self.chart_view.set_coach_status(failure_msg)
+
                                 if self.status_callback:
                                     self.status_callback(f"⚠ Coach failed at gen {generation}")
                         finally:
@@ -1349,12 +1429,20 @@ class StatsPanel(QWidget):
                         if hasattr(self, 'param_editor') and hasattr(self.param_editor, 'hide_coach_progress'):
                             self.param_editor.hide_coach_progress()
                         
-                        # Update status bar with coach error
+                        # Update status bar with coach error - show mode-specific message
+                        coach_mode = getattr(settings, 'coach_mode', 'openai')
+                        if coach_mode == 'openai':
+                            error_msg = f"❌ OpenAI Coach error: {str(e)[:50]}"
+                        elif coach_mode == 'classic':
+                            error_msg = f"❌ Classic Coach error: {str(e)[:50]}"
+                        else:
+                            error_msg = f"❌ Coach error: {str(e)[:50]}"
+
                         if hasattr(self, 'chart_view') and hasattr(self.chart_view, 'set_coach_status'):
-                            self.chart_view.set_coach_status(f"❌ Coach error: {str(e)[:50]}")
-                        
+                            self.chart_view.set_coach_status(error_msg)
+
                         if self.status_callback:
-                            self.status_callback(f"❌ Coach error: {str(e)[:50]}")
+                            self.status_callback(error_msg)
                 
                 # Start coach thread
                 coach_thread = Thread(target=run_coach_analysis, daemon=True)
@@ -1822,15 +1910,22 @@ class StatsPanel(QWidget):
                                         print(f"Error showing coach progress bar: {e}")
                                 
                                 # Use OpenAI Agents coach analysis
-                                success, summary = loop.run_until_complete(
-                                    self.coach_manager.analyze_and_apply_with_openai_agent(
-                                        population=population,
-                                        fitness_config=fitness_config,
-                                        ga_config=ga_config,
-                                        coach_window=self.coach_window,
-                                        status_callback=self.status_callback
+                                # Check if coach is disabled
+                                from config.settings import settings
+                                if settings.coach_mode == "disabled":
+                                    print("🔍 DEBUG: Coach mode is disabled, skipping analysis")
+                                    success, summary = True, "Coach disabled"
+                                else:
+                                    print(f"🔍 DEBUG: stats_panel.py calling analyze_and_apply_with_openai_agent with status_callback={self.status_callback}")
+                                    success, summary = loop.run_until_complete(
+                                        self.coach_manager.analyze_and_apply_with_openai_agent(
+                                            population=population,
+                                            fitness_config=fitness_config,
+                                            ga_config=ga_config,
+                                            coach_window=self.coach_window,
+                                            status_callback=self.status_callback
+                                        )
                                     )
-                                )
                                 
                                 if success:
                                     # Hide progress bar after successful analysis

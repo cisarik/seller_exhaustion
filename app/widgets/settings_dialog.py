@@ -212,11 +212,21 @@ class SettingsDialog(QDialog):
         coach_group = QGroupBox("Evolution Coach")
         coach_layout = QFormLayout()
         
-        # Enable checkbox
+        # Enable checkbox (now derived from coach_mode)
         self.coach_enabled = QCheckBox("Enable Evolution Coach Agent")
         self.coach_enabled.setChecked(True)
-        self.coach_enabled.setToolTip("Enable/disable the Evolution Coach agent during optimization")
+        self.coach_enabled.setEnabled(False)  # Disabled since it's now derived
+        self.coach_enabled.setToolTip("Automatically enabled when coach mode is not 'Disabled'")
         coach_layout.addRow("Enabled:", self.coach_enabled)
+        
+        # Coach Mode selection
+        self.coach_mode = QComboBox()
+        self.coach_mode.addItem("❌ Disabled", "disabled")
+        self.coach_mode.addItem("🧠 Classic Coach", "classic")
+        self.coach_mode.addItem("🤖 OpenAI Agents", "openai")
+        self.coach_mode.setToolTip("❌ Disabled: No coach analysis\n🧠 Classic Coach: Fast, deterministic, no API keys needed\n🤖 OpenAI Agents: LLM-based, requires API keys, more intelligent")
+        self.coach_mode.currentIndexChanged.connect(self._on_coach_mode_changed)
+        coach_layout.addRow("Coach Mode:", self.coach_mode)
         
         # Islands Management checkbox
         self.coach_islands_enabled = QCheckBox("Enable Islands Management")
@@ -447,11 +457,17 @@ class SettingsDialog(QDialog):
     def _on_agent_provider_changed(self, index):
         """Show/hide provider-specific settings based on selection."""
         provider = self.agent_provider.currentData()
-        
+
         # Show/hide provider-specific groups
         self.novita_group.setVisible(provider == "novita")
         self.openrouter_group.setVisible(provider == "openrouter")
         self.openai_group.setVisible(provider == "openai")
+
+    def _on_coach_mode_changed(self, index):
+        """Update coach_enabled based on coach_mode selection."""
+        coach_mode = self.coach_mode.currentData()
+        coach_enabled = coach_mode != "disabled"
+        self.coach_enabled.setChecked(coach_enabled)
 
     def create_indicators_tab(self):
         """Create indicator selection tab."""
@@ -820,8 +836,20 @@ class SettingsDialog(QDialog):
             self.timeframe.setCurrentIndex(idx)
         
         # Agent settings (Evolution Coach + LLM Provider)
-        self.coach_enabled.setChecked(getattr(settings, 'coach_enabled', True))
+        # coach_enabled is now derived from coach_mode, but we still load it for backwards compatibility
+        coach_mode = getattr(settings, 'coach_mode', 'classic')
+        coach_enabled = getattr(settings, 'coach_enabled', coach_mode != 'disabled')
+        self.coach_enabled.setChecked(coach_enabled)
         self.coach_islands_enabled.setChecked(getattr(settings, 'coach_islands_enabled', False))
+        
+        # Coach mode selection
+        coach_mode = getattr(settings, 'coach_mode', 'classic')  # Default to 'classic'
+        for i in range(self.coach_mode.count()):
+            if self.coach_mode.itemData(i) == coach_mode:
+                self.coach_mode.setCurrentIndex(i)
+                break
+        # Update coach_enabled based on loaded coach_mode
+        self._on_coach_mode_changed(0)
         
         # Provider selection
         provider = getattr(settings, 'agent_provider', 'novita')
@@ -998,8 +1026,10 @@ class SettingsDialog(QDialog):
                 'timeframe': self._safe_get_combo_data('timeframe', '15m'),
                 
                 # Agent settings (Evolution Coach + LLM Provider)
-                'coach_enabled': self._safe_get_checkbox_value('coach_enabled', True),
+                # coach_enabled is now derived from coach_mode
+                'coach_enabled': self._safe_get_combo_data('coach_mode', 'classic') != 'disabled',
                 'coach_islands_enabled': self._safe_get_checkbox_value('coach_islands_enabled', False),
+                'coach_mode': self._safe_get_combo_data('coach_mode', 'classic'),
                 'agent_provider': self._safe_get_combo_data('agent_provider', 'novita'),
                 
                 # Novita settings

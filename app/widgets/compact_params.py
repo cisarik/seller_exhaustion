@@ -11,6 +11,7 @@ from PySide6.QtCore import Signal
 from strategy.seller_exhaustion import SellerParams
 from backtest.engine import BacktestParams
 from core.models import Timeframe, FitnessConfig
+from app.widgets.phase_progress_bar import PhaseProgressBar, AnimatedProgressBar
 
 
 class CompactParamsEditor(QWidget):
@@ -319,30 +320,37 @@ class CompactParamsEditor(QWidget):
         self.coach_mode_combo.addItem("🤖 OpenAI Agents", "openai")
         self.coach_mode_combo.addItem("🧠 Classic Coach", "classic")
         self.coach_mode_combo.addItem("❌ Disabled", "disabled")
-        self.coach_mode_combo.setToolTip("Choose coach mode: OpenAI Agents (LLM-based), Classic (deterministic), or Disabled")
+        self.coach_mode_combo.setToolTip(
+            "🤖 OpenAI Agents: LLM-based analysis (requires API keys)\n"
+            "🧠 Classic Coach: Fast, deterministic analysis (no API keys needed)\n"
+            "❌ Disabled: No coach analysis during optimization"
+        )
         self.coach_mode_combo.currentIndexChanged.connect(self._on_coach_config_changed)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.coach_mode_combo, 1)
         coach_layout.addLayout(mode_row)
+
+        # Open Coach Window button - DISABLED WHEN COACH IS DISABLED
+        self.open_coach_btn = QPushButton("🔍 Open Coach Window")
+        self.open_coach_btn.setToolTip("Open detailed coach analysis window")
+        self.open_coach_btn.clicked.connect(self._open_coach_window)
+        coach_layout.addWidget(self.open_coach_btn)
         
-        # Coach progress bar (shows when coach is active)
-        self.coach_progress = QProgressBar()
-        self.coach_progress.setVisible(False)  # Hidden by default
-        self.coach_progress.setRange(0, 0)  # Indeterminate progress
-        self.coach_progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #555;
-                border-radius: 3px;
-                text-align: center;
-                background-color: #2b2b2b;
-            }
-            QProgressBar::chunk {
-                background-color: #4caf50;
-                border-radius: 2px;
-            }
-        """)
-        self.coach_progress.setToolTip("Evolution Coach is analyzing population...")
-        coach_layout.addWidget(self.coach_progress)
+        # Coach progress bars (mode-dependent)
+        # Phase progress bar for Classic Coach (3 segments: Exploration → Exploitation → Refinement)
+        self.phase_progress_bar = PhaseProgressBar()
+        self.phase_progress_bar.setVisible(False)  # Hidden by default
+        self.phase_progress_bar.setToolTip("Phase progress: Exploration → Exploitation → Refinement")
+        coach_layout.addWidget(self.phase_progress_bar)
+        
+        # Animated progress bar for OpenAI Agents Coach
+        self.agent_progress_bar = AnimatedProgressBar()
+        self.agent_progress_bar.setVisible(False)  # Hidden by default
+        self.agent_progress_bar.setToolTip("Agent is analyzing and making tool calls...")
+        coach_layout.addWidget(self.agent_progress_bar)
+        
+        # Keep reference for backwards compatibility
+        self.coach_progress = self.phase_progress_bar  # Default to phase progress bar
         
         self._coach_model_loaded = False
         
@@ -370,7 +378,7 @@ class CompactParamsEditor(QWidget):
 
         # Update button styles based on provider
     def _on_coach_config_changed(self):
-        """Handle coach mode change - save to settings."""
+        """Handle coach mode change - save to settings, disable button if needed."""
         from config.settings import settings, SettingsManager
 
         # Update coach mode setting
@@ -380,6 +388,30 @@ class CompactParamsEditor(QWidget):
         # Update enabled setting based on mode (disabled when mode is 'disabled')
         settings.coach_enabled = (coach_mode != 'disabled')
 
+        # Disable/enable "Open Coach Window" button based on mode
+        is_enabled = (coach_mode != 'disabled')
+        self.open_coach_btn.setEnabled(is_enabled)
+        if not is_enabled:
+            self.open_coach_btn.setToolTip("❌ Coach is disabled - select a mode to enable")
+        else:
+            self.open_coach_btn.setToolTip("🔍 Open detailed coach analysis window")
+
+        # Show appropriate progress bar based on coach mode
+        if coach_mode == 'disabled':
+            # No progress bar when coach disabled
+            self.phase_progress_bar.setVisible(False)
+            self.agent_progress_bar.setVisible(False)
+        elif coach_mode == 'classic':
+            # Show phase progress bar for Classic Coach
+            self.phase_progress_bar.setVisible(True)
+            self.agent_progress_bar.setVisible(False)
+            self.coach_progress = self.phase_progress_bar
+        elif coach_mode == 'openai':
+            # Show animated progress bar for OpenAI Agents
+            self.phase_progress_bar.setVisible(False)
+            self.agent_progress_bar.setVisible(True)
+            self.coach_progress = self.agent_progress_bar
+
         # Convert settings to dict and save to .env
         try:
             settings_dict = settings.model_dump()  # Pydantic v2
@@ -387,6 +419,26 @@ class CompactParamsEditor(QWidget):
             settings_dict = settings.dict()  # Pydantic v1 fallback
 
         SettingsManager.save_to_env(settings_dict)
+
+    def _open_coach_window(self):
+        """Open the unified optimization coach window."""
+        coach_mode = self.coach_mode_combo.currentData()
+
+        if coach_mode == 'disabled':
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self,
+                "Coach Disabled",
+                "Coach is currently disabled. Select 'Classic Coach' or 'OpenAI Agents' mode to enable coach analysis."
+            )
+            return
+
+        # Import and create the unified coach window (v2)
+        from app.widgets.optimization_coach_window_v2 import OptimizationCoachWindowV2
+
+        # Create window with current mode
+        coach_window = OptimizationCoachWindowV2(coach_mode=coach_mode, parent=self)
+        coach_window.show()
 
     def set_coach_analyzing(self, is_analyzing: bool):
         """Set coach analysis state and show/hide progress bar."""
@@ -589,3 +641,17 @@ class CompactParamsEditor(QWidget):
         
         # Update tooltips after setting values
         self._update_tooltips()
+    
+    def update_phase_progress(self, current_gen: int, total_gens: int, 
+                            exploration_end: int, exploitation_end: int):
+        """Update phase progress bar for Classic Coach."""
+        self.phase_progress_bar.set_phase_boundaries(exploration_end, exploitation_end, total_gens)
+        self.phase_progress_bar.set_generation_progress(current_gen, total_gens)
+    
+    def start_agent_animation(self):
+        """Start animated progress bar for OpenAI Agents Coach."""
+        self.agent_progress_bar.start_animation()
+    
+    def stop_agent_animation(self):
+        """Stop animated progress bar for OpenAI Agents Coach."""
+        self.agent_progress_bar.stop_animation()

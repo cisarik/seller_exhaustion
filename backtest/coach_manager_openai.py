@@ -306,6 +306,57 @@ class OpenAICoachManager:
                 logger.info(f"[AGENT  ] ✅ OpenAI Agents workflow complete - "
                      f"GA will resume with modified population")
 
+                # Emit signals for UI updates
+                try:
+                    from app.signals import get_coach_signals
+                    signals = get_coach_signals()
+                    
+                    # Emit population state
+                    pop_metrics = session.get_population_metrics()
+                    signals.population_state_updated.emit({
+                        'generation': session.generation,
+                        'population_size': session.population_size,
+                        'best_fitness': pop_metrics['best_fitness'],
+                        'mean_fitness': pop_metrics['mean_fitness'],
+                        'diversity': pop_metrics['diversity'],
+                        'fitness_trend': 'improving'  # Optimistic default
+                    })
+                    
+                    # Emit coach messages for each action taken
+                    for action in actions_taken[:10]:  # Show first 10 actions
+                        action_name = action.get("action", "unknown")
+                        signals.coach_message.emit(
+                            f"🔧 {action_name}: {action.get('description', 'Applied')}",
+                            "info"
+                        )
+                    
+                    if len(actions_taken) > 10:
+                        signals.coach_message.emit(
+                            f"... and {len(actions_taken) - 10} more actions applied",
+                            "info"
+                        )
+                    
+                    # Emit tool calls if available
+                    tool_history = result.get('tool_history', [])
+                    if tool_history:
+                        for tool_call in tool_history:
+                            signals.tool_call_complete.emit(
+                                tool_call.get('tool_name', 'unknown'),
+                                tool_call.get('parameters', {}),
+                                tool_call.get('response', {})
+                            )
+                    
+                    # Emit final analysis message
+                    signals.coach_message.emit(
+                        f"✓ 🤖 OpenAI Agent Analysis (Gen {session.generation}): "
+                        f"{result['tool_calls_count']} tool calls | "
+                        f"{len(actions_taken)} actions | "
+                        f"{result['iterations']} iterations",
+                        "blue"
+                    )
+                except Exception as e:
+                    logger.debug(f"Signal emission failed: {e}")
+
                 # Show debugger with tool history (disabled to avoid Qt thread issues)
                 # if 'tool_history' in result:
                 #     from app.widgets.coach_debugger import CoachDebugger

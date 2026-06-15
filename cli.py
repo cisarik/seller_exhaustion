@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import asyncio
-from enum import Enum
 
 import typer
 import pandas as pd
@@ -16,11 +15,7 @@ from backtest.optimizer_factory import create_optimizer
 from core.models import FitnessConfig
 
 
-class OptimizerChoice(str, Enum):
-    evolutionary = "evolutionary"
-    adam = "adam"
-
-app = typer.Typer(help="ADA Seller-Exhaustion Agent CLI")
+app = typer.Typer(help="ADA Seller-Exhaustion Backtesting CLI")
 console = Console()
 
 
@@ -249,15 +244,14 @@ def optimize(
     from_date: str = typer.Option("2024-01-01", "--from", help="Start date (YYYY-MM-DD)"),
     to_date: str = typer.Option("2025-01-13", "--to", help="End date (YYYY-MM-DD)"),
     tf: Timeframe = typer.Option("15m", "--tf", case_sensitive=False, help="Timeframe: 1m,3m,5m,10m,15m,60m"),
-    optimizer: OptimizerChoice = typer.Option(OptimizerChoice.evolutionary, "--optimizer", "-o", help="Optimizer type: evolutionary|adam"),
-    init_from: str = typer.Option("", "--init-from", "-i", help="Path to population JSON to initialize optimizer (for GA uses full pop; for ADAM seeds params)"),
-    generations: int = typer.Option(10, "--generations", "-g", help="Number of optimization steps/generations to run"),
+    init_from: str = typer.Option("", "--init-from", "-i", help="Path to population JSON to initialize optimizer"),
+    generations: int = typer.Option(10, "--generations", "-g", help="Number of GA generations to run"),
     data: str = typer.Option("", "--data", help="Path to cached OHLCV DataFrame (parquet/pickle) to use instead of fetching; e.g. .data/X_ADAUSD_2025-09-14_2025-10-14_15minute.parquet"),
 ):
-    """Run optimization headlessly (CLI) with chosen optimizer and optional population seed file."""
+    """Run genetic algorithm optimization headlessly (CLI)."""
 
     async def _run():
-        console.print(f"[cyan]Optimizing {ticker} on {tf.value} using {optimizer.value.upper()}...[/cyan]")
+        console.print(f"[cyan]Optimizing {ticker} on {tf.value} (evolutionary GA)...[/cyan]")
         dp = DataProvider()
         try:
             # Load data: prefer --data if provided, else fetch by date range
@@ -277,26 +271,22 @@ def optimize(
             if len(df) == 0:
                 raise RuntimeError("No data fetched")
 
-            # Build features with defaults (will be overridden by optimizer seeds)
+            # Optimizer needs raw OHLCV (builds features per individual)
             seed_params = SellerParams()
-            feats = build_features(df, seed_params, tf)
 
-            # Create optimizer (pass initial_population_file when provided)
             kwargs = {}
             if init_from:
                 kwargs["initial_population_file"] = init_from
 
-            opt = create_optimizer(optimizer_type=optimizer.value, **kwargs)
+            opt = create_optimizer(optimizer_type="evolutionary", **kwargs)
 
-            # Initialize from defaults; ADAM môže načítať seed z init_from vo vnútri
             opt.initialize(seed_seller_params=SellerParams(), seed_backtest_params=BacktestParams(), timeframe=tf)
 
-            # Fitness config (balanced by default)
             fitness_cfg = FitnessConfig.get_preset_config("balanced") if hasattr(FitnessConfig, "get_preset_config") else FitnessConfig()
 
             best_fitness = None
             for i in range(max(1, generations)):
-                res = opt.step(feats, tf, fitness_cfg)
+                res = opt.step(df, tf, fitness_cfg)
                 best_fitness = res.fitness
                 console.print(
                     f"[green]✓ Step {i+1}/{generations}[/green] "

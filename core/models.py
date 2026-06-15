@@ -36,18 +36,19 @@ class BacktestParams(BaseModel):
     # Fibonacci parameters (ONLY exit mechanism)
     fib_swing_lookback: int = 96      # Bars to look back for swing high
     fib_swing_lookahead: int = 5       # Bars ahead for swing confirmation
-    fib_target_level: float = 0.618    # Target Fib level (0.382-1.0)
-    
-    # Exit toggles
+    # Exit toggles — stop + time exit ON by default (fib-only without stop hides losses)
     use_fib_exits: bool = True
-    use_stop_loss: bool = False
+    use_stop_loss: bool = True
     use_traditional_tp: bool = False
-    use_time_exit: bool = False
+    use_time_exit: bool = True
     
     # Exit parameters
     atr_stop_mult: float = 0.7
     reward_r: float = 2.0
     max_hold: int = 96
+    
+    # Fibonacci: 38.2% conservative target often outperforms 61.8% on mean-reversion bounces
+    fib_target_level: float = 0.382
     
     # Transaction costs
     fee_bp: float = 5.0      # Fees in basis points

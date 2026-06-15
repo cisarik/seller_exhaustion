@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any
 from core.models import BacktestParams
+from backtest.profit import simulate_account
 
 
 # Valid Fibonacci retracement levels (immutable)
@@ -139,6 +140,24 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
             entry = entry_ts = fib_target_price = stop_price = tp_price = risk = None
             bars = 0
     
+    # Close any open position at end of data (realistic PnL accounting)
+    if in_pos and len(d) > 0:
+        last_ts = d.index[-1]
+        last_close = float(d.iloc[-1]["close"])
+        fee = (entry + last_close) * (p.fee_bp + p.slippage_bp) / 10000.0
+        pnl = last_close - entry - fee
+        trade_r = pnl / risk if risk else 0.0
+        trades.append({
+            "entry_ts": str(entry_ts),
+            "exit_ts": str(last_ts),
+            "entry": entry,
+            "exit": last_close,
+            "pnl": pnl,
+            "R": trade_r,
+            "reason": "EOD",
+            "bars_held": bars,
+        })
+    
     tr = pd.DataFrame(trades)
     
     if len(tr) == 0:
@@ -166,6 +185,15 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
     
     sharpe = float(tr["R"].mean() / tr["R"].std()) if len(tr) > 1 and tr["R"].std() > 0 else 0.0
     
+    account = simulate_account(tr)
+    wins = tr[tr["pnl"] > 0]
+    losses = tr[tr["pnl"] <= 0]
+    profit_factor = (
+        wins["pnl"].sum() / abs(losses["pnl"].sum())
+        if len(losses) > 0 and losses["pnl"].sum() != 0
+        else float("inf") if len(wins) > 0 else 0.0
+    )
+    
     return {
         "trades": tr,
         "metrics": {
@@ -174,6 +202,10 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
             "avg_R": avg_R,
             "total_pnl": total_pnl,
             "max_dd": max_dd,
-            "sharpe": sharpe
+            "sharpe": sharpe,
+            "profit_factor": float(profit_factor) if profit_factor != float("inf") else 99.0,
+            "expectancy_r": account["expectancy_r"],
+            "cagr_pct": account["cagr_pct"],
+            "total_return_pct": account["total_return_pct"],
         }
     }

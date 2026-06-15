@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import time
 import pandas as pd
 import numpy as np
-from indicators.local import ema, atr, zscore
+from indicators.local import ema, atr, zscore, rsi
 from indicators.fibonacci import add_fib_levels_to_df
 from core.models import Timeframe, minutes_to_bars
 from config.settings import settings
@@ -32,6 +32,10 @@ class SellerParams:
     vol_z: float = 2.0
     tr_z: float = 1.2
     cloc_min: float = 0.6
+
+    # Optional: require RSI oversold (filters false exhaustion in strong dumps)
+    rsi_max: float | None = 40.0
+    rsi_window: int = 14
 
 
 def build_features(
@@ -115,6 +119,10 @@ def _build_features_pandas(
         (out["tr_z"] > p.tr_z) &
         (out["cloc"] > p.cloc_min)
     )
+
+    if p.rsi_max is not None:
+        out["rsi"] = rsi(out["close"], p.rsi_window)
+        out["exhaustion"] = out["exhaustion"] & (out["rsi"] < p.rsi_max)
 
     # Add Fibonacci retracement levels
     if add_fib:

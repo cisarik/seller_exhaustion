@@ -70,7 +70,6 @@ class MainWindow(QMainWindow):
         self.current_tf = Timeframe.m15
         self.settings_dialog = None
         self.strategy_editor = None
-        # Removed: evolution_coach_window (now using console logging)
         self.data_provider = DataProvider(use_cache=True)
         self.cache = DataCache(settings.data_dir)
         self.current_ticker = settings.last_ticker
@@ -776,9 +775,6 @@ class MainWindow(QMainWindow):
             from core.logging_utils import configure_logging
             configure_logging(level=getattr(settings, 'ada_agent_log_level', 'INFO'))
             
-            # Reinitialize coach manager with new settings
-            if hasattr(self, 'stats_panel') and hasattr(self.stats_panel, 'reinitialize_coach_manager'):
-                self.stats_panel.reinitialize_coach_manager()
         except Exception:
             pass
 
@@ -1276,9 +1272,6 @@ class MainWindow(QMainWindow):
         # Reload settings to ensure .env values override any stale environment variables
         SettingsManager.reload_settings()
         
-        # Check if coach model is already loaded (on startup)
-        await self._check_coach_model_status_on_startup()
-        
         # Restore window state
         self.restore_window_state()
         
@@ -1334,42 +1327,6 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(200, _maybe_start)
             except Exception as e:
                 logger.exception("Failed to auto-start optimization from file: %s", e)
-    
-    async def _check_coach_model_status_on_startup(self):
-        """Check if Evolution Coach model is already loaded on app startup."""
-        try:
-# Removed import for deleted file
-            # Removed: coach_log_manager (now using console logging)
-            
-            model = settings.coach_model
-            
-            # Create temporary client to check model status
-            # Uses agent.txt automatically (no prompt selection needed)
-            temp_client = GemmaCoachClient(
-                model=model,
-                verbose=False
-            )
-            
-            # Check if model is already loaded
-            is_loaded = await temp_client.check_model_loaded()
-            
-            if is_loaded:
-                # Model already loaded, update button state
-                self.param_editor.set_coach_model_loaded(True)
-                self.chart_view.set_coach_status(f"✅ Model already loaded: {model}")
-                logger.info("✅ Coach model already loaded on startup: %s", model)
-                
-                # Store client for later use
-                self.coach_client = temp_client
-            else:
-                # Model not loaded
-                self.param_editor.set_coach_model_loaded(False)
-                self.chart_view.set_coach_status(f"Ready to load model: {model}")
-                logger.info("Coach model not loaded on startup: %s", model)
-        
-        except Exception as e:
-            # Non-critical, just log and continue
-            logger.debug("Could not check coach model status on startup: %s", e)
     
     def load_parameters_state(self):
         """Load saved parameters from .env into compact editor."""

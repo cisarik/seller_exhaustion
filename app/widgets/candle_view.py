@@ -102,12 +102,6 @@ class CandlestickItem(pg.GraphicsObject):
 class CandleChartWidget(QWidget):
     """Main widget for displaying candlestick charts with indicators."""
     
-    # Signal for immediate status bar reset
-    reset_status_bar_signal = Signal()
-    
-    # Signal for delayed status bar reset
-    delayed_reset_status_bar_signal = Signal()
-    
     # Signal emitted when chart is clicked (for future features)
     chart_clicked = Signal(float, float)
     
@@ -139,10 +133,6 @@ class CandleChartWidget(QWidget):
         }
         
         self.initUI()
-        
-        # Connect signals for status bar reset
-        self.reset_status_bar_signal.connect(self._reset_status_bar)
-        self.delayed_reset_status_bar_signal.connect(self._reset_status_bar)
     
     def initUI(self):
         layout = QVBoxLayout(self)
@@ -240,10 +230,6 @@ class CandleChartWidget(QWidget):
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("background: transparent; color: #4caf50; font-size: 14px; font-weight: bold; padding: 0;")
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.status_label.setCursor(Qt.ArrowCursor)  # Default cursor
-        self.status_label.mousePressEvent = self._on_status_clicked
-        self._coach_analysis = None  # Store latest coach analysis
-        self._status_is_clickable = False
         status_layout.addWidget(self.status_label, stretch=1)
         
         # Progress bar for actions - aligned to the right
@@ -286,175 +272,6 @@ class CandleChartWidget(QWidget):
         self.action_progress.setVisible(False)
         if message:
             self.status_label.setText(message)
-    
-    def set_coach_status(self, message: str, analysis=None, is_recommendation: bool = False):
-        """
-        Update status bar with coach message.
-
-        Args:
-            message: Status message to display
-            analysis: CoachAnalysis object (if recommendations applied)
-            is_recommendation: True if recommendations were applied (shows green bg + clickable)
-        """
-        self._coach_analysis = analysis
-        self._status_is_clickable = is_recommendation and analysis is not None
-
-        if is_recommendation:
-            # Green background, clickable - recommendations applied
-            self.status_label.setStyleSheet("""
-                background-color: #2f5c39;
-                color: #ffffff;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 12px;
-                border-radius: 4px;
-                border: 2px solid #4caf50;
-            """)
-            self.status_label.setCursor(Qt.PointingHandCursor)
-        else:
-            # Check if this is a coach status message to determine background color
-            if message.startswith('🤖') or message.startswith('🧠') or 'Coach' in message:
-                # ALL Coach-related messages - blue background for easy visual identification
-                self.status_label.setStyleSheet("""
-                    background-color: #1565C0;
-                    color: #ffffff;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 6px 10px;
-                    border-radius: 4px;
-                    border: 1px solid #2196f3;
-                """)
-            else:
-                # Normal messages - black background with green text
-                self.status_label.setStyleSheet("""
-                    background-color: #000000;
-                    color: #4caf50;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 6px 10px;
-                    border-radius: 4px;
-                    border: 1px solid #2f5c39;
-                """)
-            self.status_label.setCursor(Qt.ArrowCursor)
-
-        self.status_label.setText(message)
-    
-    def set_coach_tool_status(self, tool_name: str, reason: str = "", result: str = ""):
-        """
-        Update status bar with coach tool execution details.
-
-        Args:
-            tool_name: Name of the tool being called
-            reason: Reason for calling the tool
-            result: Result or response from the tool
-        """
-        # Build status message with better UX
-        if tool_name.startswith('OpenAI_'):
-            # OpenAI Agents mode - show more detailed progress
-            tool_display = tool_name.replace('OpenAI_', '').replace('_', ' ').title()
-            message_parts = [f"🤖 OpenAI Coach: {tool_display}"]
-
-            if reason:
-                # Show reason in a more readable format
-                if reason == "analyzing_population":
-                    message_parts.append("(analyzing population)")
-                elif reason == "applying_recommendations":
-                    message_parts.append("(applying changes)")
-                else:
-                    message_parts.append(f"({reason})")
-
-            if result:
-                # Truncate long results but show key info
-                if len(result) > 80:
-                    result = result[:77] + "..."
-                message_parts.append(f"→ {result}")
-
-            message = " ".join(message_parts)
-
-            # Set blue background for OpenAI tool execution
-            self.status_label.setStyleSheet("""
-                background-color: #1e3a5f;
-                color: #ffffff;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 10px;
-                border-radius: 3px;
-                border: 1px solid #2196f3;
-            """)
-
-        else:
-            # Classic Coach mode - simpler display
-            message_parts = [f"🧠 Coach: {tool_name}"]
-
-            if reason:
-                message_parts.append(f"({reason})")
-
-            if result:
-                # Truncate long results
-                if len(result) > 100:
-                    result = result[:97] + "..."
-                message_parts.append(f"→ {result}")
-
-            message = " ".join(message_parts)
-
-            # Set green background for Classic Coach
-            self.status_label.setStyleSheet("""
-                background-color: #2e5c39;
-                color: #ffffff;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 10px;
-                border-radius: 3px;
-                border: 1px solid #4caf50;
-            """)
-
-        self.status_label.setCursor(Qt.ArrowCursor)
-        self._status_is_clickable = False
-        self._coach_analysis = None
-
-        self.status_label.setText(message)
-
-        # Schedule status bar reset using Signal or QTimer
-        if tool_name.startswith('✅ Coach completed'):
-            # Hide status bar immediately when coach analysis is completed using Signal
-            self.reset_status_bar_signal.emit()
-            # print(f"🔍 DEBUG: Hiding blue status bar immediately - coach analysis completed")
-        else:
-            # Use thread-safe method to schedule status bar reset
-            from PySide6.QtCore import QMetaObject, Q_ARG, Qt
-            # Schedule status bar reset in main thread after 5 seconds
-            QMetaObject.invokeMethod(
-                self,
-                "_schedule_status_bar_reset",
-                Qt.QueuedConnection,
-                Q_ARG(int, 5000)  # 5 seconds delay
-            )
-    
-    def _schedule_status_bar_reset(self, delay_ms: int):
-        """Schedule status bar reset with delay (called from main thread)."""
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(delay_ms, self._reset_status_bar)
-    
-    def _reset_status_bar(self):
-        """Reset status bar to normal appearance (black with green text)."""
-        self.status_label.setStyleSheet("""
-            background-color: #000000;
-            color: #4caf50;
-            font-size: 14px;
-            font-weight: bold;
-            padding: 6px 10px;
-            border-radius: 4px;
-            border: 1px solid #2f5c39;
-        """)
-        self.status_label.setCursor(Qt.ArrowCursor)
-        self._status_is_clickable = False
-        self._coach_analysis = None
-    
-    def _on_status_clicked(self, event):
-        """Handle status label click - show coach recommendations if available."""
-        if self._status_is_clickable and self._coach_analysis:
-            from app.widgets.coach_recommendations_dialog import show_coach_recommendations
-            show_coach_recommendations(self._coach_analysis, parent=self)
     
     def set_indicator_config(self, config):
         """Update indicator configuration and re-render."""
@@ -886,7 +703,7 @@ class CandleChartWidget(QWidget):
             exit_x: Exit timestamp in epoch seconds
             entry_y: Entry price
         """
-        from PySide6.QtCore import QRectF, Qt
+        from PySide6.QtCore import QRectF
         from PySide6.QtGui import QPen, QBrush
         
         # Find swing high before entry

@@ -1,7 +1,8 @@
 import pytest
 import pandas as pd
 import numpy as np
-from backtest.engine import run_backtest, BacktestParams
+from backtest.engine import run_backtest
+from core.models import BacktestParams
 from strategy.seller_exhaustion import build_features, SellerParams
 
 

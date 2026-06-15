@@ -1,56 +1,28 @@
 """
-Multi-core CPU optimizer - Correct and Fast.
-
-Uses multiprocessing to evaluate population in parallel.
-GUARANTEES correctness by using exact same code as single-threaded CPU.
+Multi-core evolution step — thin wrapper around parallel evaluation + GA logic.
 """
 
-import multiprocessing as mp
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Optional
+
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Dict, Any
-from copy import deepcopy
-from tqdm import tqdm
 
 from backtest.optimizer import (
-    Individual, Population, get_param_bounds_for_timeframe,
-    tournament_selection, crossover, mutate_individual,
-    calculate_fitness
+    Population,
+    crossover,
+    get_param_bounds_for_timeframe,
+    mutate_individual,
+    tournament_selection,
 )
-from strategy.seller_exhaustion import SellerParams, build_features
-from backtest.engine import run_backtest
-from core.models import BacktestParams, Timeframe, FitnessConfig
+from backtest.parallel import evaluate_population_parallel
 from core.logging_utils import get_logger
+from core.models import FitnessConfig, OptimizationConfig, Timeframe
 from config.settings import settings
 
 logger = get_logger(__name__)
-
-
-def evaluate_individual_worker(args: Tuple) -> Tuple[int, float, Dict[str, Any]]:
-    """
-    Worker function for multiprocessing.
-    
-    Pure CPU evaluation using pandas feature pipeline.
-    """
-    idx, seller_params, backtest_params, data_dict, tf, fitness_config = args
-    
-    # Reconstruct DataFrame from dict (passed through pickle)
-    data = pd.DataFrame(data_dict['values'], index=data_dict['index'], columns=data_dict['columns'])
-    
-    try:
-        feats = build_features(data, seller_params, tf)
-        result = run_backtest(feats, backtest_params)
-        fitness = calculate_fitness(result['metrics'], fitness_config)
-        return idx, fitness, result['metrics']
-    except Exception:
-        # Return penalty fitness on error
-        return idx, -100.0, {
-            'n': 0,
-            'win_rate': 0.0,
-            'avg_R': 0.0,
-            'total_pnl': 0.0,
-            'max_dd': 0.0
-        }
 
 
 def evolution_step_multicore(
@@ -58,142 +30,99 @@ def evolution_step_multicore(
     data: pd.DataFrame,
     tf: Timeframe = Timeframe.m15,
     fitness_config: FitnessConfig = None,
-    mutation_rate: float = 0.3,
-    sigma: float = 0.1,
-    elite_fraction: float = 0.1,
-    tournament_size: int = 3,
-    mutation_probability: float = 0.9,
-    n_workers: int = None
+    ga_config: OptimizationConfig = None,
+    mutation_rate: float = None,
+    sigma: float = None,
+    elite_fraction: float = None,
+    tournament_size: int = None,
+    mutation_probability: float = None,
+    n_workers: int = None,
 ) -> Population:
-    """
-    Multi-core evolution step.
-    
-    Same genetic algorithm as CPU, but evaluates population in parallel.
-    GUARANTEES correctness by using exact CPU functions.
-    
-    Args:
-        population: Current population
-        data: Historical OHLCV data
-        tf: Timeframe
-        fitness_config: Fitness configuration
-        mutation_rate: Mutation rate
-        sigma: Mutation strength
-        elite_fraction: Elite fraction
-        tournament_size: Tournament size
-        mutation_probability: Mutation probability
-        n_workers: Number of worker processes (default: CPU count)
-    
-    Returns:
-        New population for next generation
-    """
+    """One GA generation with parallel fitness evaluation."""
+    if ga_config is None:
+        ga_config = OptimizationConfig(
+            mutation_rate=mutation_rate or 0.3,
+            sigma=sigma or 0.1,
+            elite_fraction=elite_fraction or 0.1,
+            tournament_size=tournament_size or 3,
+            mutation_probability=mutation_probability or 0.9,
+        )
+
     pop_size = population.size
-    
-    if n_workers is None:
-        n_workers = mp.cpu_count()
-    
-    # Step 1: Evaluate unevaluated individuals in parallel
-    logger.info("[Gen %s] Multi-core evolution (%s workers)", population.generation, n_workers)
-    unevaluated = [ind for ind in population.individuals if ind.fitness == 0.0]
-    
-    if unevaluated:
-        logger.info("[Gen %s] Evaluating %s individuals on %s cores", population.generation, len(unevaluated), n_workers)
-        
-        # Convert DataFrame to dict for pickling
-        data_dict = {
-            'values': data.values,
-            'index': data.index,
-            'columns': data.columns.tolist()
-        }
-        
-        # Prepare arguments for workers
-        args_list = [
-            (i, ind.seller_params, ind.backtest_params, data_dict, tf, fitness_config)
-            for i, ind in enumerate(unevaluated)
-        ]
-        
-        # Parallel evaluation (use spawn to avoid Qt fork deadlocks)
-        try:
-            ctx = mp.get_context("spawn")
-        except ValueError:
-            # Fallback to default context if spawn unsupported
-            ctx = mp.get_context()
-        with ctx.Pool(processes=n_workers) as pool:
-            with tqdm(total=len(args_list), desc=f"Gen {population.generation} eval", unit="ind", leave=False, disable=not getattr(settings, 'log_progress_bars', True)) as pbar:
-                for idx, fitness, metrics in pool.imap_unordered(evaluate_individual_worker, args_list):
-                    ind = unevaluated[idx]
-                    ind.fitness = float(fitness)
-                    ind.metrics = metrics
-                    pbar.update(1)
-    
-    # Update best ever
+    current_gen = population.generation
+
+    if ga_config.override_bounds:
+        population.apply_bounds_override(ga_config.override_bounds)
+
+    evaluate_population_parallel(
+        population.individuals,
+        data,
+        tf,
+        fitness_config=fitness_config,
+        generation=current_gen,
+        n_workers=n_workers,
+    )
+
     current_best = population.get_best()
     if population.best_ever is None or current_best.fitness > population.best_ever.fitness:
         population.best_ever = deepcopy(current_best)
-        logger.info("[Gen %s] New best fitness = %.4f", population.generation, current_best.fitness)
-    
-    # Population statistics
+        logger.info("[Gen %s] New best fitness = %.4f", current_gen, current_best.fitness)
+
     stats = population.get_stats()
     logger.info(
         "[Gen %s] Pop: mean=%.4f std=%.4f best=%.4f",
-        population.generation,
-        stats['mean_fitness'], stats['std_fitness'], stats['max_fitness']
+        current_gen,
+        stats["mean_fitness"],
+        stats["std_fitness"],
+        stats["max_fitness"],
     )
-    
-    # Record history
+
     population.history.append({
-        'generation': population.generation,
-        'best_fitness': stats['max_fitness'],
-        'mean_fitness': stats['mean_fitness'],
-        'std_fitness': stats['std_fitness'],
+        "generation": current_gen,
+        "best_fitness": stats["max_fitness"],
+        "mean_fitness": stats["mean_fitness"],
+        "std_fitness": stats["std_fitness"],
     })
-    
-    # Steps 2-5: Same genetic operations as single-threaded CPU
-    # (Selection, crossover, mutation don't need parallelization)
-    
-    # Step 2: Selection
-    parents = [tournament_selection(population.individuals, tournament_size) for _ in range(pop_size)]
-    
-    # Step 3: Crossover
+
+    import random
+
+    parents = [tournament_selection(population.individuals, ga_config.tournament_size) for _ in range(pop_size)]
+
     offspring = []
     for i in range(0, pop_size, 2):
         if i + 1 < pop_size:
-            child1, child2 = crossover(parents[i], parents[i + 1])
+            child1, child2 = crossover(parents[i], parents[i + 1], generation=current_gen + 1)
             offspring.extend([child1, child2])
         else:
             offspring.append(deepcopy(parents[i]))
-    
+
     offspring = offspring[:pop_size]
-    
-    # Step 4: Mutation
-    import random
     bounds = population.bounds if hasattr(population, "bounds") else get_param_bounds_for_timeframe(tf)
+
     for child in offspring:
-        if random.random() < mutation_probability:
+        if random.random() < ga_config.mutation_probability:
             mutated = mutate_individual(
                 child,
                 bounds,
-                mutation_rate,
-                sigma,
-                population.generation + 1
+                ga_config.mutation_rate,
+                ga_config.sigma,
+                current_gen + 1,
             )
             child.seller_params = mutated.seller_params
             child.backtest_params = mutated.backtest_params
             child.fitness = 0.0
-    
-    # Step 5: Elitism
-    n_elite = max(1, int(pop_size * elite_fraction))
+
+    n_elite = max(1, int(pop_size * ga_config.elite_fraction))
     sorted_pop = sorted(population.individuals, key=lambda x: x.fitness, reverse=True)
     elite = sorted_pop[:n_elite]
-    
     offspring[-n_elite:] = [deepcopy(ind) for ind in elite]
-    
-    # Create new population
+
     new_population = Population(size=pop_size, timeframe=population.timeframe)
     new_population.individuals = offspring
-    new_population.generation = population.generation + 1
+    new_population.generation = current_gen + 1
     new_population.best_ever = population.best_ever
     new_population.history = population.history
     new_population.bounds = population.bounds
     new_population.timeframe = population.timeframe
-    
+
     return new_population

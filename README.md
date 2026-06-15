@@ -1,11 +1,29 @@
-# Seller-Exhaustion Entry - Fibonacci Exit Trading strategy Optimization Tool
+# Seller-Exhaustion Backtesting Tool
 
-**Multi-timeframe strategy research, backtesting, and optimization**
+**Multi-timeframe strategy research, backtesting, and CPU-parallel genetic optimization**
 
-A complete strategy development platform with Fibonacci-based exits, parameter optimization, and **strategy export for live trading**.
+> **v4.0 restart (2026)**: Removed failed experiments — GPU/torch path, ADAM optimizer, Evolution Coach / LLM agents (~15k LOC). Core pipeline is now **CPython + pandas + multiprocessing** only.
 
 **🚨 IMPORTANT**: This is a BACKTESTING tool, not a live trading application.  
 For live trading, export your strategy using **💾 Export Strategy** and use the separate trading agent (see **PRD_TRADING_AGENT.md**).
+
+### Stack (CPU-first)
+| Layer | Technology |
+|-------|------------|
+| Features / indicators | pandas, numpy (vectorized) |
+| Backtest | Event-driven engine (`backtest/engine.py`) |
+| Optimizer | Genetic algorithm with `multiprocessing` pool (`backtest/parallel.py`) |
+| UI | PySide6 + PyQtGraph (optional) |
+| CLI | Typer + Rich |
+
+```bash
+poetry install
+poetry run pytest tests/ -q          # 32 tests, no GPU/API required
+poetry run python cli.py backtest --data .data/your_cache.parquet --tf 15m
+poetry run python cli.py optimize --data .data/your_cache.parquet --tf 15m -g 25
+```
+
+Set `OPTIMIZER_WORKERS=1` in `.env` for single-threaded GA evaluation (useful for debugging).
 
 ---
 

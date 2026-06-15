@@ -313,5 +313,175 @@ def optimize(
     asyncio.run(_run())
 
 
+@app.command("compare-strategies")
+def compare_strategies(
+    data: str = typer.Option(..., help="Path to cached OHLCV parquet/pkl"),
+    tf: Timeframe = typer.Option("60m", "--tf", case_sensitive=False, help="Timeframe"),
+    walk_forward: bool = typer.Option(True, help="Run walk-forward on best strategy"),
+):
+    """Compare all registered strategies on the same data (profit-focused)."""
+    from backtest.compare import compare_all, walk_forward_compare
+    from rich.table import Table
+
+    if data.endswith(".parquet"):
+        df = pd.read_parquet(data)
+    elif data.endswith((".pkl", ".pickle")):
+        df = pd.read_pickle(data)
+    else:
+        raise typer.BadParameter("Use .parquet or .pkl")
+
+    if df.index.name == "ts":
+        df.index = pd.to_datetime(df.index, utc=True)
+
+    console.print(f"[cyan]Comparing strategies on {len(df)} bars ({tf.value})...[/cyan]")
+    bt = BacktestParams()
+    results = compare_all(df, tf, bt)
+
+    table = Table(title="Strategy Comparison (sorted by profit score)")
+    for col in ("name", "signals", "trades", "win_rate", "total_pnl", "expectancy_r", "cagr_pct", "profit_score"):
+        table.add_column(col)
+    for _, row in results.iterrows():
+        table.add_row(
+            str(row["name"]),
+            str(int(row["signals"])),
+            str(int(row["trades"])),
+            f"{row['win_rate']:.0%}",
+            f"{row['total_pnl']:+.4f}",
+            f"{row['expectancy_r']:.3f}",
+            f"{row['cagr_pct']:+.1f}%",
+            f"{row['profit_score']:.3f}",
+        )
+    console.print(table)
+
+    best_id = results.iloc[0]["strategy_id"]
+    console.print(f"\n[bold green]Best:[/bold green] {results.iloc[0]['name']} (score={results.iloc[0]['profit_score']:.3f})")
+
+    if walk_forward:
+        console.print(f"\n[cyan]Walk-forward validation: {best_id}[/cyan]")
+        for fold in walk_forward_compare(df, best_id, tf, bt):
+            console.print(
+                f"  Fold {fold['fold']}: trades={fold['trades']} pnl={fold['total_pnl']:+.4f} "
+                f"wr={fold['win_rate']:.0%} CAGR={fold['cagr_pct']:+.1f}%"
+            )
+
+
+@app.command("fetch-15m")
+def fetch_15m(
+    ticker: str = typer.Option("X:ADAUSD"),
+    from_date: str = typer.Option("2025-01-17", "--from"),
+    to_date: str = typer.Option("2025-10-23", "--to"),
+    force: bool = typer.Option(False, help="Force re-download"),
+):
+    """Download and cache 15m bars (recommended for strategy research)."""
+
+    async def _run():
+        dp = DataProvider()
+        try:
+            df = await dp.fetch(ticker, Timeframe.m15, from_date, to_date, force_download=force)
+            console.print(f"[green]✓ Cached {len(df)} bars[/green] | {df.index[0]} → {df.index[-1]}")
+        finally:
+            await dp.close()
+
+    asyncio.run(_run())
+
+
+@app.command("optimize-strategies")
+def optimize_strategies(
+    data: str = typer.Option(..., help="15m parquet path"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    generations: int = typer.Option(15, "-g"),
+    population: int = typer.Option(12, "-p"),
+    train_ratio: float = typer.Option(0.7, help="Train fraction (rest = OOS holdout)"),
+):
+    """GA optimize each of 3 strategies on TRAIN only; validate on OOS; save configs."""
+    from backtest.strategy_ga import (
+        OPTIMIZABLE_STRATEGIES,
+        run_strategy_ga,
+        split_train_oos,
+        evaluate_oos,
+        evaluate_strategy_individual,
+    )
+    from exec.paper_trader import save_optimized_config
+    from core.models import FitnessConfig
+
+    df = _load_dataframe(data)
+    train, oos = split_train_oos(df, train_ratio)
+    console.print(f"[cyan]Train: {len(train)} bars | OOS: {len(oos)} bars[/cyan]")
+    fitness = FitnessConfig.get_preset_config("profit_focused")
+
+    table = Table(title="Per-Strategy GA (train → OOS)")
+    table.add_column("strategy")
+    table.add_column("train_n")
+    table.add_column("train_pnl")
+    table.add_column("oos_n")
+    table.add_column("oos_pnl")
+    table.add_column("oos_cagr")
+
+    for sid in OPTIMIZABLE_STRATEGIES:
+        console.print(f"\n[bold]Optimizing {sid}...[/bold]")
+        pop = run_strategy_ga(sid, train, tf, generations=generations, population_size=population, fitness_config=fitness)
+        best = pop.best_ever or pop.get_best()
+        _, train_m = evaluate_strategy_individual(sid, best, train, tf, fitness)
+        oos_m = evaluate_oos(sid, best, oos, tf)
+        save_optimized_config(sid, best, tf, train_m, oos_m)
+        table.add_row(
+            sid,
+            str(train_m.get("n", 0)),
+            f"{train_m.get('total_pnl', 0):+.4f}",
+            str(oos_m.get("n", 0)),
+            f"{oos_m.get('total_pnl', 0):+.4f}",
+            f"{oos_m.get('cagr_pct', 0):+.1f}%",
+        )
+    console.print(table)
+    console.print("[green]✓ Saved to strategies_optimized/[/green]")
+
+
+@app.command("regime-update")
+def regime_update(
+    data: str = typer.Option(..., help="OHLCV parquet for weekly summary"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    force: bool = typer.Option(False),
+):
+    """Update weekly LLM/deterministic regime gate (REGIME_LLM_MODEL, default gpt-4o-mini)."""
+    from strategy.regime_weekly import update_weekly_regime
+
+    df = _load_dataframe(data)
+    entry = update_weekly_regime(df, tf, force=force)
+    console.print(f"[green]Week {entry['week']}[/green] label={entry['label']} score={entry['score']:.3f}")
+    console.print(f"  min_regime_score={entry['min_regime_score']} | {entry['reason'][:120]}")
+
+
+@app.command("paper-forward")
+def paper_forward(
+    data: str = typer.Option(..., help="OHLCV parquet (uses last N days as forward test)"),
+    strategy: str = typer.Option("seller_aggressive", help="Strategy id"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    days: int = typer.Option(30, help="Forward window in days"),
+    use_regime: bool = typer.Option(True, help="Apply weekly regime gate"),
+):
+    """Paper forward test on holdout window using pre-optimized config (no re-fit)."""
+    from exec.paper_trader import run_paper_forward
+
+    df = _load_dataframe(data)
+    result = run_paper_forward(df, strategy, tf, min_days=days, use_regime_gate=use_regime)
+    m = result["metrics"]
+    a = result["account"]
+    console.print(f"[bold]{strategy}[/bold] forward {days}d: {result['n_trades']} trades")
+    console.print(f"  PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} CAGR={a.get('cagr_pct', 0):+.1f}%")
+    console.print(f"  Logged → .data/paper_trades.jsonl")
+
+
+def _load_dataframe(path: str) -> pd.DataFrame:
+    if path.endswith(".parquet"):
+        df = pd.read_parquet(path)
+    elif path.endswith((".pkl", ".pickle")):
+        df = pd.read_pickle(path)
+    else:
+        raise typer.BadParameter("Use .parquet or .pkl")
+    if df.index.name == "ts":
+        df.index = pd.to_datetime(df.index, utc=True)
+    return df
+
+
 if __name__ == "__main__":
     app()

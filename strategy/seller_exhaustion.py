@@ -124,6 +124,8 @@ def _build_features_pandas(
         out["rsi"] = rsi(out["close"], p.rsi_window)
         out["exhaustion"] = out["exhaustion"] & (out["rsi"] < p.rsi_max)
 
+    out["signal"] = out["exhaustion"]
+
     # Add Fibonacci retracement levels
     if add_fib:
         out = add_fib_levels_to_df(

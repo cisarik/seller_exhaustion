@@ -52,3 +52,14 @@ def zscore(s: pd.Series, window: int) -> pd.Series:
     m = s.rolling(window, min_periods=window).mean()
     sd = s.rolling(window, min_periods=window).std(ddof=0)
     return (s - m) / sd
+
+
+def bollinger_bands(close: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.DataFrame:
+    """Bollinger Bands: mid, upper, lower."""
+    mid = sma(close, window)
+    sd = close.rolling(window, min_periods=window).std(ddof=0)
+    return pd.DataFrame({
+        "mid": mid,
+        "upper": mid + num_std * sd,
+        "lower": mid - num_std * sd,
+    })

@@ -18,6 +18,13 @@ FIB_LEVEL_TO_COL = {
 }
 
 
+def _has_entry_signal(row: pd.Series) -> bool:
+    """Entry signal from canonical `signal` column or legacy `exhaustion`."""
+    if "signal" in row.index:
+        return bool(row.get("signal", False))
+    return bool(row.get("exhaustion", False))
+
+
 def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
     """
     Run event-driven backtest with optional exits.
@@ -47,7 +54,7 @@ def run_backtest(df: pd.DataFrame, p: BacktestParams) -> Dict[str, Any]:
         row = d.loc[t]
         nxt_row = d.loc[nxt]
         
-        if not in_pos and bool(row.get("exhaustion", False)):
+        if not in_pos and _has_entry_signal(row):
             # Entry at next bar open
             entry = float(nxt_row["open"])
             entry_ts = t

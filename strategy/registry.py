@@ -25,6 +25,12 @@ def _register():
     from strategy import mean_reversion
     from strategy import vol_squeeze
     from strategy import fusion
+    from strategy import capitulation_reversal
+    from strategy import liquidity_sweep
+    from strategy import divergence_bounce
+    from strategy import fusion_v2
+    from strategy import panic_floor
+    from strategy import depth_charge
 
     STRATEGIES["seller_classic"] = _entry(
         StrategyMeta(
@@ -46,6 +52,12 @@ def _register():
     STRATEGIES["mean_reversion"] = _entry(mean_reversion.META, mean_reversion.build_features)
     STRATEGIES["vol_squeeze"] = _entry(vol_squeeze.META, vol_squeeze.build_features)
     STRATEGIES["fusion"] = _entry(fusion.META, fusion.build_features)
+    STRATEGIES["capitulation_reversal"] = _entry(capitulation_reversal.META, capitulation_reversal.build_features)
+    STRATEGIES["liquidity_sweep"] = _entry(liquidity_sweep.META, liquidity_sweep.build_features)
+    STRATEGIES["divergence_bounce"] = _entry(divergence_bounce.META, divergence_bounce.build_features)
+    STRATEGIES["fusion_v2"] = _entry(fusion_v2.META, fusion_v2.build_features)
+    STRATEGIES["panic_floor"] = _entry(panic_floor.META, panic_floor.build_features)
+    STRATEGIES["depth_charge"] = _entry(depth_charge.META, depth_charge.build_features)
 
 
 _register()

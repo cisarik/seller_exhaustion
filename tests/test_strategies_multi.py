@@ -64,7 +64,7 @@ def test_fusion_runs_backtest(ohlcv):
 
 def test_compare_all_returns_sorted(ohlcv):
     df = compare_all(ohlcv, Timeframe.m60)
-    assert len(df) == 5
+    assert len(df) == 11
     assert "profit_score" in df.columns
     assert df["profit_score"].is_monotonic_decreasing
 

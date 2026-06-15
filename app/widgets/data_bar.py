@@ -26,6 +26,7 @@ class DataBar(QWidget):
     # Signals
     download_requested = Signal(str, str, str)  # from_date, to_date, timeframe_key
     timeframe_changed = Signal(str)  # Emits timeframe key like "15m"
+    strategy_changed = Signal(str)  # strategy registry id
     
     def __init__(self):
         super().__init__()
@@ -114,10 +115,41 @@ class DataBar(QWidget):
         """)
         self.download_btn.clicked.connect(self._on_download_clicked)
         layout.addWidget(self.download_btn)
+
+        strategy_label = QLabel("Strategy:")
+        strategy_label.setStyleSheet("font-weight: bold; color: #4caf50;")
+        layout.addWidget(strategy_label)
+
+        self.strategy_combo = QComboBox()
+        self._populate_strategies()
+        self.strategy_combo.setFixedWidth(200)
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_changed)
+        layout.addWidget(self.strategy_combo)
         
         # Stretch to fill remaining space
         layout.addStretch()
     
+    def _populate_strategies(self):
+        try:
+            from strategy.runner import available_strategies, DEFAULT_STRATEGY
+            self.strategy_combo.clear()
+            default_idx = 0
+            for i, meta in enumerate(available_strategies()):
+                self.strategy_combo.addItem(meta.name, meta.id)
+                if meta.id == DEFAULT_STRATEGY:
+                    default_idx = i
+            self.strategy_combo.setCurrentIndex(default_idx)
+        except Exception:
+            self.strategy_combo.addItem("Seller Exhaustion Classic", "seller_classic")
+
+    def _on_strategy_changed(self, _index: int):
+        sid = self.strategy_combo.currentData()
+        if sid:
+            self.strategy_changed.emit(sid)
+
+    def get_strategy_id(self) -> str:
+        return self.strategy_combo.currentData() or "depth_charge"
+
     def load_defaults(self):
         """Load default values from settings."""
         from config.settings import settings

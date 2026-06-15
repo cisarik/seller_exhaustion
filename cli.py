@@ -392,10 +392,11 @@ def optimize_strategies(
     generations: int = typer.Option(15, "-g"),
     population: int = typer.Option(12, "-p"),
     train_ratio: float = typer.Option(0.7, help="Train fraction (rest = OOS holdout)"),
+    round: int = typer.Option(2, help="Strategy round: 1=original trio, 2=new trio"),
 ):
-    """GA optimize each of 3 strategies on TRAIN only; validate on OOS; save configs."""
+    """GA optimize each strategy on TRAIN only; validate on OOS; save configs."""
     from backtest.strategy_ga import (
-        OPTIMIZABLE_STRATEGIES,
+        get_optimizable_strategies,
         run_strategy_ga,
         split_train_oos,
         evaluate_oos,
@@ -404,12 +405,13 @@ def optimize_strategies(
     from exec.paper_trader import save_optimized_config
     from core.models import FitnessConfig
 
+    strategies = get_optimizable_strategies(round)
     df = _load_dataframe(data)
     train, oos = split_train_oos(df, train_ratio)
-    console.print(f"[cyan]Train: {len(train)} bars | OOS: {len(oos)} bars[/cyan]")
+    console.print(f"[cyan]Round {round} | Train: {len(train)} bars | OOS: {len(oos)} bars[/cyan]")
     fitness = FitnessConfig.get_preset_config("profit_focused")
 
-    table = Table(title="Per-Strategy GA (train → OOS)")
+    table = Table(title=f"Per-Strategy GA round {round} (train → OOS)")
     table.add_column("strategy")
     table.add_column("train_n")
     table.add_column("train_pnl")
@@ -417,7 +419,7 @@ def optimize_strategies(
     table.add_column("oos_pnl")
     table.add_column("oos_cagr")
 
-    for sid in OPTIMIZABLE_STRATEGIES:
+    for sid in strategies:
         console.print(f"\n[bold]Optimizing {sid}...[/bold]")
         pop = run_strategy_ga(sid, train, tf, generations=generations, population_size=population, fitness_config=fitness)
         best = pop.best_ever or pop.get_best()
@@ -434,6 +436,79 @@ def optimize_strategies(
         )
     console.print(table)
     console.print("[green]✓ Saved to strategies_optimized/[/green]")
+
+
+@app.command("tune-depth-charge")
+def tune_depth_charge_cmd(
+    data: str = typer.Option(..., help="15m parquet path"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    train_ratio: float = typer.Option(0.7),
+):
+    """Tune Depth Charge tri-channel engine (OOS-weighted grid, no GA)."""
+    from backtest.depth_tune import tune_depth_charge
+    from backtest.strategy_ga import split_train_oos
+
+    df = _load_dataframe(data)
+    train, oos = split_train_oos(df, train_ratio)
+    console.print(f"[cyan]Depth Charge tune | train={len(train)} oos={len(oos)}[/cyan]")
+    best = tune_depth_charge(train, oos, tf)
+    dp = best["params"]
+    console.print(f"  conviction>={dp.min_conviction:.2f} floor={dp.floor_pct:.2f} vol_pct={dp.vol_pctile_min:.2f}")
+    console.print(f"  Train: n={best['train'].get('n',0)} pnl={best['train'].get('total_pnl',0):+.4f}")
+    console.print(f"  OOS:   n={best['oos'].get('n',0)} pnl={best['oos'].get('total_pnl',0):+.4f} score={best['oos_score']:.3f}")
+    console.print("[green]✓ strategies_optimized/depth_charge_params.json[/green]")
+
+
+@app.command("tune-fusion")
+def tune_fusion(
+    data: str = typer.Option(..., help="15m parquet path"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    train_ratio: float = typer.Option(0.7),
+):
+    """Grid-tune Fusion V2 + Panic Floor (fast, OOS-weighted, no GA)."""
+    from backtest.fusion_tune import tune_fusion_v2, tune_panic_floor
+    from backtest.strategy_ga import split_train_oos
+    from strategy.fusion_v2 import build_features as build_fv2, load_fusion_params
+    from strategy.panic_floor import build_features as build_panic
+    from backtest.engine import run_backtest
+    from backtest.profit import simulate_account
+
+    df = _load_dataframe(data)
+    train, oos = split_train_oos(df, train_ratio)
+    console.print(f"[cyan]Tuning on train={len(train)} / oos={len(oos)} bars[/cyan]")
+
+    console.print("\n[bold]Fusion V2 grid search...[/bold]")
+    fv2 = tune_fusion_v2(train, oos, tf)
+    fp, bt = load_fusion_params()
+    console.print(f"  Best: agreement={fp.min_agreement} conf={fp.min_confidence:.2f} "
+                  f"oversold={fp.require_oversold} floor={fp.oversold_pct:.3f}")
+    console.print(f"  Train: n={fv2['train'].get('n',0)} pnl={fv2['train'].get('total_pnl',0):+.4f}")
+    console.print(f"  OOS:   n={fv2['oos'].get('n',0)} pnl={fv2['oos'].get('total_pnl',0):+.4f} "
+                  f"score={fv2['oos_score']:.3f}")
+
+    console.print("\n[bold]Panic Floor grid search...[/bold]")
+    pf = tune_panic_floor(train, oos, tf)
+    pp = pf["params"]
+    console.print(f"  Best: floor={pp.floor_pct:.3f} vol_pctile={pp.vol_pctile_min:.2f} rsi<{pp.rsi_max}")
+    console.print(f"  Train: n={pf['train'].get('n',0)} pnl={pf['train'].get('total_pnl',0):+.4f}")
+    console.print(f"  OOS:   n={pf['oos'].get('n',0)} pnl={pf['oos'].get('total_pnl',0):+.4f}")
+
+    table = Table(title="Elite stack OOS comparison")
+    table.add_column("strategy")
+    table.add_column("trades")
+    table.add_column("pnl")
+    table.add_column("win_rate")
+    table.add_column("profit_factor")
+    for sid, metrics in [("fusion_v2", fv2["oos"]), ("panic_floor", pf["oos"])]:
+        table.add_row(
+            sid,
+            str(metrics.get("n", 0)),
+            f"{metrics.get('total_pnl', 0):+.4f}",
+            f"{metrics.get('win_rate', 0):.0%}",
+            f"{metrics.get('profit_factor', 0):.2f}",
+        )
+    console.print(table)
+    console.print("[green]✓ Fusion V2 params → strategies_optimized/fusion_v2_params.json[/green]")
 
 
 @app.command("regime-update")
@@ -461,6 +536,36 @@ def paper_forward(
 ):
     """Paper forward test on holdout window using pre-optimized config (no re-fit)."""
     from exec.paper_trader import run_paper_forward
+
+    if strategy == "fusion_v2":
+        from strategy.fusion_v2 import build_features as build_fv2, load_fusion_params
+        from backtest.engine import run_backtest
+        from backtest.profit import simulate_account
+        from strategy.regime_weekly import get_current_regime_gate
+        import json
+        from datetime import datetime, timezone
+
+        fp, bt = load_fusion_params()
+        bar_minutes = 15
+        bars_per_day = 1440 // bar_minutes
+        min_bars = days * bars_per_day
+        df = _load_dataframe(data)
+        forward_df = df.iloc[-min_bars:].copy()
+        feats = build_fv2(forward_df, fp, tf, bt)
+        result = run_backtest(feats, bt)
+        account = simulate_account(result["trades"])
+        m = result["metrics"]
+        console.print(f"[bold]fusion_v2[/bold] forward {days}d: {m.get('n',0)} trades")
+        console.print(f"  PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} CAGR={account.get('cagr_pct', 0):+.1f}%")
+        record = {"ts": datetime.now(timezone.utc).isoformat(), "strategy_id": "fusion_v2",
+                  "metrics": m, "account": {k: v for k, v in account.items() if k != "equity_curve"}}
+        from pathlib import Path
+        log = Path(".data/paper_trades.jsonl")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+        console.print(f"  Logged → .data/paper_trades.jsonl")
+        return
 
     df = _load_dataframe(data)
     result = run_paper_forward(df, strategy, tf, min_days=days, use_regime_gate=use_regime)

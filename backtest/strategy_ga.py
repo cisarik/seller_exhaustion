@@ -24,10 +24,19 @@ from core.models import BacktestParams, FitnessConfig, Timeframe
 from strategy.registry import build
 from strategy.seller_exhaustion import SellerParams
 from strategy import seller_aggressive, mean_reversion, vol_squeeze
+from strategy import capitulation_reversal, liquidity_sweep, divergence_bounce
 from strategy.mean_reversion import MeanReversionParams
 from strategy.vol_squeeze import VolSqueezeParams
+from strategy.capitulation_reversal import CapitulationParams
+from strategy.liquidity_sweep import LiquiditySweepParams
+from strategy.divergence_bounce import DivergenceParams
 
 OPTIMIZABLE_STRATEGIES = ("seller_aggressive", "mean_reversion", "vol_squeeze")
+OPTIMIZABLE_STRATEGIES_V2 = ("capitulation_reversal", "liquidity_sweep", "divergence_bounce")
+
+
+def get_optimizable_strategies(round: int = 1) -> tuple[str, ...]:
+    return OPTIMIZABLE_STRATEGIES_V2 if round == 2 else OPTIMIZABLE_STRATEGIES
 
 
 def individual_to_features(
@@ -61,6 +70,43 @@ def individual_to_features(
             cloc_min=sp.cloc_min,
         )
         return vol_squeeze.build_features(data, params, tf, bt)
+    if strategy_id == "capitulation_reversal":
+        params = CapitulationParams(
+            ema_fast=sp.ema_fast,
+            ema_slow=sp.ema_slow,
+            z_window=sp.z_window,
+            atr_window=sp.atr_window,
+            vol_z_min=max(1.0, min(3.5, sp.vol_z)),
+            wick_min=max(0.30, min(0.60, 0.28 + sp.tr_z * 0.12)),
+            rsi_max=max(22.0, min(48.0, 18.0 + sp.vol_z * 6.0)),
+            cloc_min=sp.cloc_min,
+        )
+        return capitulation_reversal.build_features(data, params, tf, bt)
+    if strategy_id == "liquidity_sweep":
+        params = LiquiditySweepParams(
+            ema_fast=sp.ema_fast,
+            ema_slow=sp.ema_slow,
+            atr_window=sp.atr_window,
+            swing_lookback=max(16, min(120, int(sp.z_window / 14))),
+            sweep_pct=max(0.0005, min(0.004, sp.tr_z * 0.001)),
+            vol_mult=max(1.1, min(2.8, 0.8 + sp.vol_z * 0.35)),
+            rsi_max=max(28.0, min(50.0, 20.0 + sp.vol_z * 5.0)),
+            cloc_min=sp.cloc_min,
+        )
+        return liquidity_sweep.build_features(data, params, tf, bt)
+    if strategy_id == "divergence_bounce":
+        params = DivergenceParams(
+            ema_fast=sp.ema_fast,
+            ema_slow=sp.ema_slow,
+            atr_window=sp.atr_window,
+            vol_z_window=sp.z_window,
+            div_lookback=max(12, min(96, int(sp.z_window / 21))),
+            rsi_max=max(28.0, min(42.0, 22.0 + sp.vol_z * 4.0)),
+            vol_z_min=max(0.5, min(1.8, sp.tr_z * 0.45)),
+            min_rsi_delta=max(1.5, min(8.0, sp.cloc_min * 8.0)),
+            cloc_min=sp.cloc_min,
+        )
+        return divergence_bounce.build_features(data, params, tf, bt)
 
     return build(strategy_id, data, tf, bt)
 

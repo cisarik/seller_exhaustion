@@ -24,6 +24,7 @@ from app.widgets.strategy_editor import StrategyEditor
 from app.widgets.compact_params import CompactParamsEditor
 from app.widgets.data_bar import DataBar
 from strategy.seller_exhaustion import build_features, SellerParams
+from strategy.runner import build_strategy, DEFAULT_STRATEGY
 from backtest.engine import BacktestParams
 from core.models import Timeframe
 from backtest.engine import run_backtest
@@ -61,13 +62,14 @@ class MainWindow(QMainWindow):
     
     def __init__(self, ga_init_from: str | None = None):
         super().__init__()
-        self.setWindowTitle("Seller-Exhaustion Entry - Fibonacci Exit Trading Strategy Optimizer")
+        self.setWindowTitle("ADA Strategy Lab — Depth Charge & Multi-Strategy Optimizer")
         self.setGeometry(100, 100, 1600, 1000)
         
         # Data and settings
         self.current_data = None  # Features dataframe (with indicators and signals)
         self.raw_data = None  # Raw OHLCV data (for rebuilding features)
         self.current_tf = Timeframe.m15
+        self.current_strategy_id = DEFAULT_STRATEGY
         self.settings_dialog = None
         self.strategy_editor = None
         self.data_provider = DataProvider(use_cache=True)
@@ -95,6 +97,7 @@ class MainWindow(QMainWindow):
         self.data_bar = DataBar()
         self.data_bar.download_requested.connect(self.on_data_bar_download_requested)
         self.data_bar.timeframe_changed.connect(self.on_data_bar_timeframe_changed)
+        self.data_bar.strategy_changed.connect(self.on_data_bar_strategy_changed)
         main_layout.addWidget(self.data_bar)
         
         # Create main layout with 3-column splitter
@@ -284,6 +287,13 @@ class MainWindow(QMainWindow):
             if "h" in tf_key:
                 tf_mult = int(tf_key.replace("h", "")) * 60
             SettingsManager.save_to_env({"timeframe": str(tf_mult)})
+
+    def on_data_bar_strategy_changed(self, strategy_id: str):
+        """Switch active backtest strategy."""
+        if strategy_id and strategy_id != self.current_strategy_id:
+            self.current_strategy_id = strategy_id
+            self.statusBar().showMessage(f"Strategy: {strategy_id} — run backtest to apply")
+            self.chart_view.status_label.setText(f"Strategy: {strategy_id}")
     
     async def download_data_from_bar(self, from_date: str, to_date: str, tf_key: str):
         """Download data from the data bar."""
@@ -377,7 +387,10 @@ class MainWindow(QMainWindow):
             else:
                 # Process the downloaded data
                 params, bt_params, _ = self.param_editor.get_params()
-                feats = build_features(df, params, tf)
+                feats = build_strategy(
+                    self.current_strategy_id, df, tf,
+                    seller_params=params, bt_params=bt_params,
+                )
                 
                 # Update state
                 self.current_data = feats
@@ -514,7 +527,10 @@ class MainWindow(QMainWindow):
             self.param_editor.set_timeframe(tf)
             
             # Build features
-            feats = build_features(df, params, tf)
+            feats = build_strategy(
+                self.current_strategy_id, df, tf,
+                seller_params=params, bt_params=bt_params,
+            )
             
             # Update chart
             self.chart_view.feats = feats
@@ -603,7 +619,13 @@ class MainWindow(QMainWindow):
             else:
                 raw = self.raw_data
             
-            feats = build_features(raw, seller_params, self.current_tf)
+            feats = build_strategy(
+                self.current_strategy_id,
+                raw,
+                self.current_tf,
+                seller_params=seller_params,
+                bt_params=bt_params,
+            )
             self.current_data = feats
             self.current_range = self._infer_date_range(feats)
             self.chart_view.feats = feats

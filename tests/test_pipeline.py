@@ -41,10 +41,18 @@ def test_split_train_oos(ohlcv):
 
 
 def test_evaluate_all_strategies(ohlcv):
+    from backtest.strategy_ga import OPTIMIZABLE_STRATEGIES, OPTIMIZABLE_STRATEGIES_V2
     ind = Individual(seller_params=SellerParams(ema_fast=48, ema_slow=288), backtest_params=BacktestParams(use_fib_exits=False))
-    for sid in OPTIMIZABLE_STRATEGIES:
+    for sid in OPTIMIZABLE_STRATEGIES + OPTIMIZABLE_STRATEGIES_V2:
         fit, m = evaluate_strategy_individual(sid, ind, ohlcv, Timeframe.m15)
         assert fit > -1000 or m["n"] == 0
+
+
+def test_v2_strategies_produce_signals(ohlcv):
+    from strategy.registry import build
+    for sid in ("capitulation_reversal", "liquidity_sweep", "divergence_bounce"):
+        feats = build(sid, ohlcv, Timeframe.m15, BacktestParams(use_fib_exits=False))
+        assert "signal" in feats.columns
 
 
 def test_run_strategy_ga_short(ohlcv):

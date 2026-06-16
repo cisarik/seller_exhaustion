@@ -46,6 +46,7 @@ class StrategySummary:
     positive_folds: int
     median_win_rate: float
     median_expectancy_r: float
+    robust_profit_score: float
 
 
 def _bars_per_day(tf: Timeframe) -> int:
@@ -187,6 +188,7 @@ def walk_forward_report(
             positive_folds=sum(1 for p in pnls if p > 0),
             median_win_rate=float(np.median([r.win_rate for r in rows])),
             median_expectancy_r=float(np.median([r.expectancy_r for r in rows])),
+            robust_profit_score=float(sum(pnls) * (sum(1 for p in pnls if p > 0) / max(len(rows), 1))),
         )
 
     return {

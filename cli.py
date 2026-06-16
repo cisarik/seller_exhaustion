@@ -649,6 +649,7 @@ def walk_forward_cmd(
             f"  median_wr={summary['median_win_rate']:.0%} "
             f"median_expR={summary['median_expectancy_r']:.3f}"
         )
+        console.print(f"  robust_score={summary['robust_profit_score']:+.4f}")
 
     table = Table(title="Per-fold detail")
     table.add_column("strategy")

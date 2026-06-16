@@ -158,6 +158,17 @@ def evaluate_fold(
     )
 
 
+def _evaluate_fold_worker(args: tuple) -> dict[str, Any]:
+    """Top-level worker for ProcessPoolExecutor (must be picklable)."""
+    from backtest.parallel import payload_to_dataframe
+
+    sid, ctx_p, test_p, tf_val, fold, _warm = args
+    context = payload_to_dataframe(ctx_p)
+    test = payload_to_dataframe(test_p)
+    tf_enum = Timeframe(tf_val)
+    return asdict(evaluate_fold(sid, context, test, tf_enum, fold))
+
+
 def walk_forward_report(
     df: pd.DataFrame,
     strategy_ids: list[str],
@@ -165,13 +176,45 @@ def walk_forward_report(
     test_days: int = 60,
     step_days: int = 60,
     warmup_days: int = WARMUP_DAYS_DEFAULT,
+    n_workers: int = 1,
 ) -> dict[str, Any]:
-    """Run rolling walk-forward for each strategy; return fold rows + summaries."""
-    all_folds: list[FoldResult] = []
+    """
+    Run rolling walk-forward for each strategy; return fold rows + summaries.
 
+    Set n_workers > 1 to evaluate folds in parallel (ProcessPoolExecutor, spawn).
+    """
+    from concurrent.futures import ProcessPoolExecutor
+    from backtest.parallel import dataframe_to_payload, payload_to_dataframe
+
+    tasks: list[tuple[str, dict, dict, str, int, int]] = []
     for sid in strategy_ids:
         for fold, context, test in iter_rolling_folds(df, test_days, step_days, tf, warmup_days):
-            all_folds.append(evaluate_fold(sid, context, test, tf, fold))
+            tasks.append(
+                (
+                    sid,
+                    dataframe_to_payload(context),
+                    dataframe_to_payload(test),
+                    tf.value,
+                    fold,
+                    warmup_days,
+                )
+            )
+
+    all_folds: list[FoldResult] = []
+
+    if n_workers <= 1 or len(tasks) <= 1:
+        for sid, ctx_p, test_p, tf_val, fold, _ in tasks:
+            context = payload_to_dataframe(ctx_p)
+            test = payload_to_dataframe(test_p)
+            tf_enum = Timeframe(tf_val)
+            all_folds.append(evaluate_fold(sid, context, test, tf_enum, fold))
+    else:
+        import os
+
+        workers = max(1, min(n_workers, os.cpu_count() or 1, len(tasks)))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for row in pool.map(_evaluate_fold_worker, tasks, chunksize=1):
+                all_folds.append(FoldResult(**row))
 
     summaries: dict[str, StrategySummary] = {}
     for sid in strategy_ids:

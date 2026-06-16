@@ -1,0 +1,61 @@
+{
+  "version": "2026-06-16",
+  "north_star": "zisk",
+  "milestones": [
+    {"id": "m1", "name": "GO verdict 15m fusion_v2", "status": "done", "note": "5/5 checks Jun 2026"},
+    {"id": "m2", "name": "HERMES paper 30d", "status": "pending"},
+    {"id": "m3", "name": "Testnet", "status": "pending"},
+    {"id": "m4", "name": "Live capped risk", "status": "pending"}
+  ],
+  "backlog": [
+    {
+      "id": "data-binance",
+      "tier": "A",
+      "title": "Binance ADAUSDT 15m historical fallback",
+      "impact": "high",
+      "effort": "medium"
+    },
+    {
+      "id": "fusion-tune",
+      "tier": "A",
+      "title": "fusion_tune.py OOS grid like depth_tune",
+      "impact": "high",
+      "effort": "medium"
+    },
+    {
+      "id": "hurst-gate-ab",
+      "tier": "A",
+      "title": "A/B walk-forward Hurst hard gate",
+      "impact": "medium",
+      "effort": "low"
+    },
+    {
+      "id": "numba-hurst",
+      "tier": "D",
+      "title": "Numba JIT rolling Hurst",
+      "impact": "low",
+      "effort": "low"
+    },
+    {
+      "id": "hermes-stub",
+      "tier": "C",
+      "title": "HERMES agent minimal stub",
+      "impact": "high",
+      "effort": "high"
+    },
+    {
+      "id": "vision-weekly",
+      "tier": "B",
+      "title": "Vision LLM weekly 4H regime label",
+      "impact": "medium",
+      "effort": "medium"
+    }
+  ],
+  "current_top_candidate": {
+    "strategy_id": "fusion_v2",
+    "timeframe": "15m",
+    "verdict": "GO",
+    "positive_loop_pct": 0.64,
+    "sum_pnl_loops": 0.1112
+  }
+}

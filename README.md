@@ -25,6 +25,28 @@ poetry run python cli.py optimize --data .data/your_cache.parquet --tf 15m -g 25
 
 Set `OPTIMIZER_WORKERS=1` in `.env` for single-threaded GA evaluation (useful for debugging).
 
+### v4.1 — Profit validation & HERMES path (2026-06)
+
+**Docs**: [BRAINSTORMING.md](BRAINSTORMING.md) · [PROMPTS.md](PROMPTS.md) · [docs/HERMES_PROTOCOL.md](docs/HERMES_PROTOCOL.md)
+
+```bash
+# Walk-forward + rank strategies (parallel folds)
+poetry run python cli.py walk-forward --data .data/your.parquet \
+  --strategies fusion_v2,depth_charge,mean_reversion --tf 15m --auto-sanity -j 4
+
+# Rolling paper stability → Go/No-Go
+poetry run python cli.py paper-forward-top --tf 15m --loop --clear
+poetry run python cli.py paper-top-stats --tf 15m
+
+# Daily monitor + HERMES bundle
+poetry run python cli.py paper-scheduler --tf 15m
+poetry run python cli.py hermes-export --tf 15m
+```
+
+**Top candidate (Jun 2026)**: `fusion_v2` 15m — GO on loop stability (see BRAINSTORMING.md).
+
+Use `make test` / `make run ARGS="..."` to avoid pyenv py2app warning noise (see AGENTS.md v4.1).
+
 ---
 
 ## 🎯 Core Strategy

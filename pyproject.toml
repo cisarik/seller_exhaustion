@@ -39,3 +39,8 @@ target-version = "py310"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+filterwarnings = [
+    "ignore:pkg_resources is deprecated:UserWarning",
+    "ignore::UserWarning:py2app",
+    "ignore::UserWarning:pkg_resources",
+]

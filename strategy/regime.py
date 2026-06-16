@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from indicators.local import ema, atr, rsi
+from indicators.fractal import hurst_exponent, mean_reversion_hurst_score
 from core.models import Timeframe, minutes_to_bars
 
 
@@ -44,11 +45,17 @@ def compute_regime(df: pd.DataFrame, tf: Timeframe = Timeframe.m60) -> pd.DataFr
     trend_depth = (out["ema_s"] - out["ema_f"]) / out["ema_s"]
     depth_score = np.clip(trend_depth / 0.08, 0, 1)
 
+    # Fractal / Hurst: favor mean-reversion regimes (see indicators/fractal.py)
+    hurst_window = max(48, minutes_to_bars(1440, tf))  # ~24h
+    out["hurst"] = hurst_exponent(out["close"], window=hurst_window)
+    hurst_score = mean_reversion_hurst_score(out["hurst"]).fillna(0.5)
+
     out["regime_score"] = (
-        0.35 * downtrend +
-        0.30 * rsi_score +
-        0.20 * vol_score +
-        0.15 * depth_score
+        0.30 * downtrend +
+        0.25 * rsi_score +
+        0.15 * vol_score +
+        0.15 * depth_score +
+        0.15 * hurst_score
     ).clip(0, 1)
 
     out["regime_label"] = pd.cut(

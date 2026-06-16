@@ -1,12 +1,58 @@
 # AGENTS.md - AI Agent Guide for ADA Seller-Exhaustion **BACKTESTING** Tool
 
-**Last Updated**: 2025-01-17 (v3.1 -  Evolution Coach wired)  
+**Last Updated**: 2026-06-16 (v4.1 — walk-forward, paper-monitor, HERMES, Hurst regime)  
 **Project**: ADA Seller-Exhaustion **Backtesting & Strategy Development** Tool  
 **Owner**: Michal  
-**Python Version**: 3.10+ (tested on 3.13)
+**Python Version**: 3.11+ (Poetry; tested on 3.13)
 
 **IMPORTANT**: This is the BACKTESTING application, NOT the live trading agent.  
-For live trading specifications, see **PRD_TRADING_AGENT.md**.
+For live trading specifications, see **PRD_TRADING_AGENT.md** and **docs/HERMES_PROTOCOL.md**.
+
+---
+
+## v4.1 Quick Start (read this first)
+
+**North star**: out-of-sample **profit** → paper on HERMES → live.
+
+| Doc | Purpose |
+|-----|---------|
+| **BRAINSTORMING.md** | Session notes, profit ideas, fractal research, backlog |
+| **PROMPTS.md** | Copy-paste prompts for agents & LLM regime |
+| **docs/HERMES_PROTOCOL.md** | JSON bundle schema for live agent handoff |
+| **brainstorming/backlog.json** | Prioritized task queue (machine-readable) |
+
+### Validation pipeline (frozen params, no re-tune in WF)
+
+```bash
+poetry run python cli.py walk-forward --data .data/X_ADAUSD_*_15minute.parquet \
+  --strategies mean_reversion,depth_charge,fusion_v2 --tf 15m --auto-sanity -j 4
+poetry run python cli.py paper-forward-top --tf 15m --loop --loops 11 --step-days 60 --clear
+poetry run python cli.py paper-top-stats --tf 15m
+poetry run python cli.py paper-scheduler --tf 15m
+poetry run python cli.py hermes-export --tf 15m
+```
+
+**Current best (Jun 2026)**: `fusion_v2` @ 15m — **GO (5/5)** on loop stats.
+
+### New modules (v4.1)
+
+| Module | Role |
+|--------|------|
+| `backtest/walk_forward.py` | Rolling folds, `robust_profit_score`, parallel `-j` |
+| `backtest/param_sanity.py` | Time-consistent param audit/normalize |
+| `backtest/paper_stats.py` | Go/Marginal/No-Go from runs jsonl |
+| `core/hermes_protocol.py` | HERMES bundle export |
+| `core/env_bootstrap.py` | Suppress py2app/pkg_resources warnings |
+| `indicators/fractal.py` | Hurst + Bill Williams fractals |
+| `strategy/regime.py` | Regime score includes Hurst MR bias |
+
+### Warning fix (py2app / pkg_resources)
+
+Poetry on pyenv Python 3.10 may print harmless `py2app` deprecation before venv starts.  
+Fixes: `core/env_bootstrap.py`, `conftest.py`, `pyproject.toml`, `Makefile PYTHONWARNINGS`.  
+Debug: `ADA_SHOW_ALL_WARNINGS=1 poetry run python cli.py ...`
+
+---
 
 ## Table of Contents
 

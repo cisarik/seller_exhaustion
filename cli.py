@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import core.env_bootstrap  # noqa: F401 — suppress py2app/pkg_resources noise before other imports
+
 import asyncio
 
 import typer
@@ -857,6 +859,136 @@ def paper_monitor(
     console.print(f"[bold {color}]{verdict_message(stats)}[/bold {color}]\n")
 
 
+@app.command("hermes-export")
+def hermes_export(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    candidate: str = typer.Option("", help="Top candidate json (default .data/top_candidate_<tf>.json)"),
+    output: str = typer.Option("", help="Output path (default .data/hermes_bundle_<tf>.json)"),
+):
+    """
+    Export GO/MARGINAL candidate + configs for HERMES live agent (protocol v1).
+
+    Requires top_candidate + optional runs log from paper-forward-top --loop.
+    """
+    import json
+    from pathlib import Path
+
+    from backtest.paper_stats import analyze_paper_runs
+    from core.hermes_protocol import build_hermes_bundle, export_hermes_bundle
+
+    cand_path = Path(candidate) if candidate else Path(f".data/top_candidate_{tf.value}.json")
+    runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    out_path = Path(output) if output else Path(f".data/hermes_bundle_{tf.value}.json")
+
+    if not cand_path.exists():
+        console.print(f"[red]Missing candidate: {cand_path}[/red]")
+        raise typer.Exit(1)
+
+    obj = json.loads(cand_path.read_text())
+    strategy_id = str(obj.get("strategy_id", ""))
+
+    stats_result = None
+    verdict_level = "UNKNOWN"
+    if runs_path.exists():
+        records = [json.loads(l) for l in runs_path.read_text().splitlines() if l.strip()]
+        if records:
+            stats_result = analyze_paper_runs(records)
+            verdict_level = stats_result.verdict_level
+
+    stats_dict = {
+        "verdict_level": verdict_level,
+        "n_loops": stats_result.n_loops if stats_result else 0,
+        "positive_pct": stats_result.positive_pct if stats_result else 0.0,
+        "sum_pnl": stats_result.sum_pnl if stats_result else 0.0,
+        "median_expectancy_r": stats_result.median_exp_active if stats_result else 0.0,
+        "passed_checks": stats_result.passed if stats_result else 0,
+        "total_checks": stats_result.total_checks if stats_result else 0,
+    }
+
+    bundle = build_hermes_bundle(
+        strategy_id=strategy_id,
+        tf=tf,
+        verdict_level=verdict_level,
+        stats=stats_dict,
+        candidate_path=cand_path,
+        runs_path=runs_path if runs_path.exists() else None,
+    )
+    export_hermes_bundle(bundle, out_path)
+    console.print(f"[green]✓ HERMES bundle → {out_path}[/green]")
+    console.print(f"  strategy={strategy_id} verdict={verdict_level}")
+    if verdict_level == "NO-GO":
+        console.print("[yellow]Warning: verdict is NO-GO — HERMES should stay in paper/testnet.[/yellow]")
+
+
+@app.command("paper-scheduler")
+def paper_scheduler(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    data: str = typer.Option("", help="Parquet for walk-forward refresh (optional)"),
+    refresh_candidate: bool = typer.Option(False, "--refresh", help="Re-run walk-forward before monitor"),
+    export_hermes: bool = typer.Option(True, help="Export HERMES bundle after monitor"),
+):
+    """
+    Full monitoring cycle for cron/automation: optional walk-forward refresh,
+    paper-monitor snapshot, stats verdict, HERMES bundle export.
+
+    Example cron (daily 00:15 UTC):
+      cd /path/to/seller_exhaustion && make monitor TF=15m
+    """
+    import json
+    from pathlib import Path
+
+    from backtest.paper_stats import analyze_paper_runs, verdict_message
+
+    cand_path = Path(f".data/top_candidate_{tf.value}.json")
+
+    if refresh_candidate and data:
+        console.print("[cyan]Refreshing top candidate via walk-forward...[/cyan]")
+        from backtest.walk_forward import walk_forward_report
+        from backtest.param_sanity import list_config_files, normalize_file
+
+        for pth in list_config_files(tf):
+            normalize_file(pth, tf)
+        df = _load_dataframe(data)
+        report = walk_forward_report(
+            df,
+            ["mean_reversion", "depth_charge", "fusion_v2"],
+            tf,
+            test_days=60,
+            step_days=60,
+            n_workers=max(1, __import__("os").cpu_count() or 1),
+        )
+        ranked = sorted(
+            report["summaries"].items(),
+            key=lambda kv: kv[1].get("robust_profit_score", -1e9),
+            reverse=True,
+        )
+        if ranked:
+            top_sid, top_sum = ranked[0]
+            payload = {
+                "strategy_id": top_sid,
+                "timeframe": tf.value,
+                "robust_profit_score": top_sum["robust_profit_score"],
+                "sum_pnl": top_sum["sum_pnl"],
+                "positive_folds": top_sum["positive_folds"],
+                "folds": top_sum["folds"],
+                "total_trades": top_sum["total_trades"],
+                "source_data": data,
+                "paper_forward_command": (
+                    f"poetry run python cli.py paper-forward --data {data} "
+                    f"--strategy {top_sid} --tf {tf.value} --days 60"
+                ),
+            }
+            cand_path.parent.mkdir(exist_ok=True)
+            cand_path.write_text(json.dumps(payload, indent=2))
+            console.print(f"[green]✓ Top candidate: {top_sid}[/green]")
+
+    # Delegate to paper_monitor logic (inline to avoid duplicate subprocess)
+    paper_monitor(tf=tf, candidate=str(cand_path) if cand_path.exists() else "", stats_only=not cand_path.exists())
+
+    if export_hermes and cand_path.exists():
+        hermes_export(tf=tf, candidate=str(cand_path))
+
+
 @app.command("paper-compare")
 def paper_compare(
     data: str = typer.Option(..., help="OHLCV parquet"),
@@ -906,6 +1038,7 @@ def walk_forward_cmd(
     auto_sanity: bool = typer.Option(False, "--auto-sanity", help="Run params sanity audit before walk-forward"),
     sanity_normalize: bool = typer.Option(True, "--sanity-normalize/--no-sanity-normalize", help="When auto-sanity is enabled, normalize configs"),
     export: str = typer.Option("", help="Optional JSON export path"),
+    workers: int = typer.Option(1, "-j", "--workers", help="Parallel fold workers (1=sequential)"),
 ):
     """
     Rolling walk-forward on frozen configs (no re-tune).
@@ -941,7 +1074,7 @@ def walk_forward_cmd(
         df = slice_last_days(df, last_days, tf)
 
     ids = [s.strip() for s in strategies.split(",") if s.strip()]
-    report = walk_forward_report(df, ids, tf, test_days, step_days, warmup_days)
+    report = walk_forward_report(df, ids, tf, test_days, step_days, warmup_days, n_workers=workers)
     p = report["params"]
 
     console.print(

@@ -555,6 +555,7 @@ def paper_forward_top(
     loop: bool = typer.Option(False, "--loop", help="Run rolling loop over past windows instead of single snapshot"),
     loops: int = typer.Option(12, help="Number of loop iterations (e.g. 12×30d = ~1 rok)"),
     step_days: int = typer.Option(30, help="Step size between loop windows in days"),
+    clear: bool = typer.Option(False, "--clear", help="Clear runs log before looping"),
 ):
     """
     Run paper-forward for the latest auto-exported top candidate.
@@ -620,6 +621,8 @@ def paper_forward_top(
 
     runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
     runs_path.parent.mkdir(exist_ok=True)
+    if clear:
+        runs_path.write_text("")
 
     console.print(
         f"[cyan]Looping paper-forward[/cyan] strategy={strategy} tf={tf.value} "
@@ -681,12 +684,12 @@ def paper_top_stats(
     verdict for paper or live trading.
 
     Reads .data/top_candidate_runs_<tf>.jsonl (or --runs path) produced by
-    paper-forward-top --loop.
+    paper-forward-top --loop or paper-monitor.
     """
     import json
-    import math
-    import statistics
     from pathlib import Path
+
+    from backtest.paper_stats import PaperStatsThresholds, analyze_paper_runs, verdict_message
 
     runs_path = Path(runs) if runs else Path(f".data/top_candidate_runs_{tf.value}.jsonl")
     if not runs_path.exists():
@@ -702,59 +705,34 @@ def paper_top_stats(
         console.print(f"[red]Empty runs file: {runs_path}[/red]")
         raise typer.Exit(1)
 
-    strategy_id = records[0].get("strategy_id", "?")
-    n_loops = len(records)
+    th = PaperStatsThresholds(
+        min_positive_pct=min_positive_pct,
+        min_expectancy=min_expectancy,
+        min_trades_per_loop=min_trades_per_loop,
+    )
+    result = analyze_paper_runs(records, th)
 
-    pnls = [r["metrics"].get("total_pnl", 0.0) for r in records]
-    exps = [
-        r["metrics"].get("expectancy_r", r.get("account", {}).get("expectancy_r", 0.0))
-        for r in records
-    ]
-    trades = [r.get("n_trades", 0) for r in records]
-
-    active = [r for r in records if r.get("n_trades", 0) > 0]
-    n_active = len(active)
-    n_positive = sum(1 for p in pnls if p > 0)
-    positive_pct = n_positive / n_loops
-    median_pnl = statistics.median(pnls)
-    median_exp = statistics.median(exps)
-    avg_trades = statistics.mean(trades)
-    sum_pnl = sum(pnls)
-
-    active_pnls = [r["metrics"].get("total_pnl", 0.0) for r in active]
-    active_exp = [
-        r["metrics"].get("expectancy_r", r.get("account", {}).get("expectancy_r", 0.0))
-        for r in active
-    ]
-
-    pnl_std = statistics.stdev(pnls) if n_loops > 1 else 0.0
-    loop_sharpe = (statistics.mean(pnls) / pnl_std) if pnl_std > 0 else 0.0
-
-    # Summary table
-    summary = Table(title=f"Rolling paper-forward stability: [bold]{strategy_id}[/bold] ({tf.value})")
+    summary = Table(
+        title=f"Rolling paper-forward stability: [bold]{result.strategy_id}[/bold] ({tf.value})"
+    )
     summary.add_column("metric", style="cyan")
     summary.add_column("value")
-    rows_summary = [
+    for k, v in [
         ("Source file", str(runs_path)),
-        ("Total loops", str(n_loops)),
-        ("Loops with trades", f"{n_active}/{n_loops}"),
-        ("Positive-PnL loops", f"{n_positive}/{n_loops}  ({positive_pct:.0%})"),
-        ("Sum PnL (all loops)", f"{sum_pnl:+.4f}"),
-        ("Median PnL / loop", f"{median_pnl:+.4f}"),
-        ("Median expectancy R", f"{median_exp:.3f}"),
-        ("Avg trades / loop", f"{avg_trades:.1f}"),
-        ("Loop Sharpe (proxy)", f"{loop_sharpe:.2f}"),
-    ]
-    if active_pnls:
-        rows_summary += [
-            ("Active-loop sum PnL", f"{sum(active_pnls):+.4f}"),
-            ("Active-loop median exp", f"{statistics.median(active_exp):.3f}"),
-        ]
-    for k, v in rows_summary:
+        ("Total loops", str(result.n_loops)),
+        ("Loops with trades", f"{result.n_active}/{result.n_loops}"),
+        ("Positive-PnL loops", f"{result.n_positive}/{result.n_loops}  ({result.positive_pct:.0%})"),
+        ("Sum PnL (all loops)", f"{result.sum_pnl:+.4f}"),
+        ("Median PnL / loop", f"{result.median_pnl:+.4f}"),
+        ("Median expectancy R", f"{result.median_exp:.3f}"),
+        ("Active-loop median exp", f"{result.median_exp_active:.3f}"),
+        ("Avg trades / loop", f"{result.avg_trades:.1f}"),
+        ("Loop Sharpe (proxy)", f"{result.loop_sharpe:.2f}"),
+        ("Active-loop sum PnL", f"{result.active_sum_pnl:+.4f}"),
+    ]:
         summary.add_row(k, v)
     console.print(summary)
 
-    # Per-loop detail
     detail = Table(title="Per-loop breakdown")
     detail.add_column("loop")
     detail.add_column("end")
@@ -763,13 +741,13 @@ def paper_top_stats(
     detail.add_column("wr")
     detail.add_column("exp_r")
     for r in records:
-        end = str(r.get("end_ts", "?"))[:10]
+        end = str(r.get("end_ts", r.get("monitored_at", "?")))[:10]
         m = r["metrics"]
         a = r.get("account", {})
         pnl_val = m.get("total_pnl", 0.0)
         color = "green" if pnl_val > 0 else ("yellow" if pnl_val == 0 else "red")
         detail.add_row(
-            str(r.get("loop_index", "?")),
+            str(r.get("loop_index", r.get("kind", "?"))),
             end,
             str(r.get("n_trades", 0)),
             f"[{color}]{pnl_val:+.4f}[/{color}]",
@@ -778,38 +756,105 @@ def paper_top_stats(
         )
     console.print(detail)
 
-    # Go/no-go checks
-    checks = {
-        f"Positive loops ≥ {min_positive_pct:.0%}": positive_pct >= min_positive_pct,
-        f"Median expectancy ≥ {min_expectancy:.2f}": median_exp >= min_expectancy,
-        f"Avg trades/loop ≥ {min_trades_per_loop:.1f}": avg_trades >= min_trades_per_loop,
-        "Sum PnL > 0": sum_pnl > 0,
-        "Loop Sharpe > 0": loop_sharpe > 0,
-    }
-    passed = sum(checks.values())
-    total_checks = len(checks)
-
     verdict_table = Table(title="Go / No-Go checks")
     verdict_table.add_column("check")
     verdict_table.add_column("result")
-    for label, ok in checks.items():
+    for label, ok in result.checks.items():
         verdict_table.add_row(label, "[green]✓ PASS[/green]" if ok else "[red]✗ FAIL[/red]")
     console.print(verdict_table)
 
-    if passed == total_checks:
-        verdict = "[bold green]✅  GO — candidate is stable, consider paper trading[/bold green]"
-    elif passed >= math.ceil(total_checks * 0.6):
-        verdict = (
-            f"[bold yellow]⚠  MARGINAL ({passed}/{total_checks}) — "
-            f"paper trading with caution, monitor closely[/bold yellow]"
-        )
-    else:
-        verdict = (
-            f"[bold red]🛑  NO-GO ({passed}/{total_checks}) — "
-            f"candidate lacks edge stability[/bold red]"
-        )
+    color = {"GO": "green", "MARGINAL": "yellow", "NO-GO": "red"}[result.verdict_level]
+    console.print(f"\n[bold {color}]{verdict_message(result)}[/bold {color}]\n")
 
-    console.print(f"\n{verdict}\n")
+
+@app.command("paper-monitor")
+def paper_monitor(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    candidate: str = typer.Option("", help="Path to top candidate json"),
+    days: int = typer.Option(0, help="Forward window days (0 = from candidate)"),
+    use_regime: bool = typer.Option(False, help="Apply weekly regime gate"),
+    stats_only: bool = typer.Option(False, "--stats-only", help="Skip forward run, only print stats"),
+):
+    """
+    Monitor top candidate: run latest forward snapshot, append to runs log, print verdict.
+
+    Intended for periodic execution (cron / automation). Chain with paper-top-stats logic.
+    """
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from backtest.paper_stats import analyze_paper_runs, verdict_message
+    from exec.paper_trader import run_paper_forward
+
+    cand_path = Path(candidate) if candidate else Path(f".data/top_candidate_{tf.value}.json")
+    runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    runs_path.parent.mkdir(exist_ok=True)
+
+    if not stats_only:
+        if not cand_path.exists():
+            console.print(f"[red]Missing candidate: {cand_path}[/red]")
+            console.print("[yellow]Run walk-forward first to auto-export top candidate.[/yellow]")
+            raise typer.Exit(1)
+
+        with cand_path.open() as f:
+            obj = json.load(f)
+        strategy = str(obj.get("strategy_id", "")).strip()
+        data = str(obj.get("source_data", "")).strip()
+        cmd = str(obj.get("paper_forward_command", ""))
+        default_days = 60
+        if "--days " in cmd:
+            try:
+                default_days = int(cmd.split("--days ", 1)[1].split()[0])
+            except Exception:
+                pass
+        run_days = int(days) if days > 0 else default_days
+
+        df_full = _load_dataframe(data)
+        result = run_paper_forward(df_full, strategy, tf, min_days=run_days, use_regime_gate=use_regime)
+        m = result["metrics"]
+        a = result["account"]
+        end_ts = str(df_full.index.max())
+        rec = {
+            "kind": "monitor",
+            "monitored_at": datetime.now(timezone.utc).isoformat(),
+            "strategy_id": strategy,
+            "timeframe": tf.value,
+            "end_ts": end_ts,
+            "forward_days": run_days,
+            "warmup_days": result.get("warmup_days", 0),
+            "n_trades": result.get("n_trades", 0),
+            "metrics": m,
+            "account": {k: v for k, v in a.items() if k != "equity_curve"},
+            "source_data": data,
+        }
+        with runs_path.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+        console.print(
+            f"[cyan]Monitor snapshot[/cyan] {strategy} {tf.value} | "
+            f"trades={rec['n_trades']} PnL={m.get('total_pnl', 0):+.4f} "
+            f"WR={m.get('win_rate', 0):.0%} exp={m.get('expectancy_r', a.get('expectancy_r', 0)):.3f}"
+        )
+        console.print(f"[dim]Appended → {runs_path}[/dim]")
+
+    if not runs_path.exists():
+        console.print(f"[red]No runs file: {runs_path}[/red]")
+        raise typer.Exit(1)
+
+    records = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
+    if not records:
+        console.print(f"[red]Empty runs file: {runs_path}[/red]")
+        raise typer.Exit(1)
+
+    stats = analyze_paper_runs(records)
+    color = {"GO": "green", "MARGINAL": "yellow", "NO-GO": "red"}[stats.verdict_level]
+    console.print(
+        f"\n[bold]Cumulative stability[/bold]: {stats.n_positive}/{stats.n_loops} positive "
+        f"({stats.positive_pct:.0%}) | sum PnL {stats.sum_pnl:+.4f} | "
+        f"active exp {stats.median_exp_active:.3f}"
+    )
+    console.print(f"[bold {color}]{verdict_message(stats)}[/bold {color}]\n")
 
 
 @app.command("paper-compare")

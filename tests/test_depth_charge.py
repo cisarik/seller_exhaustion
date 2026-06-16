@@ -54,6 +54,11 @@ def test_build_and_backtest(ohlcv):
     assert "metrics" in result
 
 
+def test_echo_includes_seller_aggressive():
+    p = DepthChargeParams()
+    assert "seller_aggressive" in p.echo_strategies
+
+
 @pytest.mark.skip(reason="full grid tune is slow; covered by CLI integration")
 def test_tune_depth_charge(ohlcv):
     train, oos = split_train_oos(ohlcv, 0.75)

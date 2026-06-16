@@ -1,0 +1,58 @@
+{
+  "strategy_id": "vol_squeeze",
+  "timeframe": "5m",
+  "seller_params": {
+    "ema_fast": 288,
+    "ema_slow": 2016,
+    "z_window": 2016,
+    "atr_window": 288,
+    "ema_fast_minutes": 1440,
+    "ema_slow_minutes": 10080,
+    "z_window_minutes": 10080,
+    "atr_window_minutes": 1440,
+    "vol_z": 2.029158025631435,
+    "tr_z": 1.3624713828246247,
+    "cloc_min": 0.6171714420702498,
+    "rsi_max": 40.0,
+    "rsi_window": 14
+  },
+  "backtest_params": {
+    "fib_swing_lookback": 288,
+    "fib_swing_lookahead": 3,
+    "use_fib_exits": true,
+    "use_stop_loss": true,
+    "use_traditional_tp": false,
+    "use_time_exit": true,
+    "atr_stop_mult": 0.7,
+    "reward_r": 2.0,
+    "max_hold": 288,
+    "fib_target_level": 0.618,
+    "fee_bp": 3.6397783986979717,
+    "slippage_bp": 6.9739952108466525
+  },
+  "train_metrics": {
+    "n": 49,
+    "win_rate": 0.3673469387755102,
+    "avg_R": 0.1890613893163251,
+    "total_pnl": 0.0843177216648657,
+    "max_dd": -0.11277836280053602,
+    "sharpe": 0.11237719668852135,
+    "profit_factor": 1.2673599431060827,
+    "expectancy_r": 0.1891,
+    "cagr_pct": 18.5,
+    "total_return_pct": 8.98
+  },
+  "oos_metrics": {
+    "n": 21,
+    "win_rate": 0.47619047619047616,
+    "avg_R": -0.1977204439093138,
+    "total_pnl": -0.053442212269570764,
+    "max_dd": -0.059181872601708055,
+    "sharpe": -0.23798134465196336,
+    "profit_factor": 0.5484596844890577,
+    "expectancy_r": -0.1977,
+    "cagr_pct": -18.16,
+    "total_return_pct": -4.14
+  },
+  "optimized_at": "2026-06-15T10:57:18.233196+00:00"
+}

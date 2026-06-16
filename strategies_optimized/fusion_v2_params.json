@@ -1,0 +1,53 @@
+{
+  "fusion_params": {
+    "min_agreement": 2,
+    "min_confidence": 0.48,
+    "min_regime_score": 0.42,
+    "use_regime_gate": true,
+    "require_oversold": false,
+    "oversold_pct": 0.018,
+    "oversold_lookback_days": 7,
+    "min_volume_pctile": 0.68,
+    "volume_lookback_days": 14
+  },
+  "backtest_params": {
+    "fib_swing_lookback": 48,
+    "fib_swing_lookahead": 4,
+    "use_fib_exits": true,
+    "use_stop_loss": true,
+    "use_traditional_tp": false,
+    "use_time_exit": true,
+    "atr_stop_mult": 0.7,
+    "reward_r": 2.0,
+    "max_hold": 96,
+    "fib_target_level": 1.0,
+    "fee_bp": 6.890374015018336,
+    "slippage_bp": 5.6601100760318
+  },
+  "metrics": {
+    "train": {
+      "n": 14,
+      "win_rate": 0.5714285714285714,
+      "avg_R": 0.8787695105487021,
+      "total_pnl": 0.12662701728637243,
+      "max_dd": -0.024802832466702007,
+      "sharpe": 0.4361952696826065,
+      "profit_factor": 2.940982263489056,
+      "expectancy_r": 0.8788,
+      "cagr_pct": 32.42,
+      "total_return_pct": 12.74
+    },
+    "oos": {
+      "n": 4,
+      "win_rate": 0.5,
+      "avg_R": 0.12319516471056102,
+      "total_pnl": 0.07539624525298062,
+      "max_dd": -0.020605292052824294,
+      "sharpe": 0.07414060075864141,
+      "profit_factor": 2.949166356944441,
+      "expectancy_r": 0.1232,
+      "cagr_pct": 3.1,
+      "total_return_pct": 0.45
+    }
+  }
+}

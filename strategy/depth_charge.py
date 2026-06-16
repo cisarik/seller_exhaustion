@@ -62,7 +62,11 @@ class DepthChargeParams:
     min_conviction: float = 0.66
     min_regime_score: float = 0.44
     require_echo: bool = True
-    echo_strategies: tuple[str, ...] = ("mean_reversion", "liquidity_sweep")
+    echo_strategies: tuple[str, ...] = (
+        "mean_reversion",
+        "liquidity_sweep",
+        "seller_aggressive",
+    )
     waterfall_bars: int = 3
     waterfall_drop_pct: float = 0.018
     atr_window_days: int = 1
@@ -87,6 +91,8 @@ def _resolve(p: DepthChargeParams, tf: Timeframe) -> DepthChargeParams:
         min_deceleration=p.min_deceleration,
         min_conviction=p.min_conviction,
         min_regime_score=p.min_regime_score,
+        require_echo=p.require_echo,
+        echo_strategies=p.echo_strategies,
         waterfall_bars=p.waterfall_bars,
         waterfall_drop_pct=p.waterfall_drop_pct,
         atr_window_days=p.atr_window_days,
@@ -260,4 +266,7 @@ def save_depth_params(p: DepthChargeParams, bt: BacktestParams, metrics: dict) -
 def load_depth_params() -> tuple[DepthChargeParams, BacktestParams]:
     with PARAMS_PATH.open() as f:
         data = json.load(f)
-    return DepthChargeParams(**data["depth_params"]), BacktestParams(**data["backtest_params"])
+    dp_raw = dict(data["depth_params"])
+    if "echo_strategies" in dp_raw and isinstance(dp_raw["echo_strategies"], list):
+        dp_raw["echo_strategies"] = tuple(dp_raw["echo_strategies"])
+    return DepthChargeParams(**dp_raw), BacktestParams(**data["backtest_params"])

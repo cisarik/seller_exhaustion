@@ -1,0 +1,58 @@
+{
+  "strategy_id": "seller_aggressive",
+  "timeframe": "15m",
+  "seller_params": {
+    "ema_fast": 96,
+    "ema_slow": 672,
+    "z_window": 672,
+    "atr_window": 96,
+    "ema_fast_minutes": 1440,
+    "ema_slow_minutes": 10080,
+    "z_window_minutes": 10080,
+    "atr_window_minutes": 1440,
+    "vol_z": 1.7627837773924233,
+    "tr_z": 1.4340556785885648,
+    "cloc_min": 0.6146298074879286,
+    "rsi_max": 40.0,
+    "rsi_window": 14
+  },
+  "backtest_params": {
+    "fib_swing_lookback": 96,
+    "fib_swing_lookahead": 1,
+    "use_fib_exits": true,
+    "use_stop_loss": true,
+    "use_traditional_tp": false,
+    "use_time_exit": true,
+    "atr_stop_mult": 0.7,
+    "reward_r": 2.0,
+    "max_hold": 96,
+    "fib_target_level": 0.5,
+    "fee_bp": 7.877217673411832,
+    "slippage_bp": 2.912836527047746
+  },
+  "train_metrics": {
+    "n": 12,
+    "win_rate": 0.6666666666666666,
+    "avg_R": 0.8916301455932262,
+    "total_pnl": 0.2591581015977916,
+    "max_dd": -0.02177321777139446,
+    "sharpe": 0.4935943671623626,
+    "profit_factor": 4.266024816916683,
+    "expectancy_r": 0.8916,
+    "cagr_pct": 29.28,
+    "total_return_pct": 11.05
+  },
+  "oos_metrics": {
+    "n": 4,
+    "win_rate": 0.75,
+    "avg_R": 0.393401718952189,
+    "total_pnl": 0.06057304566986398,
+    "max_dd": -0.03404270064972552,
+    "sharpe": 0.26388875743128837,
+    "profit_factor": 2.7793255092513456,
+    "expectancy_r": 0.3934,
+    "cagr_pct": 27385.23,
+    "total_return_pct": 1.55
+  },
+  "optimized_at": "2026-06-15T10:49:07.286719+00:00"
+}

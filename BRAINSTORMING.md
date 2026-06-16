@@ -2,7 +2,29 @@
 
 **Project**: ADA Seller-Exhaustion backtesting → HERMES live agent  
 **North star**: **ZISK** (consistent out-of-sample profit on ADA intraday)  
-**Last updated**: 2026-06-16 (session: walk-forward, paper-monitor, fusion_v2 GO)
+**Last updated**: 2026-06-16 (v4.2 — execution validation, BLOCKED finding)
+
+---
+
+## v4.2 Execution validation (NEW)
+
+**Kľúčové zistenie**: `fusion_v2` 15m má loop **GO**, ale execution **BLOCKED**.
+
+| Vrstva | Výsledok |
+|--------|----------|
+| paper-top-stats | GO 5/5 |
+| validate-candidate | **BLOCKED** |
+| Posledný 60d forward | −0.046 PnL, 0 % WR |
+| 2× fees | −0.050 PnL |
+| Kill-switch | PAUSE |
+
+**Dôsledok**: HERMES export teraz blokuje pri BLOCKED (`hermes-export` exit 2).  
+Detail: **docs/VALIDATION.md**
+
+### Nové moduly v4.2
+- `backtest/validation.py` — cost stress, streaks, bootstrap
+- `exec/telemetry.py` — `.data/hermes_telemetry.jsonl`
+- CLI: `validate-candidate`, `make validate`
 
 ---
 

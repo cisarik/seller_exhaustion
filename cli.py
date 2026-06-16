@@ -885,7 +885,7 @@ def validate_candidate(
 
     if not runs_path.exists():
         console.print(f"[red]Missing runs log: {runs_path}[/red]")
-        console.print("[yellow]Run: paper-forward-top --tf {tf} --loop --clear[/yellow]")
+        console.print(f"[yellow]Tip:[/yellow] run: poetry run python cli.py paper-forward-top --tf {tf.value} --loop --clear")
         raise typer.Exit(1)
 
     records = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
@@ -982,11 +982,12 @@ def hermes_export(
     tf: Timeframe = typer.Option("15m", "--tf"),
     candidate: str = typer.Option("", help="Top candidate json (default .data/top_candidate_<tf>.json)"),
     output: str = typer.Option("", help="Output path (default .data/hermes_bundle_<tf>.json)"),
+    force: bool = typer.Option(False, "--force", help="Export even when execution verdict is BLOCKED"),
 ):
     """
-    Export GO/MARGINAL candidate + configs for HERMES live agent (protocol v1).
+    Export candidate + configs for HERMES live agent (protocol v1).
 
-    Requires top_candidate + optional runs log from paper-forward-top --loop.
+    Requires validate-candidate report; blocks export when execution_verdict=BLOCKED.
     """
     import json
     from pathlib import Path
@@ -996,11 +997,27 @@ def hermes_export(
 
     cand_path = Path(candidate) if candidate else Path(f".data/top_candidate_{tf.value}.json")
     runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    validation_path = Path(f".data/validation_{tf.value}.json")
     out_path = Path(output) if output else Path(f".data/hermes_bundle_{tf.value}.json")
 
     if not cand_path.exists():
         console.print(f"[red]Missing candidate: {cand_path}[/red]")
         raise typer.Exit(1)
+
+    validation_data: dict = {}
+    execution_verdict = "UNKNOWN"
+    if validation_path.exists():
+        validation_data = json.loads(validation_path.read_text())
+        execution_verdict = validation_data.get("execution_verdict", "UNKNOWN")
+    else:
+        console.print(
+            f"[yellow]No validation report at {validation_path} — run validate-candidate first[/yellow]"
+        )
+
+    if execution_verdict == "BLOCKED" and not force:
+        console.print("[red]HERMES export blocked: execution_verdict=BLOCKED[/red]")
+        console.print("[dim]See docs/VALIDATION.md — use --force only for infra testing[/dim]")
+        raise typer.Exit(2)
 
     obj = json.loads(cand_path.read_text())
     strategy_id = str(obj.get("strategy_id", ""))
@@ -1023,6 +1040,8 @@ def hermes_export(
         "total_checks": stats_result.total_checks if stats_result else 0,
     }
 
+    deploy_allowed = execution_verdict in ("READY", "CAUTION") or (force and execution_verdict == "BLOCKED")
+
     bundle = build_hermes_bundle(
         strategy_id=strategy_id,
         tf=tf,
@@ -1030,12 +1049,16 @@ def hermes_export(
         stats=stats_dict,
         candidate_path=cand_path,
         runs_path=runs_path if runs_path.exists() else None,
+        validation=validation_data,
+        deploy_allowed=deploy_allowed,
     )
     export_hermes_bundle(bundle, out_path)
     console.print(f"[green]✓ HERMES bundle → {out_path}[/green]")
-    console.print(f"  strategy={strategy_id} verdict={verdict_level}")
-    if verdict_level == "NO-GO":
-        console.print("[yellow]Warning: verdict is NO-GO — HERMES should stay in paper/testnet.[/yellow]")
+    console.print(f"  strategy={strategy_id} loop={verdict_level} execution={execution_verdict} deploy={deploy_allowed}")
+    if execution_verdict == "BLOCKED" and force:
+        console.print("[yellow]Warning: exported with deploy_allowed per --force; do not live trade[/yellow]")
+    elif verdict_level == "NO-GO":
+        console.print("[yellow]Warning: loop verdict NO-GO — HERMES should stay in paper/testnet.[/yellow]")
 
 
 @app.command("paper-scheduler")
@@ -1103,17 +1126,21 @@ def paper_scheduler(
     # Delegate to paper_monitor logic (inline to avoid duplicate subprocess)
     paper_monitor(tf=tf, candidate=str(cand_path) if cand_path.exists() else "", stats_only=not cand_path.exists())
 
-    if export_hermes and cand_path.exists():
-        hermes_export(tf=tf, candidate=str(cand_path))
-
-    # Execution validation after monitor cycle
     runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    validation_ok = True
     if runs_path.exists() and data:
         try:
             validate_candidate(tf=tf, data=data, runs=str(runs_path), candidate=str(cand_path))
         except typer.Exit as e:
             if e.exit_code == 2:
-                console.print("[yellow]Scheduler: execution BLOCKED — skip HERMES until resolved[/yellow]")
+                validation_ok = False
+                console.print("[yellow]Scheduler: execution BLOCKED — HERMES export skipped[/yellow]")
+
+    if export_hermes and cand_path.exists() and validation_ok:
+        try:
+            hermes_export(tf=tf, candidate=str(cand_path))
+        except typer.Exit:
+            console.print("[yellow]Scheduler: hermes-export skipped[/yellow]")
 
 
 @app.command("paper-compare")

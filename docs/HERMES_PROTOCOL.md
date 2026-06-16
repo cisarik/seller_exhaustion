@@ -8,9 +8,12 @@ JSON handoff from **seller_exhaustion** (research) to **HERMES** (live execution
 walk-forward → top_candidate.json
 paper-forward-top --loop → top_candidate_runs.jsonl
 paper-top-stats → GO | MARGINAL | NO-GO
-hermes-export → hermes_bundle_<tf>.json
+validate-candidate → READY | CAUTION | BLOCKED   ← required before export
+hermes-export → hermes_bundle_<tf>.json (blocked if BLOCKED)
 HERMES import → paper → testnet → live
 ```
+
+See also **docs/VALIDATION.md** for execution verdict rules.
 
 ## Bundle schema (`hermes_bundle_<tf>.json`)
 
@@ -39,9 +42,13 @@ HERMES import → paper → testnet → live
   "candidate_meta": { "...": "contents of top_candidate_15m.json" },
   "monitoring": {
     "runs_log": ".data/top_candidate_runs_15m.jsonl",
-    "recommended_cli": "poetry run python cli.py paper-monitor --tf 15m",
-    "stats_cli": "poetry run python cli.py paper-top-stats --tf 15m"
+    "validate_cli": "poetry run python cli.py validate-candidate --tf 15m"
   },
+  "validation": {
+    "execution_verdict": "READY",
+    "kill_switch": "OK"
+  },
+  "deploy_allowed": true,
   "risk_defaults": {
     "paper_trading": true,
     "testnet": true,
@@ -55,9 +62,11 @@ HERMES import → paper → testnet → live
 
 | Level | Meaning | HERMES action |
 |-------|---------|---------------|
-| **GO** | 5/5 checks pass | Paper allowed; testnet after 30d stable paper |
-| **MARGINAL** | 3–4/5 checks | Paper only; tighten risk; daily monitor |
-| **NO-GO** | ≤2/5 checks | Do not deploy; re-tune or switch strategy |
+| **GO** | 5/5 checks pass | Requires execution READY for deploy |
+| **MARGINAL** | 3–4/5 checks | Paper only; validate-candidate weekly |
+| **NO-GO** | ≤2/5 checks | Do not deploy |
+
+**Execution gate** (`validate-candidate`): `hermes-export` fails if `execution_verdict=BLOCKED` (use `--force` for infra tests only).
 
 Checks: positive loop %, median expectancy R (active loops), avg trades/loop, sum PnL, loop Sharpe.
 

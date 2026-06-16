@@ -1,13 +1,31 @@
 {
-  "version": "2026-06-16",
+  "version": "2026-06-16-v4.2",
   "north_star": "zisk",
   "milestones": [
-    {"id": "m1", "name": "GO verdict 15m fusion_v2", "status": "done", "note": "5/5 checks Jun 2026"},
-    {"id": "m2", "name": "HERMES paper 30d", "status": "pending"},
+    {"id": "m1", "name": "GO verdict 15m fusion_v2 (loops)", "status": "done", "note": "5/5 checks Jun 2026"},
+    {"id": "m1b", "name": "Execution validation READY", "status": "blocked", "note": "BLOCKED Jun 2026 — last 60d forward negative"},
+    {"id": "m2", "name": "HERMES paper 30d", "status": "pending", "blocked_by": "m1b"},
     {"id": "m3", "name": "Testnet", "status": "pending"},
     {"id": "m4", "name": "Live capped risk", "status": "pending"}
   ],
+  "current_state": {
+    "strategy_id": "fusion_v2",
+    "timeframe": "15m",
+    "loop_verdict": "GO",
+    "execution_verdict": "BLOCKED",
+    "kill_switch": "PAUSE",
+    "last_60d_forward_pnl": -0.0456,
+    "recent_3_loops_pnl": -0.0785,
+    "action": "weekly validate-candidate; no HERMES deploy until READY"
+  },
   "backlog": [
+    {
+      "id": "weekly-validate",
+      "tier": "A",
+      "title": "Cron validate-candidate until execution READY",
+      "impact": "high",
+      "effort": "low"
+    },
     {
       "id": "data-binance",
       "tier": "A",
@@ -23,39 +41,19 @@
       "effort": "medium"
     },
     {
-      "id": "hurst-gate-ab",
+      "id": "regime-pause",
       "tier": "A",
-      "title": "A/B walk-forward Hurst hard gate",
-      "impact": "medium",
-      "effort": "low"
-    },
-    {
-      "id": "numba-hurst",
-      "tier": "D",
-      "title": "Numba JIT rolling Hurst",
-      "impact": "low",
+      "title": "Auto-pause entries when validate BLOCKED 2+ weeks",
+      "impact": "high",
       "effort": "low"
     },
     {
       "id": "hermes-stub",
       "tier": "C",
-      "title": "HERMES agent minimal stub",
+      "title": "HERMES agent minimal stub (only after READY)",
       "impact": "high",
-      "effort": "high"
-    },
-    {
-      "id": "vision-weekly",
-      "tier": "B",
-      "title": "Vision LLM weekly 4H regime label",
-      "impact": "medium",
-      "effort": "medium"
+      "effort": "high",
+      "blocked_by": "m1b"
     }
-  ],
-  "current_top_candidate": {
-    "strategy_id": "fusion_v2",
-    "timeframe": "15m",
-    "verdict": "GO",
-    "positive_loop_pct": 0.64,
-    "sum_pnl_loops": 0.1112
-  }
+  ]
 }

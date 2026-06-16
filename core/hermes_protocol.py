@@ -7,10 +7,11 @@ Communication is file/HTTP JSON — no direct exchange coupling here.
 Lifecycle:
   1. walk-forward + paper-forward-top --loop  → robust candidate
   2. paper-top-stats / paper-monitor          → GO | MARGINAL | NO-GO
-  3. hermes-export                            → .data/hermes_bundle_<tf>.json
-  4. HERMES agent imports bundle, paper → testnet → live
+  3. validate-candidate                         → READY | CAUTION | BLOCKED
+  4. hermes-export (blocked if BLOCKED)         → .data/hermes_bundle_<tf>.json
+  5. HERMES agent imports bundle, paper → testnet → live
 
-See docs/HERMES_PROTOCOL.md for full schema.
+See docs/HERMES_PROTOCOL.md and docs/VALIDATION.md.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ class HermesStrategyBundle:
     config_paths: dict[str, str] = field(default_factory=dict)
     candidate_meta: dict[str, Any] = field(default_factory=dict)
     monitoring: dict[str, Any] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
+    deploy_allowed: bool = False
     risk_defaults: dict[str, Any] = field(default_factory=lambda: {
         "paper_trading": True,
         "testnet": True,
@@ -69,8 +72,10 @@ def build_hermes_bundle(
     stats: dict[str, Any],
     candidate_path: Path,
     runs_path: Path | None = None,
+    validation: dict[str, Any] | None = None,
+    deploy_allowed: bool = True,
 ) -> HermesStrategyBundle:
-    """Assemble bundle from top candidate + stability stats."""
+    """Assemble bundle from top candidate + stability + execution validation."""
     config_map: dict[str, str] = {}
     if strategy_id in ("fusion_v2", "depth_charge"):
         p = Path(f"strategies_optimized/{strategy_id}_params.json")
@@ -98,7 +103,10 @@ def build_hermes_bundle(
             "runs_log": str(runs_path) if runs_path else "",
             "recommended_cli": f"poetry run python cli.py paper-monitor --tf {tf.value}",
             "stats_cli": f"poetry run python cli.py paper-top-stats --tf {tf.value}",
+            "validate_cli": f"poetry run python cli.py validate-candidate --tf {tf.value}",
         },
+        validation=validation or {},
+        deploy_allowed=deploy_allowed,
     )
 
 

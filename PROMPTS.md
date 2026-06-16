@@ -119,13 +119,16 @@ List mismatches with expected bar count. Suggest normalized values.
 ## 7. HERMES handoff prompt
 
 ```
-Prepare HERMES deployment for {strategy_id} on {tf}.
+Run validate-candidate before any HERMES export.
+
+If execution_verdict=BLOCKED: do NOT deploy. Report kill_switch reasons.
+If READY: hermes-export → verify deploy_allowed=true in bundle.
 
 Steps:
-1. paper-top-stats → must be GO or MARGINAL with documented risks
-2. hermes-export → .data/hermes_bundle_{tf}.json
-3. List config files referenced in bundle
-4. Define kill switch: daily loss %, max trades, stale data bars
+1. validate-candidate --tf 15m --data <parquet>
+2. Read .data/validation_<tf>.json
+3. Only if not BLOCKED: hermes-export
+4. Kill switch rules: daily loss %, max trades, validate BLOCKED → flat
 
 Output deployment checklist for human review.
 ```
@@ -175,11 +178,27 @@ Project context: BRAINSTORMING.md
 
 ---
 
-## 11. Slovak quick prompts (pre užívateľa)
+## 12. Execution validation prompt
 
-**Stabilita stratégie:**
 ```
-Spusti paper-top-stats na 15m a vysvetli či môžem ísť na paper trading.
+Run validate-candidate for {tf} and interpret for HERMES readiness.
+
+Compare:
+- loop verdict (GO/MARGINAL/NO-GO) vs execution_verdict (READY/CAUTION/BLOCKED)
+- cost_stress 1× vs 2× PnL
+- recent_3_loops vs historical median
+
+If BLOCKED: explain whether to wait (regime) or re-tune. No HERMES deploy.
+Reference: docs/VALIDATION.md
+```
+
+---
+
+## 13. Slovak quick prompts (pre užívateľa)
+
+**Stabilita vs execution:**
+```
+Spusti validate-candidate na 15m. Môžem ísť na HERMES alebo sme BLOCKED?
 ```
 
 **Porovnanie stratégií:**

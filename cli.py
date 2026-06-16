@@ -546,6 +546,272 @@ def paper_forward(
     console.print(f"  Logged → .data/paper_trades.jsonl")
 
 
+@app.command("paper-forward-top")
+def paper_forward_top(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    candidate: str = typer.Option("", help="Path to top candidate json (default: .data/top_candidate_<tf>.json)"),
+    days: int = typer.Option(0, help="Override forward window days (0 = use candidate-derived default)"),
+    use_regime: bool = typer.Option(False, help="Apply weekly regime gate"),
+    loop: bool = typer.Option(False, "--loop", help="Run rolling loop over past windows instead of single snapshot"),
+    loops: int = typer.Option(12, help="Number of loop iterations (e.g. 12×30d = ~1 rok)"),
+    step_days: int = typer.Option(30, help="Step size between loop windows in days"),
+):
+    """
+    Run paper-forward for the latest auto-exported top candidate.
+
+    With --loop enabled, runs a rolling evaluation over multiple past windows and
+    appends results to .data/top_candidate_runs_<tf>.jsonl for stability analysis.
+    """
+    import json
+    from pathlib import Path
+    from exec.paper_trader import run_paper_forward
+
+    cand_path = Path(candidate) if candidate else Path(f".data/top_candidate_{tf.value}.json")
+    if not cand_path.exists():
+        raise typer.BadParameter(f"Missing candidate file: {cand_path}")
+
+    with cand_path.open() as f:
+        obj = json.load(f)
+
+    strategy = str(obj.get("strategy_id", "")).strip()
+    data = str(obj.get("source_data", "")).strip()
+    if not strategy or not data:
+        raise typer.BadParameter(f"Invalid candidate file (needs strategy_id and source_data): {cand_path}")
+
+    cmd = str(obj.get("paper_forward_command", ""))
+    default_days = 30
+    if "--days " in cmd:
+        try:
+            default_days = int(cmd.split("--days ", 1)[1].split()[0])
+        except Exception:
+            default_days = 30
+    run_days = int(days) if days > 0 else default_days
+
+    df_full = _load_dataframe(data)
+
+    if not loop:
+        # Single snapshot on full data
+        result = run_paper_forward(df_full, strategy, tf, min_days=run_days, use_regime_gate=use_regime)
+        m = result["metrics"]
+        a = result["account"]
+
+        console.print(f"[bold]Top candidate[/bold] {strategy} | tf={tf.value} | source={cand_path}")
+        console.print(
+            f"  Forward {run_days}d (+{result.get('warmup_days', 0)}d warmup): {result['n_trades']} trades"
+        )
+        console.print(
+            f"  PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} "
+            f"expectancy={m.get('expectancy_r', a.get('expectancy_r', 0)):.3f} "
+            f"CAGR={a.get('cagr_pct', 0):+.1f}%"
+        )
+        return
+
+    # Rolling loop: shift window backwards in time and evaluate stability
+    from datetime import timedelta
+
+    if loops <= 0:
+        loops = 1
+    if step_days <= 0:
+        step_days = run_days
+
+    # Ensure index is datetime and sorted
+    df_full = df_full.sort_index()
+    end_ts = df_full.index.max()
+
+    runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    runs_path.parent.mkdir(exist_ok=True)
+
+    console.print(
+        f"[cyan]Looping paper-forward[/cyan] strategy={strategy} tf={tf.value} "
+        f"days={run_days} step={step_days} loops={loops}"
+    )
+
+    import math
+    from datetime import timezone
+
+    for i in range(loops):
+        offset_days = i * step_days
+        loop_end = end_ts - timedelta(days=offset_days)
+        df_loop = df_full[df_full.index <= loop_end]
+        if len(df_loop) == 0:
+            continue
+        try:
+            result = run_paper_forward(df_loop, strategy, tf, min_days=run_days, use_regime_gate=use_regime)
+        except Exception as e:  # pragma: no cover - safety
+            console.print(f"[red]Loop {i+1}: error {e}[/red]")
+            continue
+
+        m = result["metrics"]
+        a = result["account"]
+        rec = {
+            "loop_index": i + 1,
+            "strategy_id": strategy,
+            "timeframe": tf.value,
+            "offset_days": offset_days,
+            "end_ts": str(loop_end),
+            "forward_days": run_days,
+            "warmup_days": result.get("warmup_days", 0),
+            "n_trades": result.get("n_trades", 0),
+            "metrics": m,
+            "account": {k: v for k, v in a.items() if k != "equity_curve"},
+            "source_data": data,
+        }
+        with runs_path.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+        console.print(
+            f"  Loop {i+1}: end={str(loop_end)[:10]} trades={rec['n_trades']} "
+            f"PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} "
+            f"exp={m.get('expectancy_r', a.get('expectancy_r', 0)):.3f}"
+        )
+
+    console.print(f"[green]✓ Appended loop runs → {runs_path}[/green]")
+
+
+@app.command("paper-top-stats")
+def paper_top_stats(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    runs: str = typer.Option("", help="Path to runs jsonl (default: .data/top_candidate_runs_<tf>.jsonl)"),
+    min_positive_pct: float = typer.Option(0.45, help="Min fraction of positive-PnL loops to green-light"),
+    min_expectancy: float = typer.Option(0.05, help="Min median expectancy_r to green-light"),
+    min_trades_per_loop: float = typer.Option(0.5, help="Min avg trades per loop to green-light"),
+):
+    """
+    Analyse rolling loop results for the top candidate and print a go/no-go
+    verdict for paper or live trading.
+
+    Reads .data/top_candidate_runs_<tf>.jsonl (or --runs path) produced by
+    paper-forward-top --loop.
+    """
+    import json
+    import math
+    import statistics
+    from pathlib import Path
+
+    runs_path = Path(runs) if runs else Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    if not runs_path.exists():
+        console.print(f"[red]No runs file found: {runs_path}[/red]")
+        console.print(
+            f"[yellow]Tip:[/yellow] run: poetry run python cli.py paper-forward-top "
+            f"--tf {tf.value} --loop"
+        )
+        raise typer.Exit(1)
+
+    records = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
+    if not records:
+        console.print(f"[red]Empty runs file: {runs_path}[/red]")
+        raise typer.Exit(1)
+
+    strategy_id = records[0].get("strategy_id", "?")
+    n_loops = len(records)
+
+    pnls = [r["metrics"].get("total_pnl", 0.0) for r in records]
+    exps = [
+        r["metrics"].get("expectancy_r", r.get("account", {}).get("expectancy_r", 0.0))
+        for r in records
+    ]
+    trades = [r.get("n_trades", 0) for r in records]
+
+    active = [r for r in records if r.get("n_trades", 0) > 0]
+    n_active = len(active)
+    n_positive = sum(1 for p in pnls if p > 0)
+    positive_pct = n_positive / n_loops
+    median_pnl = statistics.median(pnls)
+    median_exp = statistics.median(exps)
+    avg_trades = statistics.mean(trades)
+    sum_pnl = sum(pnls)
+
+    active_pnls = [r["metrics"].get("total_pnl", 0.0) for r in active]
+    active_exp = [
+        r["metrics"].get("expectancy_r", r.get("account", {}).get("expectancy_r", 0.0))
+        for r in active
+    ]
+
+    pnl_std = statistics.stdev(pnls) if n_loops > 1 else 0.0
+    loop_sharpe = (statistics.mean(pnls) / pnl_std) if pnl_std > 0 else 0.0
+
+    # Summary table
+    summary = Table(title=f"Rolling paper-forward stability: [bold]{strategy_id}[/bold] ({tf.value})")
+    summary.add_column("metric", style="cyan")
+    summary.add_column("value")
+    rows_summary = [
+        ("Source file", str(runs_path)),
+        ("Total loops", str(n_loops)),
+        ("Loops with trades", f"{n_active}/{n_loops}"),
+        ("Positive-PnL loops", f"{n_positive}/{n_loops}  ({positive_pct:.0%})"),
+        ("Sum PnL (all loops)", f"{sum_pnl:+.4f}"),
+        ("Median PnL / loop", f"{median_pnl:+.4f}"),
+        ("Median expectancy R", f"{median_exp:.3f}"),
+        ("Avg trades / loop", f"{avg_trades:.1f}"),
+        ("Loop Sharpe (proxy)", f"{loop_sharpe:.2f}"),
+    ]
+    if active_pnls:
+        rows_summary += [
+            ("Active-loop sum PnL", f"{sum(active_pnls):+.4f}"),
+            ("Active-loop median exp", f"{statistics.median(active_exp):.3f}"),
+        ]
+    for k, v in rows_summary:
+        summary.add_row(k, v)
+    console.print(summary)
+
+    # Per-loop detail
+    detail = Table(title="Per-loop breakdown")
+    detail.add_column("loop")
+    detail.add_column("end")
+    detail.add_column("trades")
+    detail.add_column("pnl")
+    detail.add_column("wr")
+    detail.add_column("exp_r")
+    for r in records:
+        end = str(r.get("end_ts", "?"))[:10]
+        m = r["metrics"]
+        a = r.get("account", {})
+        pnl_val = m.get("total_pnl", 0.0)
+        color = "green" if pnl_val > 0 else ("yellow" if pnl_val == 0 else "red")
+        detail.add_row(
+            str(r.get("loop_index", "?")),
+            end,
+            str(r.get("n_trades", 0)),
+            f"[{color}]{pnl_val:+.4f}[/{color}]",
+            f"{m.get('win_rate', 0.0):.0%}",
+            f"{m.get('expectancy_r', a.get('expectancy_r', 0.0)):.3f}",
+        )
+    console.print(detail)
+
+    # Go/no-go checks
+    checks = {
+        f"Positive loops ≥ {min_positive_pct:.0%}": positive_pct >= min_positive_pct,
+        f"Median expectancy ≥ {min_expectancy:.2f}": median_exp >= min_expectancy,
+        f"Avg trades/loop ≥ {min_trades_per_loop:.1f}": avg_trades >= min_trades_per_loop,
+        "Sum PnL > 0": sum_pnl > 0,
+        "Loop Sharpe > 0": loop_sharpe > 0,
+    }
+    passed = sum(checks.values())
+    total_checks = len(checks)
+
+    verdict_table = Table(title="Go / No-Go checks")
+    verdict_table.add_column("check")
+    verdict_table.add_column("result")
+    for label, ok in checks.items():
+        verdict_table.add_row(label, "[green]✓ PASS[/green]" if ok else "[red]✗ FAIL[/red]")
+    console.print(verdict_table)
+
+    if passed == total_checks:
+        verdict = "[bold green]✅  GO — candidate is stable, consider paper trading[/bold green]"
+    elif passed >= math.ceil(total_checks * 0.6):
+        verdict = (
+            f"[bold yellow]⚠  MARGINAL ({passed}/{total_checks}) — "
+            f"paper trading with caution, monitor closely[/bold yellow]"
+        )
+    else:
+        verdict = (
+            f"[bold red]🛑  NO-GO ({passed}/{total_checks}) — "
+            f"candidate lacks edge stability[/bold red]"
+        )
+
+    console.print(f"\n{verdict}\n")
+
+
 @app.command("paper-compare")
 def paper_compare(
     data: str = typer.Option(..., help="OHLCV parquet"),

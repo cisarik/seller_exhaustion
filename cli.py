@@ -368,11 +368,11 @@ def compare_strategies(
 @app.command("fetch-15m")
 def fetch_15m(
     ticker: str = typer.Option("X:ADAUSD"),
-    from_date: str = typer.Option("2025-01-17", "--from"),
-    to_date: str = typer.Option("2025-10-23", "--to"),
+    from_date: str = typer.Option("2018-01-01", "--from"),
+    to_date: str = typer.Option("2026-06-15", "--to"),
     force: bool = typer.Option(False, help="Force re-download"),
 ):
-    """Download and cache 15m bars (recommended for strategy research)."""
+    """Download and cache 15m bars (extended range for research)."""
 
     async def _run():
         dp = DataProvider()
@@ -529,51 +529,245 @@ def regime_update(
 @app.command("paper-forward")
 def paper_forward(
     data: str = typer.Option(..., help="OHLCV parquet (uses last N days as forward test)"),
-    strategy: str = typer.Option("seller_aggressive", help="Strategy id"),
+    strategy: str = typer.Option("depth_charge", help="Strategy id"),
     tf: Timeframe = typer.Option("15m", "--tf"),
     days: int = typer.Option(30, help="Forward window in days"),
-    use_regime: bool = typer.Option(True, help="Apply weekly regime gate"),
+    use_regime: bool = typer.Option(True, help="Apply weekly regime gate (GA strategies only)"),
 ):
-    """Paper forward test on holdout window using pre-optimized config (no re-fit)."""
+    """Paper forward test using frozen config (no re-fit)."""
     from exec.paper_trader import run_paper_forward
-
-    if strategy == "fusion_v2":
-        from strategy.fusion_v2 import build_features as build_fv2, load_fusion_params
-        from backtest.engine import run_backtest
-        from backtest.profit import simulate_account
-        from strategy.regime_weekly import get_current_regime_gate
-        import json
-        from datetime import datetime, timezone
-
-        fp, bt = load_fusion_params()
-        bar_minutes = 15
-        bars_per_day = 1440 // bar_minutes
-        min_bars = days * bars_per_day
-        df = _load_dataframe(data)
-        forward_df = df.iloc[-min_bars:].copy()
-        feats = build_fv2(forward_df, fp, tf, bt)
-        result = run_backtest(feats, bt)
-        account = simulate_account(result["trades"])
-        m = result["metrics"]
-        console.print(f"[bold]fusion_v2[/bold] forward {days}d: {m.get('n',0)} trades")
-        console.print(f"  PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} CAGR={account.get('cagr_pct', 0):+.1f}%")
-        record = {"ts": datetime.now(timezone.utc).isoformat(), "strategy_id": "fusion_v2",
-                  "metrics": m, "account": {k: v for k, v in account.items() if k != "equity_curve"}}
-        from pathlib import Path
-        log = Path(".data/paper_trades.jsonl")
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open("a") as f:
-            f.write(json.dumps(record) + "\n")
-        console.print(f"  Logged → .data/paper_trades.jsonl")
-        return
 
     df = _load_dataframe(data)
     result = run_paper_forward(df, strategy, tf, min_days=days, use_regime_gate=use_regime)
     m = result["metrics"]
     a = result["account"]
-    console.print(f"[bold]{strategy}[/bold] forward {days}d: {result['n_trades']} trades")
+    console.print(f"[bold]{strategy}[/bold] forward {days}d (+{result.get('warmup_days', 0)}d warmup): {result['n_trades']} trades")
     console.print(f"  PnL={m.get('total_pnl', 0):+.4f} WR={m.get('win_rate', 0):.0%} CAGR={a.get('cagr_pct', 0):+.1f}%")
     console.print(f"  Logged → .data/paper_trades.jsonl")
+
+
+@app.command("paper-compare")
+def paper_compare(
+    data: str = typer.Option(..., help="OHLCV parquet"),
+    strategies: str = typer.Option("depth_charge,fusion_v2", help="Comma-separated strategy ids"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    days: int = typer.Option(60, help="Forward window in days"),
+):
+    """Compare paper-forward results across strategies (no re-tune)."""
+    from exec.paper_trader import run_paper_forward
+
+    df = _load_dataframe(data)
+    table = Table(title=f"Paper Forward {days}d (frozen configs, no re-tune)")
+    table.add_column("strategy")
+    table.add_column("trades")
+    table.add_column("pnl")
+    table.add_column("win_rate")
+    table.add_column("expectancy_r")
+    table.add_column("cagr")
+
+    for sid in [s.strip() for s in strategies.split(",") if s.strip()]:
+        try:
+            r = run_paper_forward(df, sid, tf, min_days=days, use_regime_gate=False)
+            m = r["metrics"]
+            a = r["account"]
+            table.add_row(
+                sid,
+                str(r["n_trades"]),
+                f"{m.get('total_pnl', 0):+.4f}",
+                f"{m.get('win_rate', 0):.0%}",
+                f"{m.get('expectancy_r', a.get('expectancy_r', 0)):.3f}",
+                f"{a.get('cagr_pct', 0):+.1f}%",
+            )
+        except Exception as e:
+            table.add_row(sid, "—", "error", str(e)[:40], "—", "—")
+    console.print(table)
+
+
+@app.command("walk-forward")
+def walk_forward_cmd(
+    data: str = typer.Option(..., help="OHLCV parquet"),
+    strategies: str = typer.Option("mean_reversion,depth_charge", help="Comma-separated ids"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    test_days: int = typer.Option(60, help="OOS window per fold (days)"),
+    step_days: int = typer.Option(60, help="Step between folds (days); =test_days → non-overlapping"),
+    warmup_days: int = typer.Option(14, help="Indicator warmup before each test window"),
+    last_days: int = typer.Option(0, help="Use only trailing N days (0 = full file)"),
+    auto_sanity: bool = typer.Option(False, "--auto-sanity", help="Run params sanity audit before walk-forward"),
+    sanity_normalize: bool = typer.Option(True, "--sanity-normalize/--no-sanity-normalize", help="When auto-sanity is enabled, normalize configs"),
+    export: str = typer.Option("", help="Optional JSON export path"),
+):
+    """
+    Rolling walk-forward on frozen configs (no re-tune).
+
+    Each fold: warmup + test context for features, metrics only on test window.
+    """
+    from backtest.walk_forward import walk_forward_report, slice_last_days
+    from backtest.param_sanity import list_config_files, analyze_file, normalize_file
+    import json
+
+    if auto_sanity:
+        sanity_paths = list_config_files(tf)
+        if sanity_paths:
+            bad = 0
+            changed = 0
+            for pth in sanity_paths:
+                res = normalize_file(pth, tf) if sanity_normalize else analyze_file(pth, tf)
+                if res is None:
+                    continue
+                if not res.valid:
+                    bad += 1
+                if res.changed:
+                    changed += 1
+            console.print(
+                f"[cyan]Auto-sanity ({tf.value})[/cyan] files={len(sanity_paths)} "
+                f"warnings={bad} changed={changed}"
+            )
+        else:
+            console.print(f"[yellow]Auto-sanity: no optimized config files for {tf.value}[/yellow]")
+
+    df = _load_dataframe(data)
+    if last_days > 0:
+        df = slice_last_days(df, last_days, tf)
+
+    ids = [s.strip() for s in strategies.split(",") if s.strip()]
+    report = walk_forward_report(df, ids, tf, test_days, step_days, warmup_days)
+    p = report["params"]
+
+    console.print(
+        f"[cyan]Walk-forward[/cyan] {p['range']} | {p['bars']} bars | "
+        f"test={test_days}d step={step_days}d warmup={warmup_days}d | {tf.value}"
+    )
+
+    for sid, summary in report["summaries"].items():
+        console.print(f"\n[bold]{sid}[/bold] — {summary['folds']} folds")
+        console.print(
+            f"  trades={summary['total_trades']} sum_pnl={summary['sum_pnl']:+.4f} "
+            f"median_pnl={summary['median_pnl']:+.4f} "
+            f"positive_folds={summary['positive_folds']}/{summary['folds']}"
+        )
+        console.print(
+            f"  median_wr={summary['median_win_rate']:.0%} "
+            f"median_expR={summary['median_expectancy_r']:.3f}"
+        )
+
+    table = Table(title="Per-fold detail")
+    table.add_column("strategy")
+    table.add_column("fold")
+    table.add_column("period")
+    table.add_column("trades")
+    table.add_column("pnl")
+    table.add_column("wr")
+    table.add_column("expR")
+
+    for row in report["folds"]:
+        period = row["test_start"][:10] + "…" + row["test_end"][:10]
+        table.add_row(
+            row["strategy_id"],
+            str(row["fold"]),
+            period,
+            str(row["trades"]),
+            f"{row['total_pnl']:+.4f}",
+            f"{row['win_rate']:.0%}",
+            f"{row['expectancy_r']:.3f}",
+        )
+    console.print(table)
+
+    if export:
+        with open(export, "w") as f:
+            json.dump(report, f, indent=2)
+        console.print(f"[green]✓ Exported → {export}[/green]")
+
+
+@app.command("fetch-bars")
+def fetch_bars(
+    ticker: str = typer.Option("X:ADAUSD"),
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    from_date: str = typer.Option("2025-06-15", "--from"),
+    to_date: str = typer.Option("2026-06-15", "--to"),
+    force: bool = typer.Option(False),
+):
+    """Download and cache bars for any timeframe (e.g. 5m / 15m research slices)."""
+
+    async def _run():
+        dp = DataProvider()
+        try:
+            df = await dp.fetch(ticker, tf, from_date, to_date, force_download=force)
+            console.print(f"[green]✓ Cached {len(df)} bars[/green] | {df.index[0]} → {df.index[-1]}")
+        finally:
+            await dp.close()
+
+    asyncio.run(_run())
+
+
+@app.command("params-sanity")
+def params_sanity(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    normalize: bool = typer.Option(False, help="Normalize proxy windows to timeframe defaults"),
+):
+    """
+    Audit (and optionally normalize) optimized strategy configs for timeframe consistency.
+    """
+    from backtest.param_sanity import list_config_files, analyze_file, normalize_file
+
+    paths = list_config_files(tf)
+    if not paths:
+        console.print(f"[yellow]No optimized config files for {tf.value}[/yellow]")
+        return
+
+    table = Table(title=f"Parameter Sanity ({tf.value})")
+    table.add_column("strategy")
+    table.add_column("file")
+    table.add_column("status")
+    table.add_column("details")
+
+    bad = 0
+    changed = 0
+    for p in paths:
+        res = normalize_file(p, tf) if normalize else analyze_file(p, tf)
+        if res is None:
+            continue
+        status = "OK" if res.valid else "WARN"
+        if not res.valid:
+            bad += 1
+        if res.changed:
+            changed += 1
+            status = "CHANGED"
+        details = "; ".join(w.replace("⚠ ", "") for w in res.warnings[:2]) if res.warnings else "-"
+        table.add_row(res.strategy_id, p.name, status, details[:120])
+
+    console.print(table)
+    if normalize:
+        console.print(f"[green]Normalized files:[/green] {changed}")
+    console.print(f"[cyan]Warnings:[/cyan] {bad}")
+
+
+@app.command("bootstrap-configs")
+def bootstrap_configs_cmd(
+    source_tf: Timeframe = typer.Option("15m", "--from-tf"),
+    target_tf: Timeframe = typer.Option("5m", "--to-tf"),
+    normalize: bool = typer.Option(True, help="Run params-sanity normalize on target timeframe after bootstrap"),
+):
+    """
+    Bootstrap optimized configs from one timeframe to another.
+
+    Core windows are time-scaled; thresholds are preserved.
+    """
+    from backtest.param_sanity import bootstrap_configs
+
+    created = bootstrap_configs(source_tf, target_tf)
+    if not created:
+        console.print(f"[yellow]No source configs for {source_tf.value}[/yellow]")
+        return
+
+    table = Table(title=f"Bootstrapped configs {source_tf.value} → {target_tf.value}")
+    table.add_column("file")
+    for p in created:
+        table.add_row(p.name)
+    console.print(table)
+    console.print(f"[green]Created:[/green] {len(created)}")
+
+    if normalize:
+        params_sanity(tf=target_tf, normalize=True)
 
 
 def _load_dataframe(path: str) -> pd.DataFrame:

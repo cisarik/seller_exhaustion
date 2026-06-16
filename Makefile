@@ -28,6 +28,9 @@ run:
 monitor:
 	poetry run python cli.py paper-scheduler --tf $(TF) --data $(DATA) --refresh
 
+validate:
+	poetry run python cli.py validate-candidate --tf $(TF) --data $(DATA)
+
 lint:
 	poetry run ruff check .
 

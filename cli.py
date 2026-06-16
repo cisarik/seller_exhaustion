@@ -859,6 +859,124 @@ def paper_monitor(
     console.print(f"[bold {color}]{verdict_message(stats)}[/bold {color}]\n")
 
 
+@app.command("validate-candidate")
+def validate_candidate(
+    tf: Timeframe = typer.Option("15m", "--tf"),
+    data: str = typer.Option("", help="Parquet for cost-stress forward test"),
+    runs: str = typer.Option("", help="Runs jsonl (default .data/top_candidate_runs_<tf>.jsonl)"),
+    candidate: str = typer.Option("", help="Top candidate json"),
+    forward_days: int = typer.Option(60, help="Forward window for cost stress"),
+    export: str = typer.Option("", help="Export JSON report (default .data/validation_<tf>.json)"),
+):
+    """
+    Full execution validation: loop stats + streaks + fee stress + bootstrap + kill-switch.
+
+    Use before HERMES paper/live. Answers: does edge survive costs and recent degradation?
+    """
+    import json
+    from pathlib import Path
+
+    from backtest.validation import build_validation_report
+    from exec.telemetry import log_event
+
+    cand_path = Path(candidate) if candidate else Path(f".data/top_candidate_{tf.value}.json")
+    runs_path = Path(runs) if runs else Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    out_path = Path(export) if export else Path(f".data/validation_{tf.value}.json")
+
+    if not runs_path.exists():
+        console.print(f"[red]Missing runs log: {runs_path}[/red]")
+        console.print("[yellow]Run: paper-forward-top --tf {tf} --loop --clear[/yellow]")
+        raise typer.Exit(1)
+
+    records = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
+    strategy_id = records[0].get("strategy_id", "?")
+    if cand_path.exists():
+        strategy_id = json.loads(cand_path.read_text()).get("strategy_id", strategy_id)
+
+    df = None
+    data_path = data
+    if not data_path and cand_path.exists():
+        data_path = str(json.loads(cand_path.read_text()).get("source_data", ""))
+    if data_path:
+        try:
+            df = _load_dataframe(data_path)
+        except Exception as e:
+            console.print(f"[yellow]Cost stress skipped: {e}[/yellow]")
+
+    report = build_validation_report(
+        strategy_id=strategy_id,
+        tf=tf,
+        records=records,
+        df=df,
+        loop_stats={"runs_file": str(runs_path)},
+        forward_days=forward_days,
+    )
+
+    # Loop stability (from paper_stats)
+    ls = report.loop_stats
+    console.print(f"\n[bold]Validation[/bold] {strategy_id} @ {tf.value}")
+    stab = Table(title="Loop stability")
+    stab.add_column("metric")
+    stab.add_column("value")
+    for k, v in [
+        ("Verdict", ls.get("verdict_level", "?")),
+        ("Positive loops", f"{ls.get('positive_pct', 0):.0%}"),
+        ("Sum PnL", f"{ls.get('sum_pnl', 0):+.4f}"),
+        ("Active median exp R", f"{ls.get('median_exp_active', 0):.3f}"),
+        ("Checks", f"{ls.get('passed_checks', 0)}/{ls.get('total_checks', 0)}"),
+    ]:
+        stab.add_row(k, str(v))
+    console.print(stab)
+
+    st = report.streaks
+    console.print(
+        f"[cyan]Streaks[/cyan]: max loss streak={st.max_consecutive_losses} | "
+        f"last {st.recent_n} loops PnL={st.recent_n_sum_pnl:+.4f} | "
+        f"degrading={'yes' if st.degrading else 'no'}"
+    )
+
+    if report.cost_stress:
+        stress = Table(title=f"Cost stress ({forward_days}d forward)")
+        stress.add_column("mult")
+        stress.add_column("fee+ slip bp")
+        stress.add_column("trades")
+        stress.add_column("pnl")
+        stress.add_column("ok")
+        for r in report.cost_stress:
+            stress.add_row(
+                f"{r.multiplier:.1f}×",
+                f"{r.fee_bp:.1f}+{r.slippage_bp:.1f}",
+                str(r.n_trades),
+                f"{r.total_pnl:+.4f}",
+                "[green]✓[/green]" if r.profitable else "[red]✗[/red]",
+            )
+        console.print(stress)
+
+    if report.bootstrap:
+        b = report.bootstrap
+        console.print(
+            f"[cyan]Bootstrap[/cyan] ({b.n_samples} samples): "
+            f"mean={b.pnl_mean:+.4f} 5–95%=[{b.pnl_p5:+.4f}, {b.pnl_p95:+.4f}] "
+            f"P(profit)={b.prob_positive:.0%}"
+        )
+
+    ks_color = {"OK": "green", "CAUTION": "yellow", "PAUSE": "red", "RETUNE": "red"}[report.kill_switch]
+    ev_color = {"READY": "green", "CAUTION": "yellow", "BLOCKED": "red"}[report.execution_verdict]
+    console.print(f"\n[bold {ks_color}]Kill-switch: {report.kill_switch}[/bold {ks_color}]")
+    for reason in report.kill_reasons:
+        console.print(f"  • {reason}")
+    console.print(f"[bold {ev_color}]Execution verdict: {report.execution_verdict}[/bold {ev_color}]\n")
+
+    out_path.parent.mkdir(exist_ok=True)
+    out_path.write_text(json.dumps(report.to_dict(), indent=2))
+    console.print(f"[green]✓ Report → {out_path}[/green]")
+
+    log_event("validation", {"timeframe": tf.value, "report": report.to_dict()})
+
+    if report.execution_verdict == "BLOCKED":
+        raise typer.Exit(2)
+
+
 @app.command("hermes-export")
 def hermes_export(
     tf: Timeframe = typer.Option("15m", "--tf"),
@@ -987,6 +1105,15 @@ def paper_scheduler(
 
     if export_hermes and cand_path.exists():
         hermes_export(tf=tf, candidate=str(cand_path))
+
+    # Execution validation after monitor cycle
+    runs_path = Path(f".data/top_candidate_runs_{tf.value}.jsonl")
+    if runs_path.exists() and data:
+        try:
+            validate_candidate(tf=tf, data=data, runs=str(runs_path), candidate=str(cand_path))
+        except typer.Exit as e:
+            if e.exit_code == 2:
+                console.print("[yellow]Scheduler: execution BLOCKED — skip HERMES until resolved[/yellow]")
 
 
 @app.command("paper-compare")

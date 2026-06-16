@@ -45,7 +45,26 @@ poetry run python cli.py hermes-export --tf 15m
 
 **Top candidate (Jun 2026)**: `fusion_v2` 15m — GO on loop stability (see BRAINSTORMING.md).
 
-Use `make test` / `make run ARGS="..."` to avoid pyenv py2app warning noise (see AGENTS.md v4.1).
+### Validation & execution (v4.2)
+
+Before HERMES paper — prove edge survives **costs** and **recent degradation**:
+
+```bash
+poetry run python cli.py validate-candidate --tf 15m \
+  --data .data/X_ADAUSD_2024-01-01_2026-06-15_15minute.parquet
+```
+
+Report: `.data/validation_15m.json` + telemetry `.data/hermes_telemetry.jsonl`
+
+| Check | Meaning |
+|-------|---------|
+| Cost stress 2× | Edge after doubled fees/slippage |
+| Streaks | Consecutive losing loops |
+| Bootstrap | P(profit) from loop resampling |
+| Kill-switch | OK / CAUTION / PAUSE / RETUNE |
+| Execution verdict | READY / CAUTION / BLOCKED |
+
+`paper-scheduler --refresh` runs validation automatically when `--data` is set.
 
 ---
 

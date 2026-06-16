@@ -638,7 +638,31 @@ def walk_forward_cmd(
         f"test={test_days}d step={step_days}d warmup={warmup_days}d | {tf.value}"
     )
 
-    for sid, summary in report["summaries"].items():
+    ranked = sorted(
+        report["summaries"].items(),
+        key=lambda kv: kv[1].get("robust_profit_score", -1e9),
+        reverse=True,
+    )
+
+    rank_table = Table(title="Strategy ranking (primary sort: robust_score)")
+    rank_table.add_column("rank")
+    rank_table.add_column("strategy")
+    rank_table.add_column("robust_score")
+    rank_table.add_column("sum_pnl")
+    rank_table.add_column("positive_folds")
+    rank_table.add_column("trades")
+    for idx, (sid, summary) in enumerate(ranked, start=1):
+        rank_table.add_row(
+            str(idx),
+            sid,
+            f"{summary['robust_profit_score']:+.4f}",
+            f"{summary['sum_pnl']:+.4f}",
+            f"{summary['positive_folds']}/{summary['folds']}",
+            str(summary["total_trades"]),
+        )
+    console.print(rank_table)
+
+    for sid, summary in ranked:
         console.print(f"\n[bold]{sid}[/bold] — {summary['folds']} folds")
         console.print(
             f"  trades={summary['total_trades']} sum_pnl={summary['sum_pnl']:+.4f} "
@@ -672,6 +696,35 @@ def walk_forward_cmd(
             f"{row['expectancy_r']:.3f}",
         )
     console.print(table)
+
+    # Auto-export top candidate for paper-forward
+    if ranked:
+        import json
+        from pathlib import Path
+
+        top_sid, top_summary = ranked[0]
+        top_payload = {
+            "strategy_id": top_sid,
+            "timeframe": tf.value,
+            "robust_profit_score": top_summary["robust_profit_score"],
+            "sum_pnl": top_summary["sum_pnl"],
+            "positive_folds": top_summary["positive_folds"],
+            "folds": top_summary["folds"],
+            "total_trades": top_summary["total_trades"],
+            "source_data": data,
+            "paper_forward_command": (
+                f"poetry run python cli.py paper-forward "
+                f"--data {data} --strategy {top_sid} --tf {tf.value} --days {test_days}"
+            ),
+        }
+        Path(".data").mkdir(exist_ok=True)
+        top_path = Path(f".data/top_candidate_{tf.value}.json")
+        with top_path.open("w") as f:
+            json.dump(top_payload, f, indent=2)
+        console.print(
+            f"[green]✓ Auto-exported top candidate:[/green] {top_sid} "
+            f"(robust_score={top_summary['robust_profit_score']:+.4f}) → {top_path}"
+        )
 
     if export:
         with open(export, "w") as f:
